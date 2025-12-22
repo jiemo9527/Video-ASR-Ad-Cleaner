@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Version: 10.8 (Feature: Delete dirty files & Fix local log)
+# Version: 10.9 (Feature: Path Mapping & Delete Dirty Files)
 #
 
 # ================= 🔧 核心配置 =================
@@ -8,8 +8,9 @@ PYTHON_ENV_PATH="/usr/bin/python3"
 PYTHON_SCRIPT_PATH="/root/.aria2c/scan_audio.py"
 PYTHON_LOCAL_SCRIPT_PATH="/root/.aria2c/scan_audio_local.py"
 
-export TG_BOT_TOKEN="123:xxx"
-export TG_CHAT_ID="1234"
+# ⚠️ 请在此处填入你的真实信息
+export TG_BOT_TOKEN="your_bot_token_here"
+export TG_CHAT_ID="your_chat_id_here"
 # ===============================================
 
 TASK_GID=$1
@@ -136,6 +137,7 @@ audio_ad_check_and_act() {
 if [ "$TASK_FILE_COUNT" -eq 1 ]; then
     CURRENT_FILE_NAME=$(basename "$LOCAL_PATH")
 
+    # 确保退出时清理临时文件
     trap 'rm -f "$SCAN_REASON_FILE"' EXIT
 
     if echo "$CURRENT_FILE_NAME" | grep -qE "\.(mp4|mkv|avi|mov|flv|wmv|ts|m4v|webm)$"; then
@@ -161,9 +163,32 @@ if [ "$TASK_FILE_COUNT" -eq 1 ]; then
         fi
     fi
 
-    # 上传
-    REMOTE_PATH="s25:${CURRENT_FILE_NAME}"
-    RETRY=0; RETRY_NUM=3
+    # ================= 动态路径匹配逻辑 =================
+    # 获取原始下载路径的父文件夹名称
+    # 使用 TASK_PATH 而非 LOCAL_PATH，确保即使文件被清洗移动也能识别原目录
+    ORIGIN_DIR=$(dirname "$TASK_PATH")
+    PARENT_FOLDER_NAME=$(basename "$ORIGIN_DIR")
+
+    # 1. 设置默认远程端
+    RCLONE_REMOTE="s25"
+
+    # 2. 根据父文件夹名称切换 Remote
+    if [[ "$PARENT_FOLDER_NAME" == "x25" ]]; then
+        RCLONE_REMOTE="x25"
+    elif [[ "$PARENT_FOLDER_NAME" == "s25" ]]; then
+        RCLONE_REMOTE="s25"
+    fi
+
+    log_message "INFO" "📂 识别到父目录: [${PARENT_FOLDER_NAME}] -> 目标网盘: [${RCLONE_REMOTE}]"
+
+    # 3. 组合最终上传路径
+    REMOTE_PATH="${RCLONE_REMOTE}:${CURRENT_FILE_NAME}"
+    # ===================================================
+
+    # 🔥 修正：定义重试次数变量
+    RETRY=0
+    RETRY_NUM=3
+
     while [ ${RETRY} -le ${RETRY_NUM} ]; do
         rclone moveto -v "$LOCAL_PATH" "$REMOTE_PATH" --ignore-size
         if [ $? -eq 0 ]; then
@@ -171,7 +196,7 @@ if [ "$TASK_FILE_COUNT" -eq 1 ]; then
             break
         else
             RETRY=$((RETRY+1))
-            log_message "ERROR" "上传重试 $RETRY..."
+            log_message "ERROR" "上传重试 $RETRY / $RETRY_NUM ..."
             sleep 3
         fi
     done
