@@ -54,14 +54,19 @@ AUDIO_BLACKLIST = [
 ]
 
 SUB_META_BLACKLIST = [
-    "QQ", "qq", "q群", "http", "www", "公众号", "weixin",
-    "群：", "群:", "TG@", "Telegram", "资源群", "加群",
-    "微信号", "微信群", "微博", "link3.cc", "ysepan.com", "GyWEB","Tacit0924",
-    "Qqun", "hehehe", ".com", "PTerWEB", "b站", "字幕组", "panclub",
-    "BT之家", "荣誉出品", "资源站", "资源网", "我堡牛皮", "发布页",
-    "压制", "CMCT", "Byakuya", "ed3000", "yunpantv", "KKYY", "盘酱酱",
-    "TREX", "£yhq@tv", "1000fr", "HDCTV", "HHWEB", "ADWeb", "PanWEB",
-    "BestWEB", "大视界"
+    #基础社交与链接
+    "http", "www", "weixin", "Telegram", "TG@", "TG频道@",
+    "群：", "群:", "资源群", "加群", "微信号", "微信群",
+    #社交平台与工具
+    "QQ", "qq", "q群", "公众号", "微博", "b站", "Tacit0924",
+    #关键词与短语
+    "by", "整理", "无人在意做自己", "资源站", "资源网",
+    "发布页", "压制", "荣誉出品", "字幕组", "我堡牛皮",
+    #特定站点与标识符
+    "link3.cc", "ysepan.com", "GyWEB", "Qqun", "hehehe", ".com",
+    "PTerWEB", "panclub", "BT之家", "CMCT", "Byakuya", "ed3000",
+    "yunpantv", "KKYY", "盘酱酱", "TREX", "£yhq@tv", "1000fr",
+    "HDCTV", "HHWEB", "ADWeb", "PanWEB", "BestWEB"
 ]
 
 GLOBAL_TAGS_TO_CHECK = ["genre", "comment", "description", "synopsis", "title", "artist", "album", "copyright"]
