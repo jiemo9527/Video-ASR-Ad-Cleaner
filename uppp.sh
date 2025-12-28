@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 #
-# Version: 10.9 (Feature: Path Mapping & Delete Dirty Files)
-#
-
+# Version: 15.3 (Fix: Default to s25 for root folder files)
 # ================= 🔧 核心配置 =================
 PYTHON_ENV_PATH="/usr/bin/python3"
 PYTHON_SCRIPT_PATH="/root/.aria2c/scan_audio.py"
 PYTHON_LOCAL_SCRIPT_PATH="/root/.aria2c/scan_audio_local.py"
 
-# ⚠️ 请在此处填入你的真实信息
-export TG_BOT_TOKEN="your_bot_token_here"
-export TG_CHAT_ID="your_chat_id_here"
+# ⚠️ 填入你的 Token
+export TG_BOT_TOKEN="TG_BOT_TOKEN"
+export TG_CHAT_ID="TG_CHAT_ID"
 # ===============================================
 
 TASK_GID=$1
@@ -18,10 +16,8 @@ TASK_FILE_COUNT=$2
 TASK_PATH=$3
 CURRENT_FILE_NAME=""
 LOCAL_PATH="$TASK_PATH"
-CLEANED_FILE_FLAG=0
-
-# 🔥 定义用于接收 Python 扫描结果的临时文件
 export SCAN_REASON_FILE="/tmp/scan_reason_$$.txt"
+export RCLONE_LOG_FILE="/tmp/rclone_error_$$.log"
 
 log_message() {
     local level="$1"
@@ -37,15 +33,12 @@ SEND_TG_MSG() {
     local msg="$1"
     if [[ -n "$TG_BOT_TOKEN" && -n "$TG_CHAT_ID" ]]; then
         curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-            -d chat_id="${TG_CHAT_ID}" \
-            -d text="$msg" >/dev/null
+            -d chat_id="${TG_CHAT_ID}" -d text="$msg" >/dev/null
     fi
 }
 
 has_sensitive_subtitle() {
-    local file_path="$1"
-    local result
-    result=$(ffprobe -v error -select_streams s -show_entries stream_tags=title,handler_name -of default=noprint_wrappers=1:nokey=1 "$file_path")
+    local result=$(ffprobe -v error -select_streams s -show_entries stream_tags=title,handler_name -of default=noprint_wrappers=1:nokey=1 "$1")
     if echo "$result" | grep -qE "GyWEB|www\.|.com|微信|加群|招募|公众号"; then
         log_message "WARN" "🚨 发现敏感字幕轨道"
         return 0
@@ -55,57 +48,43 @@ has_sensitive_subtitle() {
 
 remove_subtitle_track() {
     local input="$1"
-    local dir_name=$(dirname "$input")
-    local base_name=$(basename "$input")
-    local ext="${base_name##*.}"
-    local name="${base_name%.*}"
-    local output="${dir_name}/${name}_clean.${ext}"
-
+    local ext="${input##*.}"
+    local output="${input%.*}_clean.${ext}"
     ffmpeg -y -i "$input" -map 0 -map -0:s -c copy "$output" >/dev/null 2>&1
-    if [ $? -eq 0 ] && [ -s "$output" ]; then
-        echo "$output"
-        return 0
-    else
-        return 1
-    fi
+    if [ $? -eq 0 ] && [ -s "$output" ]; then echo "$output"; return 0; else return 1; fi
 }
 
 audio_ad_check_and_act() {
     local target_file="$1"
-
     echo "" > "$SCAN_REASON_FILE"
 
-    # ---------------- Step 1: Cloud Scan ----------------
+    # Step 1: Cloud Scan
     $PYTHON_ENV_PATH -u "$PYTHON_SCRIPT_PATH" "$target_file" 2>&1 | \
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         if echo "$line" | grep -qE "FATAL.*🚫"; then continue; fi
         log_message "INFO" "[PY] $line"
     done
+    local code_cloud=${PIPESTATUS[0]}
 
-    local exit_code_cloud=${PIPESTATUS[0]}
-
-    if [ $exit_code_cloud -eq 1 ]; then
-        local reason="未知原因"
-        if [ -s "$SCAN_REASON_FILE" ]; then reason=$(cat "$SCAN_REASON_FILE"); fi
-
+    if [ $code_cloud -eq 1 ]; then
+        local reason=$(cat "$SCAN_REASON_FILE")
         log_message "WARN" "⛔ [Cloud] 拦截到脏文件: $reason"
-        SEND_TG_MSG "🚫 [Cloud] 发现违规音频: ${CURRENT_FILE_NAME}%0A--------------------------------%0A🔍 原因: ${reason}"
+        SEND_TG_MSG "🚫 [Cloud] 发现违规音频: ${CURRENT_FILE_NAME}%0A原因是: ${reason}"
         return 1
-
-    elif [ $exit_code_cloud -eq 0 ]; then
+    elif [ $code_cloud -eq 0 ]; then
         return 0
     else
-        log_message "WARN" "⚠️ [Cloud] 异常 (Code: $exit_code_cloud)，切换本地..."
+        log_message "WARN" "⚠️ [Cloud] 异常 (Code: $code_cloud)，切换本地..."
     fi
 
-    # ---------------- Step 2: Local Fallback ----------------
-    if [ ! -f "$PYTHON_LOCAL_SCRIPT_PATH" ]; then
-         log_message "ERROR" "❌ 本地脚本缺失"
-         return 2
-    fi
-
+    # Step 2: Local Fallback
+    if [ ! -f "$PYTHON_LOCAL_SCRIPT_PATH" ]; then return 2; fi
     log_message "INFO" "🔄 启动本地模型扫描"
+
+    # 缓冲：给系统 3 秒钟回收内存
+    sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+    sleep 3
 
     $PYTHON_ENV_PATH -u "$PYTHON_LOCAL_SCRIPT_PATH" "$target_file" 2>&1 | \
     while IFS= read -r line; do
@@ -113,93 +92,123 @@ audio_ad_check_and_act() {
         if echo "$line" | grep -qE "FATAL.*🚫"; then continue; fi
         log_message "INFO" "[Local] $line"
     done
+    local code_local=${PIPESTATUS[0]}
 
-    local exit_code_local=${PIPESTATUS[0]}
-
-    if [ $exit_code_local -eq 1 ]; then
-        local reason="未知原因"
-        if [ -s "$SCAN_REASON_FILE" ]; then reason=$(cat "$SCAN_REASON_FILE"); fi
-
+    if [ $code_local -eq 1 ]; then
+        local reason=$(cat "$SCAN_REASON_FILE")
         log_message "WARN" "⛔ [Local] 拦截到脏文件: $reason"
-        SEND_TG_MSG "🚫 [Local] 发现违规音频: ${CURRENT_FILE_NAME}%0A--------------------------------%0A🔍 原因: ${reason}"
+        SEND_TG_MSG "🚫 [Local] 发现违规音频: ${CURRENT_FILE_NAME}%0A原因是: ${reason}"
         return 1
-
-    elif [ $exit_code_local -eq 0 ]; then
+    elif [ $code_local -eq 0 ]; then
         return 0
     else
-        log_message "ERROR" "❌ [Fatal] 双重扫描失败"
+        log_message "ERROR" "❌ [Local] 扫描脚本出错 (Code: $code_local)"
         SEND_TG_MSG "⚠️ [扫描异常] 跳过文件: ${CURRENT_FILE_NAME}"
         return 2
     fi
 }
 
-# ================= 主流程 =================
 if [ "$TASK_FILE_COUNT" -eq 1 ]; then
     CURRENT_FILE_NAME=$(basename "$LOCAL_PATH")
-
-    # 确保退出时清理临时文件
-    trap 'rm -f "$SCAN_REASON_FILE"' EXIT
+    trap 'rm -f "$SCAN_REASON_FILE" "$RCLONE_LOG_FILE"' EXIT
 
     if echo "$CURRENT_FILE_NAME" | grep -qE "\.(mp4|mkv|avi|mov|flv|wmv|ts|m4v|webm)$"; then
-
         if has_sensitive_subtitle "$LOCAL_PATH"; then
             clean_file=$(remove_subtitle_track "$LOCAL_PATH")
             if [ $? -eq 0 ] && [ -n "$clean_file" ]; then
                 rm -f "$LOCAL_PATH"
                 LOCAL_PATH="$clean_file"
                 CURRENT_FILE_NAME=$(basename "$LOCAL_PATH")
-                CLEANED_FILE_FLAG=1
-                log_message "INFO" "✅ 字幕已移除，新文件: ${CURRENT_FILE_NAME}"
+                log_message "INFO" "✅ [Shell] 字幕已移除，更新路径: ${CURRENT_FILE_NAME}"
             fi
         fi
 
         audio_ad_check_and_act "$LOCAL_PATH"
-        # 🔥 修改点：检测失败后，执行删除操作
-        if [ $? -ne 0 ]; then
-            log_message "WARN" "⚠️ 扫描未通过，删除文件并停止上传"
+        EXIT_CODE=$?
+
+        if [ $EXIT_CODE -eq 1 ]; then
+            log_message "WARN" "🚨 判定为违规文件，执行删除!"
             rm -f "$LOCAL_PATH"
-            # 如果是清洗过的文件，原文件已经在清洗步骤被替换或删除了，这里再次确保清理
+            f_base="${LOCAL_PATH%.*}"
+            f_base_clean=$(echo "$f_base" | sed 's/_clean$//')
+            rm -f "${f_base_clean}_clean.${LOCAL_PATH##*.}"
             exit 1
+        elif [ $EXIT_CODE -ne 0 ]; then
+            log_message "ERROR" "⚠️ 检测脚本发生系统错误 (Code: $EXIT_CODE)，保留文件但不上传。"
+            exit 1
+        fi
+
+        # Sync Logic
+        DIR=$(dirname "$LOCAL_PATH")
+        NAME=$(basename "$LOCAL_PATH" | sed 's/\.[^.]*$//')
+        EXT="${LOCAL_PATH##*.}"
+        CLEAN_PATH="${DIR}/${NAME}_clean.${EXT}"
+
+        if [ ! -f "$LOCAL_PATH" ] && [ -f "$CLEAN_PATH" ]; then
+            LOCAL_PATH="$CLEAN_PATH"
+            CURRENT_FILE_NAME=$(basename "$LOCAL_PATH")
+
+        elif [ -f "$CLEAN_PATH" ]; then
+            LOCAL_PATH="$CLEAN_PATH"
+            CURRENT_FILE_NAME=$(basename "$LOCAL_PATH")
+            log_message "INFO" "🔄 [Sync] 发现净化文件，优先使用"
         fi
     fi
 
-    # ================= 动态路径匹配逻辑 =================
-    # 获取原始下载路径的父文件夹名称
-    # 使用 TASK_PATH 而非 LOCAL_PATH，确保即使文件被清洗移动也能识别原目录
+    # ================= 🚀 Upload 逻辑 (智能兜底版) =================
+
     ORIGIN_DIR=$(dirname "$TASK_PATH")
     PARENT_FOLDER_NAME=$(basename "$ORIGIN_DIR")
 
-    # 1. 设置默认远程端
-    RCLONE_REMOTE="s25"
-
-    # 2. 根据父文件夹名称切换 Remote
-    if [[ "$PARENT_FOLDER_NAME" == "x25" ]]; then
-        RCLONE_REMOTE="x25"
-    elif [[ "$PARENT_FOLDER_NAME" == "s25" ]]; then
+    # 🔥🔥🔥 判定逻辑修正 🔥🔥🔥
+    # 如果父目录是 downloads (说明在根目录)，则默认去 s25
+    if [[ "$PARENT_FOLDER_NAME" == "downloads" ]]; then
         RCLONE_REMOTE="s25"
+        log_message "INFO" "📂 检测到文件位于根目录，默认目标: [s25]"
+    else
+        # 否则使用父目录名作为 Remote Name
+        RCLONE_REMOTE="$PARENT_FOLDER_NAME"
+        log_message "INFO" "📂 匹配父目录[${RCLONE_REMOTE}]"
     fi
 
-    log_message "INFO" "📂 识别到父目录: [${PARENT_FOLDER_NAME}] -> 目标网盘: [${RCLONE_REMOTE}]"
-
-    # 3. 组合最终上传路径
     REMOTE_PATH="${RCLONE_REMOTE}:${CURRENT_FILE_NAME}"
-    # ===================================================
 
-    # 🔥 修正：定义重试次数变量
+    if [ -f "$LOCAL_PATH" ]; then
+        FILE_SIZE=$(ls -lh "$LOCAL_PATH" | awk '{print $5}')
+        log_message "INFO" "📊 准备上传(大小: $FILE_SIZE)"
+    else
+        log_message "ERROR" "❌ 致命错误: 要上传的文件不存在! ($LOCAL_PATH)"
+        exit 1
+    fi
+
+    sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+    sleep 2
+
     RETRY=0
-    RETRY_NUM=3
+    while [ ${RETRY} -le 3 ]; do
+        # 保留 log-level ERROR, 移除 -v
+        rclone moveto "$LOCAL_PATH" "$REMOTE_PATH" --ignore-size --log-file="$RCLONE_LOG_FILE" --log-level ERROR
 
-    while [ ${RETRY} -le ${RETRY_NUM} ]; do
-        rclone moveto -v "$LOCAL_PATH" "$REMOTE_PATH" --ignore-size
         if [ $? -eq 0 ]; then
             log_message "INFO" "✅ 上传成功"
             break
-        else
-            RETRY=$((RETRY+1))
-            log_message "ERROR" "上传重试 $RETRY / $RETRY_NUM ..."
-            sleep 3
         fi
+
+        if [ ${RETRY} -ge 3 ]; then
+            if [ -f "$RCLONE_LOG_FILE" ]; then
+                RCLONE_ERR=$(tail -n 3 "$RCLONE_LOG_FILE")
+                log_message "ERROR" "❌ 上传失败! Rclone 报错: ${RCLONE_ERR}"
+            else
+                log_message "ERROR" "❌ 上传失败 (无日志生成)"
+            fi
+            break
+        fi
+
+        RETRY=$((RETRY+1))
+        log_message "WARN" "上传失败，等待 3s 后重试 ($RETRY / 3) ..."
+        sleep 3
     done
 
     rmdir "$TASK_PATH" 2>/dev/null
+    if [ "$LOCAL_PATH" != "$TASK_PATH" ]; then rmdir "$(dirname "$TASK_PATH")" 2>/dev/null; fi
 fi

@@ -9,6 +9,7 @@ import time
 import signal
 import hashlib
 import random
+import fcntl
 
 
 # ================= 📦 依赖库自动检测与安装 =================
@@ -43,6 +44,9 @@ MODEL_NAME = "FunAudioLLM/SenseVoiceSmall"
 
 DEBUG_MODE = False
 SANITIZE_METADATA = True
+# 🔥 新增：字幕检测开关 (True: 开启, False: 关闭)
+CHECK_SUBTITLES = True
+
 CMD_TIMEOUT = 120
 MAX_API_RETRIES = 4
 VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.ts', '.m4v', '.webm'}
@@ -54,15 +58,18 @@ AUDIO_BLACKLIST = [
 ]
 
 SUB_META_BLACKLIST = [
-    #基础社交与链接
+    # 基础社交与链接
     "http", "www", "weixin", "Telegram", "TG@", "TG频道@",
     "群：", "群:", "资源群", "加群", "微信号", "微信群",
-    #社交平台与工具
+
+    # 社交平台与工具
     "QQ", "qq", "q群", "公众号", "微博", "b站", "Tacit0924",
-    #关键词与短语
-    "by", "整理", "无人在意做自己", "资源站", "资源网",
-    "发布页", "压制", "荣誉出品", "字幕组", "我堡牛皮",
-    #特定站点与标识符
+
+    # 关键词与短语 "压制","整理",
+     "无人在意做自己", "资源站", "资源网",
+    "发布页","荣誉出品", "字幕组", "我堡牛皮",
+
+    # 特定站点与标识符
     "link3.cc", "ysepan.com", "GyWEB", "Qqun", "hehehe", ".com",
     "PTerWEB", "panclub", "BT之家", "CMCT", "Byakuya", "ed3000",
     "yunpantv", "KKYY", "盘酱酱", "TREX", "£yhq@tv", "1000fr",
@@ -114,11 +121,11 @@ def run_cmd(cmd, capture=True, timeout=CMD_TIMEOUT):
             cmd,
             stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
             stderr=subprocess.PIPE if capture else subprocess.DEVNULL,
-            text=True, timeout=timeout
+            text=True, encoding='utf-8', errors='ignore', timeout=timeout
         )
         return result
     except subprocess.TimeoutExpired:
-        PrettyLog.error(f"⚠️ 命令超时: {cmd[0]}")
+        PrettyLog.error(f"⚠️ 命令超时 ({timeout}s): {cmd[0]}")
         return None
     except Exception as e:
         PrettyLog.error(f"命令出错: {e}")
@@ -130,7 +137,7 @@ def verify_file_integrity(file_path):
     try:
         cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'format=duration', '-of',
                'default=noprint_wrappers=1:nokey=1', file_path]
-        res = run_cmd(cmd, capture=True, timeout=10)
+        res = run_cmd(cmd, capture=True, timeout=30)
         return float(res.stdout.strip()) > 0 if res and res.stdout.strip() else False
     except:
         return False
@@ -146,37 +153,36 @@ def safe_replace(src, dst):
         return False
 
 
-# ================= 🧹 1. 元数据清洗 (核弹级更新) =================
+# ================= 🧹 1. 元数据清洗 =================
 def sanitize_metadata_tags(source):
     if not SANITIZE_METADATA: return False
     clean_needed = False
     log_details = []
 
-    # 1. 检查全局标签
     for tag in GLOBAL_TAGS_TO_CHECK:
         res = run_cmd(['ffprobe', '-v', 'error', '-show_entries', f'format_tags={tag}', '-of', 'csv=p=0', source],
-                      timeout=10)
-        val = res.stdout.strip() if res else ""
-        if val:
+                      timeout=30)
+        if res and res.stdout:
+            content = res.stdout.lower()
             for kw in SUB_META_BLACKLIST:
-                if kw.lower() in val.lower():
+                if kw.lower() in content:
                     log_details.append(f"全局标签 [{tag}] 含 '{kw}'")
                     clean_needed = True
                     break
         if clean_needed: break
 
-    # 2. 检查轨道标签
     if not clean_needed:
         res = run_cmd(
             ['ffprobe', '-v', 'error', '-show_entries', 'stream=index:stream_tags=language,title,handler_name', '-of',
-             'csv=p=0', source], timeout=10)
-        for line in (res.stdout.splitlines() if res else []):
+             'csv=p=0', source], timeout=30)
+
+        if res and res.stdout:
+            content = res.stdout.lower()
             for kw in SUB_META_BLACKLIST:
-                if kw.lower() in line.lower():
-                    log_details.append(f"轨道标签含 '{kw}'")
+                if kw.lower() in content:
+                    log_details.append(f"轨道标签检测到 '{kw}'")
                     clean_needed = True
                     break
-            if clean_needed: break
 
     if clean_needed:
         for d in log_details: PrettyLog.hit(d)
@@ -186,41 +192,49 @@ def sanitize_metadata_tags(source):
         name, ext = os.path.splitext(os.path.basename(source))
         output_path = os.path.join(dir_name, f"{name}_clean_meta{ext}")
 
-        # 🔥 核弹清洗命令 (参考 Windows 脚本)
         cmd_nuclear = [
             'ffmpeg', '-err_detect', 'ignore_err', '-i', source,
-            # 关键：显式映射 v/a/s，丢弃附件流(Attachments)和数据流(Data Streams)
             '-map', '0:v:0', '-map', '0:a?', '-map', '0:s?',
             '-c', 'copy',
-            '-dn',  # 明确丢弃 Data Streams
+            '-strict', '-2',
+            '-dn',
             '-ignore_unknown',
-            '-map_metadata', '-1',  # 擦除全局
-            # 擦除具体字段
+            '-map_metadata', '-1',
             '-metadata', 'title=', '-metadata', 'comment=',
             '-metadata', 'description=', '-metadata', 'synopsis=',
             '-metadata', 'artist=', '-metadata', 'album=',
             '-metadata', 'copyright=',
-            # 擦除流级标签
             '-metadata:s', 'title=', '-metadata:s', 'language=und', '-metadata:s', 'handler_name=',
             '-y', output_path
         ]
 
-        if run_cmd(cmd_nuclear, capture=False, timeout=120) and verify_file_integrity(output_path):
+        res = run_cmd(cmd_nuclear, capture=True, timeout=300)
+
+        if res and res.returncode == 0 and verify_file_integrity(output_path):
             if safe_replace(output_path, source):
                 PrettyLog.success("✨ [Clean] 元数据已深度净化 (Data流已剥离)")
                 return True
+        else:
+            PrettyLog.error("❌ 元数据清洗失败")
+            if res and res.stderr:
+                err_log = res.stderr.splitlines()[-3:]
+                for l in err_log: PrettyLog.warn(f"FFmpeg Error: {l}")
 
         if os.path.exists(output_path): os.remove(output_path)
 
     return False
 
 
-# ================= 🧹 2. 字幕内容检测 (配合核弹清洗) =================
+# ================= 🧹 2. 字幕内容检测 =================
 def sanitize_subtitle_content(source):
+    # 🔥🔥🔥 检查开关 🔥🔥🔥
+    if not CHECK_SUBTITLES:
+        return None
+
     res = run_cmd(
         ['ffprobe', '-v', 'error', '-select_streams', 's', '-show_entries', 'stream=index', '-of', 'csv=p=0', source],
         timeout=10)
-    if not res or not res.stdout.strip(): return False
+    if not res or not res.stdout.strip(): return None
 
     subtitle_indices = [x.strip() for x in res.stdout.splitlines() if x.strip()]
     dirty_indices = []
@@ -241,41 +255,45 @@ def sanitize_subtitle_content(source):
             PrettyLog.hit(f"字幕轨 [Stream #{idx}] 内容包含: '{hit_kw}' -> 计划移除")
             dirty_indices.append(idx)
 
-    if not dirty_indices: return False
+    if not dirty_indices: return None
 
     PrettyLog.info(f"🧹 [Clean] 正在移除 {len(dirty_indices)} 个违规字幕轨...")
     dir_name = os.path.dirname(source)
     name, ext = os.path.splitext(os.path.basename(source))
-    output_path = os.path.join(dir_name, f"{name}_clean_sub{ext}")
 
-    # 移除字幕时的命令，也要保持核弹级参数，防止元数据回滚
+    temp_output_path = os.path.join(dir_name, f"{name}_temp_clean{ext}")
+    final_clean_path = os.path.join(dir_name, f"{name}_clean{ext}")
+
     cmd_clean = ['ffmpeg', '-err_detect', 'ignore_err', '-i', source, '-map', '0:v:0', '-map', '0:a?']
 
-    # 动态添加干净的字幕轨
-    # 逻辑：只 map 那些不在 dirty_indices 里的字幕
-    # 注意：这里的 idx 是 ffprobe 查出来的，和 -map 0:s:x 对应。
-    # 简单起见，如果发现脏字幕，我们使用排除法构建
-
-    # 重新获取所有 s 流的索引，排除脏的
     for s_idx in subtitle_indices:
         if s_idx not in dirty_indices:
             cmd_clean.extend(['-map', f'0:{s_idx}'])
 
     cmd_clean.extend([
-        '-c', 'copy', '-dn', '-ignore_unknown',
-        '-map_metadata', '-1',
-        '-metadata', 'title=', '-metadata', 'comment=',
-        '-metadata:s', 'title=', '-metadata:s', 'language=und', '-metadata:s', 'handler_name=',
-        '-y', output_path
+        '-c', 'copy',
+        '-strict', '-2',
+        '-dn',
+        '-ignore_unknown',
+        '-y', temp_output_path
     ])
 
-    if run_cmd(cmd_clean, capture=False, timeout=120) and verify_file_integrity(output_path):
-        if safe_replace(output_path, source):
-            PrettyLog.success("✨ [Clean] 违规字幕轨已移除 & 元数据已同步净化")
-            return True
+    if run_cmd(cmd_clean, capture=False, timeout=120) and verify_file_integrity(temp_output_path):
+        try:
+            if os.path.exists(source): os.remove(source)
+            if os.path.exists(final_clean_path): os.remove(final_clean_path)
+            os.rename(temp_output_path, final_clean_path)
 
-    if os.path.exists(output_path): os.remove(output_path)
-    return False
+            PrettyLog.success(
+                f"✨ [Clean] 违规字幕已移除 (保留其余轨道信息)，重命名为: {os.path.basename(final_clean_path)}")
+            return final_clean_path
+        except OSError as e:
+            PrettyLog.error(f"重命名失败: {e}")
+            if os.path.exists(temp_output_path): os.remove(temp_output_path)
+            return None
+
+    if os.path.exists(temp_output_path): os.remove(temp_output_path)
+    return None
 
 
 # ================= 🎙️ 3. 音频检测相关 =================
@@ -296,9 +314,41 @@ def get_duration(file_path):
     return 0
 
 
-def extract_audio(video_path, start, duration, output_path):
-    cmd = ['ffmpeg', '-ss', str(start), '-t', str(duration), '-i', video_path, '-vn', '-acodec', 'libmp3lame', '-q:a',
-           '4', '-y', output_path]
+def get_smart_audio_map(file_path):
+    try:
+        cmd = ['ffprobe', '-v', 'error', '-select_streams', 'a',
+               '-show_entries', 'stream=index,codec_name', '-of', 'csv=p=0', file_path]
+        res = run_cmd(cmd, capture=True, timeout=10)
+
+        streams = []
+        if res and res.stdout:
+            for line in res.stdout.strip().splitlines():
+                parts = line.split(',')
+                if len(parts) >= 2:
+                    streams.append({'index': parts[0], 'codec': parts[1].strip().lower()})
+
+        if streams:
+            first = streams[0]
+            if 'flac' in first['codec'] and len(streams) > 1:
+                second = streams[1]
+                PrettyLog.warn(f"⚠️ 首选音轨为 FLAC，自动切换至次选: Stream #{second['index']} ({second['codec']})")
+                return f"0:{second['index']}"
+            else:
+                return "0:a:0"
+    except Exception as e:
+        PrettyLog.error(f"音轨分析出错: {e}")
+
+    return "0:a:0"
+
+
+def extract_audio(video_path, start, duration, output_path, map_arg="0:a:0"):
+    cmd = [
+        'ffmpeg', '-ss', str(start), '-t', str(duration),
+        '-i', video_path,
+        '-map', map_arg,
+        '-vn', '-acodec', 'libmp3lame', '-q:a', '4',
+        '-y', output_path
+    ]
     res = run_cmd(cmd, capture=False, timeout=30)
     return res is not None and res.returncode == 0
 
@@ -360,10 +410,16 @@ def process_single_source(source):
     PrettyLog.step(f"正在分析: {os.path.basename(source)}")
 
     sanitize_metadata_tags(source)
-    sanitize_subtitle_content(source)
+
+    new_source = sanitize_subtitle_content(source)
+    if new_source and os.path.exists(new_source):
+        source = new_source
+        PrettyLog.info(f"🔄 切换后续扫描目标为: {os.path.basename(source)}")
 
     total_duration = get_duration(source)
     if total_duration == 0: sys.exit(0)
+
+    audio_map_arg = get_smart_audio_map(source)
 
     tasks = []
     tail_dur = min(600 if total_duration >= 3600 else 300, total_duration)
@@ -380,7 +436,7 @@ def process_single_source(source):
         if hit_reason: break
         PrettyLog.info(f"🔍 任务 ({idx + 1}/{len(tasks)}): [{task['name']}]")
 
-        if extract_audio(source, task['start'], task['duration'], temp_wav):
+        if extract_audio(source, task['start'], task['duration'], temp_wav, map_arg=audio_map_arg):
             segment_success = False
             for attempt in range(MAX_API_RETRIES):
                 raw_text = send_to_api(temp_wav)
@@ -403,11 +459,16 @@ def process_single_source(source):
                         time.sleep(sleep_time)
 
             if not segment_success:
-                PrettyLog.error("❌ 分片重试失败")
+                PrettyLog.error("❌ 分片重试失败，停止后续任务")
                 api_fail_count += 1
+                if os.path.exists(temp_wav): os.remove(temp_wav)
+                break
+
             if os.path.exists(temp_wav): os.remove(temp_wav)
         else:
+            PrettyLog.error("❌ 音频提取失败")
             api_fail_count += 1
+            break
 
     if hit_reason:
         write_reason_to_env(hit_reason)
@@ -423,9 +484,36 @@ def process_single_source(source):
 
 
 def main():
+    lock_file = None
+    max_slots = 2
+    lock_base = "/tmp/scan_audio_cloud.lock"
+
+    PrettyLog.info(f"⏳ [Queue] 云端 API 频率控制中 (Limit: {max_slots})...")
+
+    while lock_file is None:
+        for i in range(max_slots):
+            try:
+                f = open(f"{lock_base}.{i}", "w")
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                lock_file = f
+                break
+            except OSError:
+                f.close()
+
+        if lock_file is None:
+            time.sleep(1)
+
+    PrettyLog.info("🔓 [Queue] 队列通过，开始扫描")
+
     signal.alarm(600)
-    if len(sys.argv) < 2: sys.exit(1)
-    process_single_source(sys.argv[1])
+
+    try:
+        if len(sys.argv) < 2: sys.exit(1)
+        process_single_source(sys.argv[1])
+    finally:
+        if lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            lock_file.close()
 
 
 if __name__ == "__main__":
