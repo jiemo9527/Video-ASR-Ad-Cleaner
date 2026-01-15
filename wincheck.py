@@ -8,7 +8,6 @@ Windows 广告秒杀工具 (全能完全体 - 智能音轨版 - 多模式切换 
 3. ☁️/🤖 音频扫描：支持 云端优先/纯本地/纯云端 三种模式。
 4. 📋 全量日志：显示完整识别文字，不再截断。
 """
-
 import os
 import sys
 import subprocess
