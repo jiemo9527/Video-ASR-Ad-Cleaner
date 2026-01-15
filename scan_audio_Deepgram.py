@@ -1,4 +1,5 @@
-#!/usr/bin/env python3
+API_KEY = "ef5..."
+# !/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import os
 import sys
@@ -37,17 +38,20 @@ except ImportError:
     from pypinyin import lazy_pinyin
     from thefuzz import fuzz
 
-# ================= ⚙️ 配置 =================
-API_KEY = "sk-abc"
-API_URL = "https://api.siliconflow.cn/v1/audio/transcriptions"
-MODEL_NAME = "FunAudioLLM/SenseVoiceSmall"
+# ================= ⚙️ 配置：Deepgram (原生接口版) =================
+# 注册地址: https://console.deepgram.com/ (注册送 $200 额度，无需绑卡)
+# 优势: 速度极快，Nova-2 中文识别准确率业界领先，且抗风控能力强
 
-DEBUG_MODE = False
+
+# Deepgram 原生接口参数
+# model=nova-2: 最新最强模型
+# language=zh: 强制中文
+# smart_format=true: 自动加标点和格式化
+API_URL = "https://api.deepgram.com/v1/listen?model=nova-2&language=zh&smart_format=true"
+
+DEBUG_MODE = True
 SANITIZE_METADATA = True
-# 🔥 新增：字幕检测开关 (True: 开启, False: 关闭)
 CHECK_SUBTITLES = True
-# 🔥 新增：音频检测开关 (True: 开启, False: 关闭)
-CHECK_AUDIO = True
 
 CMD_TIMEOUT = 120
 MAX_API_RETRIES = 4
@@ -60,18 +64,11 @@ AUDIO_BLACKLIST = [
 ]
 
 SUB_META_BLACKLIST = [
-    # 基础社交与链接
     "http", "www", "weixin", "Telegram", "TG@", "TG频道@",
     "群：", "群:", "资源群", "加群", "微信号", "微信群",
-
-    # 社交平台与工具
     "QQ", "qq", "q群", "公众号", "微博", "b站", "Tacit0924",
-
-    # 关键词与短语
-    "未经授权禁止转载","无人在意做自己", "资源站", "资源网",
-    "发布页","荣誉出品","我堡牛皮","保存头像",
-
-    # 特定站点与标识符
+    "整理", "无人在意做自己", "资源站", "资源网",
+    "发布页", "压制", "荣誉出品", "字幕组", "我堡牛皮",
     "link3.cc", "ysepan.com", "GyWEB", "Qqun", "hehehe", ".com",
     "PTerWEB", "panclub", "BT之家", "CMCT", "Byakuya", "ed3000",
     "yunpantv", "KKYY", "盘酱酱", "TREX", "£yhq@tv", "1000fr",
@@ -139,7 +136,7 @@ def verify_file_integrity(file_path):
     try:
         cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'format=duration', '-of',
                'default=noprint_wrappers=1:nokey=1', file_path]
-        res = run_cmd(cmd, capture=True, timeout=120)
+        res = run_cmd(cmd, capture=True, timeout=30)
         return float(res.stdout.strip()) > 0 if res and res.stdout.strip() else False
     except:
         return False
@@ -197,10 +194,7 @@ def sanitize_metadata_tags(source):
         cmd_nuclear = [
             'ffmpeg', '-err_detect', 'ignore_err', '-i', source,
             '-map', '0:v:0', '-map', '0:a?', '-map', '0:s?',
-            '-c', 'copy',
-            '-strict', '-2',
-            '-dn',
-            '-ignore_unknown',
+            '-c', 'copy', '-strict', '-2', '-dn', '-ignore_unknown',
             '-map_metadata', '-1',
             '-metadata', 'title=', '-metadata', 'comment=',
             '-metadata', 'description=', '-metadata', 'synopsis=',
@@ -214,7 +208,7 @@ def sanitize_metadata_tags(source):
 
         if res and res.returncode == 0 and verify_file_integrity(output_path):
             if safe_replace(output_path, source):
-                PrettyLog.success("✨ [Clean] 元数据已深度净化 (Data流已剥离)")
+                PrettyLog.success("✨ [Clean] 元数据已深度净化")
                 return True
         else:
             PrettyLog.error("❌ 元数据清洗失败")
@@ -229,7 +223,6 @@ def sanitize_metadata_tags(source):
 
 # ================= 🧹 2. 字幕内容检测 =================
 def sanitize_subtitle_content(source):
-    # 🔥🔥🔥 检查开关 🔥🔥🔥
     if not CHECK_SUBTITLES:
         return None
 
@@ -242,10 +235,8 @@ def sanitize_subtitle_content(source):
     dirty_indices = []
 
     for idx in subtitle_indices:
-        # 🔥🔥🔥 修复核心：增加 try-except 捕获超时，并延长超时时间 🔥🔥🔥
         try:
             extract_cmd = ['ffmpeg', '-v', 'error', '-i', source, '-map', f'0:{idx}', '-f', 'webvtt', '-']
-            # 将超时时间从 30s 增加到 120s，应对 4K 大文件
             proc = subprocess.run(extract_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
                                   timeout=120)
             sub_content = proc.stdout
@@ -255,7 +246,7 @@ def sanitize_subtitle_content(source):
             hit_kw = None
             for kw in SUB_META_BLACKLIST:
                 if kw in sub_content:
-                    hit_kw = kw
+                    hit_kw = kw;
                     break
 
             if hit_kw:
@@ -274,43 +265,28 @@ def sanitize_subtitle_content(source):
     PrettyLog.info(f"🧹 [Clean] 正在移除 {len(dirty_indices)} 个违规字幕轨...")
     dir_name = os.path.dirname(source)
     name, ext = os.path.splitext(os.path.basename(source))
-
     temp_output_path = os.path.join(dir_name, f"{name}_temp_clean{ext}")
     final_clean_path = os.path.join(dir_name, f"{name}_clean{ext}")
 
     cmd_clean = ['ffmpeg', '-err_detect', 'ignore_err', '-i', source, '-map', '0:v:0', '-map', '0:a?']
-
     for s_idx in subtitle_indices:
-        if s_idx not in dirty_indices:
-            cmd_clean.extend(['-map', f'0:{s_idx}'])
-
-    cmd_clean.extend([
-        '-c', 'copy',
-        '-strict', '-2',
-        '-dn',
-        '-ignore_unknown',
-        '-y', temp_output_path
-    ])
+        if s_idx not in dirty_indices: cmd_clean.extend(['-map', f'0:{s_idx}'])
+    cmd_clean.extend(['-c', 'copy', '-strict', '-2', '-dn', '-ignore_unknown', '-y', temp_output_path])
 
     if run_cmd(cmd_clean, capture=False, timeout=120) and verify_file_integrity(temp_output_path):
         try:
             if os.path.exists(source): os.remove(source)
-            if os.path.exists(final_clean_path): os.remove(final_clean_path)
             os.rename(temp_output_path, final_clean_path)
-
-            PrettyLog.success(
-                f"✨ [Clean] 违规字幕已移除 (保留其余轨道信息)，重命名为: {os.path.basename(final_clean_path)}")
+            PrettyLog.success(f"✨ [Clean] 违规字幕已移除，重命名为: {os.path.basename(final_clean_path)}")
             return final_clean_path
-        except OSError as e:
-            PrettyLog.error(f"重命名失败: {e}")
-            if os.path.exists(temp_output_path): os.remove(temp_output_path)
+        except OSError:
             return None
 
     if os.path.exists(temp_output_path): os.remove(temp_output_path)
     return None
 
 
-# ================= 🎙️ 3. 音频检测相关 =================
+# ================= 🎙️ 3. 音频检测 (Deepgram 原生) =================
 def remove_emojis(text):
     if not text: return ""
     return re.sub(r'[\U00010000-\U0010ffff]', '', text).strip()
@@ -333,56 +309,66 @@ def get_smart_audio_map(file_path):
         cmd = ['ffprobe', '-v', 'error', '-select_streams', 'a',
                '-show_entries', 'stream=index,codec_name', '-of', 'csv=p=0', file_path]
         res = run_cmd(cmd, capture=True, timeout=10)
-
         streams = []
         if res and res.stdout:
             for line in res.stdout.strip().splitlines():
                 parts = line.split(',')
-                if len(parts) >= 2:
-                    streams.append({'index': parts[0], 'codec': parts[1].strip().lower()})
-
+                if len(parts) >= 2: streams.append({'index': parts[0], 'codec': parts[1].strip().lower()})
         if streams:
             first = streams[0]
             if 'flac' in first['codec'] and len(streams) > 1:
-                second = streams[1]
-                PrettyLog.warn(f"⚠️ 首选音轨为 FLAC，自动切换至次选: Stream #{second['index']} ({second['codec']})")
-                return f"0:{second['index']}"
+                return f"0:{streams[1]['index']}"
             else:
                 return "0:a:0"
-    except Exception as e:
-        PrettyLog.error(f"音轨分析出错: {e}")
-
+    except:
+        pass
     return "0:a:0"
 
 
 def extract_audio(video_path, start, duration, output_path, map_arg="0:a:0"):
+    # Deepgram 建议使用 mp3 减小传输体积
     cmd = [
         'ffmpeg', '-ss', str(start), '-t', str(duration),
         '-i', video_path,
         '-map', map_arg,
-        '-vn', '-acodec', 'libmp3lame', '-q:a', '4',
+        '-vn', '-acodec', 'libmp3lame', '-q:a', '5',  # 5 足够 ASR 使用
         '-y', output_path
     ]
-    res = run_cmd(cmd, capture=False, timeout=120)
+    res = run_cmd(cmd, capture=False, timeout=30)
     return res is not None and res.returncode == 0
 
 
+# 🔥🔥🔥 修正后的 send_to_api (Deepgram 原生接口) 🔥🔥🔥
 def send_to_api(audio_path):
     if not os.path.exists(audio_path): return None
     try:
-        headers = {"Authorization": f"Bearer {API_KEY}"}
-        files = {"file": open(audio_path, "rb")}
-        data = {"model": MODEL_NAME, "language": "zh", "response_format": "json"}
+        # 1. 构造 Deepgram 专用 Header (注意: 必须是 Token 而不是 Bearer)
+        headers = {
+            "Authorization": f"Token {API_KEY}",
+            "Content-Type": "audio/mp3"  # 因为我们提取的是 mp3
+        }
+
+        # 2. 读取二进制流
+        with open(audio_path, "rb") as f:
+            audio_data = f.read()
 
         session = requests.Session()
         retries = Retry(total=3, backoff_factor=2, status_forcelist=[500, 502, 503, 504])
         session.mount('https://', HTTPAdapter(max_retries=retries))
 
-        response = session.post(API_URL, headers=headers, files=files, data=data, timeout=120)
+        # 3. 发送请求 (Deepgram 接受 raw body)
+        # 参数已经在 API_URL 中指定了 (?model=nova-2...)
+        response = session.post(API_URL, headers=headers, data=audio_data, timeout=60)
+
         if response.status_code == 200:
-            return response.json().get("text", "")
+            data = response.json()
+            # Deepgram 返回结果在 results -> channels[0] -> alternatives[0] -> transcript
+            try:
+                return data['results']['channels'][0]['alternatives'][0]['transcript']
+            except (KeyError, IndexError):
+                return ""
         else:
-            PrettyLog.error(f"API Error {response.status_code}")
+            PrettyLog.error(f"API Error {response.status_code}: {response.text}")
             return None
     except Exception as e:
         PrettyLog.error(f"请求异常: {e}")
@@ -400,45 +386,13 @@ def normalize_text(text):
 def check_audio_keywords_detail(text):
     if not text: return False, None
     normalized_text = normalize_text(text)
-
-    # 1. 正则检测 (保持不变)
     match = re.search(r'(资源|加群|入群|群号|QQ|TG|VX|微信).{0,12}\d{5,}', normalized_text, re.IGNORECASE)
-    if match:
-        context = normalized_text[max(0, match.start() - 10):min(len(normalized_text), match.end() + 10)]
-        return True, f"正则匹配: [{match.group(0)}] (...{context}...)"
-
-    # 2. 关键词直接匹配 (保持不变)
+    if match: return True, f"正则匹配: [{match.group(0)}]"
     for kw in AUDIO_BLACKLIST:
-        if kw in normalized_text:
-            # 🔥 新增：找到关键词的位置，并截取前后文
-            idx = normalized_text.find(kw)
-            start = max(0, idx - 10)
-            end = min(len(normalized_text), idx + len(kw) + 10)
-            context = normalized_text[start:end]
-            return True, f"关键词匹配: {kw} (语境: ...{context}...)"
-
-    # 3. 拼音匹配 (🔥 优化版：避免连词误判，且显示上下文)
-    # 将文本转为拼音列表，而不是字符串，这样可以保持词的边界
-    text_pinyin_list = lazy_pinyin(normalized_text)
-
+        if kw in normalized_text: return True, f"关键词匹配: {kw}"
+    text_pinyin = "".join(lazy_pinyin(normalized_text))
     for kw in AUDIO_BLACKLIST:
-        kw_pinyin_list = lazy_pinyin(kw)
-        kw_len = len(kw_pinyin_list)
-
-        # 在列表里滑动寻找，而不是在字符串里找 (避免 "了解阿群" 匹配 "加群" 这种跨字拼音误判)
-        for i in range(len(text_pinyin_list) - kw_len + 1):
-            if text_pinyin_list[i: i + kw_len] == kw_pinyin_list:
-                # 尝试反推大概的文字位置 (不一定极度精准，但足够看清上下文)
-                # 简单估算：一个拼音对应一个汉字
-                start_char_idx = i
-                context_start = max(0, start_char_idx - 10)
-                context_end = min(len(normalized_text), start_char_idx + kw_len + 10)
-                context_str = normalized_text[context_start:context_end]
-
-                # 特殊处理：如果黑名单词只有2个字（如“加群”），且属于常用字组合，建议在这里加白名单过滤
-                # 或者直接返回让人工判断
-                return True, f"拼音匹配: {kw} (原文疑似: ...{context_str}...)"
-
+        if "".join(lazy_pinyin(kw)) in text_pinyin: return True, f"拼音匹配: {kw}"
     return False, None
 
 
@@ -453,12 +407,6 @@ def process_single_source(source):
     if new_source and os.path.exists(new_source):
         source = new_source
         PrettyLog.info(f"🔄 切换后续扫描目标为: {os.path.basename(source)}")
-
-    # ================= 🔥 音频检测开关逻辑 🔥 =================
-    if not CHECK_AUDIO:
-        PrettyLog.info("⏩ [Skip] 音频检测功能已关闭，跳过 API 分析")
-        sys.exit(0)
-    # =======================================================
 
     total_duration = get_duration(source)
     if total_duration == 0: sys.exit(0)
@@ -487,13 +435,8 @@ def process_single_source(source):
                 if raw_text is not None:
                     clean_text = remove_emojis(raw_text)
                     is_hit, reason = check_audio_keywords_detail(clean_text)
-
-                    if DEBUG_MODE:
-                        PrettyLog.info(f"📝 结果: {clean_text[:100]}...")
-
-                    if is_hit:
-                        hit_reason = f"{task['name']} -> {reason}"
-
+                    if DEBUG_MODE: PrettyLog.info(f"📝 结果: {clean_text[:100]}...")
+                    if is_hit: hit_reason = f"{task['name']} -> {reason}"
                     segment_success = True
                     break
                 else:

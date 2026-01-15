@@ -30,6 +30,8 @@ PUNC_MODEL_ID = "/root/models/iic/punc_ct-transformer_zh-cn-common-vocab272727-p
 SANITIZE_METADATA = True
 # 🔥 新增：字幕检测开关
 CHECK_SUBTITLES = True
+# 🔥 新增：音频检测开关 (True: 开启, False: 关闭)
+CHECK_AUDIO = True
 
 AUDIO_BLACKLIST = [
     "加群", "交流群", "TG群", "Telegram", "QQ群", "Q群",
@@ -40,9 +42,8 @@ SUB_META_BLACKLIST = [
     "http", "www", "weixin", "Telegram", "TG@", "TG频道@",
     "群：", "群:", "资源群", "加群", "微信号", "微信群",
     "QQ", "qq", "q群", "公众号", "微博", "b站", "Tacit0924",
-    "Arctime", "Lavf",
-    "无人在意做自己", "资源站", "资源网",
-    "发布页","荣誉出品", "字幕组", "我堡牛皮",
+    "Arctime", "Lavf","未经授权禁止转载","无人在意做自己", "资源站", "资源网",
+    "发布页",  "荣誉出品", "我堡牛皮","保存头像",
     "link3.cc", "ysepan.com", "GyWEB", "Qqun", "hehehe", ".com",
     "PTerWEB", "panclub", "BT之家", "CMCT", "Byakuya", "ed3000",
     "yunpantv", "KKYY", "盘酱酱", "TREX", "£yhq@tv", "1000fr",
@@ -109,7 +110,7 @@ def verify_file_integrity(file_path):
     if not os.path.exists(file_path) or os.path.getsize(file_path) < 1024: return False
     try:
         res = run_cmd(['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'format=duration', '-of',
-                       'default=noprint_wrappers=1:nokey=1', file_path], timeout=30)
+                       'default=noprint_wrappers=1:nokey=1', file_path], timeout=60)
         return float(res.stdout.strip()) > 0 if res and res.stdout.strip() else False
     except:
         return False
@@ -186,8 +187,10 @@ def sanitize_subtitle_content(source):
     dirty_indices = []
 
     for idx in subtitle_indices:
+        # 🔥🔥🔥 修复核心：增加 try-except 捕获超时，并延长超时时间 🔥🔥🔥
         try:
             extract_cmd = ['ffmpeg', '-v', 'error', '-i', source, '-map', f'0:{idx}', '-f', 'webvtt', '-']
+            # 将超时时间从 30s 增加到 120s，应对 4K 大文件
             proc = subprocess.run(extract_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
                                   timeout=120)
             sub_content = proc.stdout
@@ -249,11 +252,44 @@ def normalize_text(text):
 
 def check_audio_keywords_detail(text):
     if not text: return False, None
-    norm = normalize_text(text)
-    match = re.search(r'(资源|加群|入群|群号|QQ|TG|VX|微信).{0,12}\d{5,}', norm, re.IGNORECASE)
-    if match: return True, f"正则匹配: [{match.group(0)}]"
+    normalized_text = normalize_text(text)
+
+    # 1. 正则检测 (保持不变)
+    match = re.search(r'(资源|加群|入群|群号|QQ|TG|VX|微信).{0,12}\d{5,}', normalized_text, re.IGNORECASE)
+    if match:
+        context = normalized_text[max(0, match.start() - 10):min(len(normalized_text), match.end() + 10)]
+        return True, f"正则匹配: [{match.group(0)}] (...{context}...)"
+
+    # 2. 关键词直接匹配 (保持不变)
     for kw in AUDIO_BLACKLIST:
-        if kw in norm: return True, f"关键词匹配: {kw}"
+        if kw in normalized_text:
+            # 🔥 新增：找到关键词的位置，并截取前后文
+            idx = normalized_text.find(kw)
+            start = max(0, idx - 10)
+            end = min(len(normalized_text), idx + len(kw) + 10)
+            context = normalized_text[start:end]
+            return True, f"关键词匹配: {kw} (语境: ...{context}...)"
+
+    # 3. 拼音匹配 (🔥 优化版：避免连词误判，且显示上下文)
+    # 将文本转为拼音列表，而不是字符串，这样可以保持词的边界
+    text_pinyin_list = lazy_pinyin(normalized_text)
+
+    for kw in AUDIO_BLACKLIST:
+        kw_pinyin_list = lazy_pinyin(kw)
+        kw_len = len(kw_pinyin_list)
+
+        # 在列表里滑动寻找，而不是在字符串里找 (避免 "了解阿群" 匹配 "加群" 这种跨字拼音误判)
+        for i in range(len(text_pinyin_list) - kw_len + 1):
+            if text_pinyin_list[i: i + kw_len] == kw_pinyin_list:
+                # 尝试反推大概的文字位置 (不一定极度精准，但足够看清上下文)
+                # 简单估算：一个拼音对应一个汉字
+                start_char_idx = i
+                context_start = max(0, start_char_idx - 10)
+                context_end = min(len(normalized_text), start_char_idx + kw_len + 10)
+                context_str = normalized_text[context_start:context_end]
+
+                return True, f"拼音匹配: {kw} (原文疑似: ...{context_str}...)"
+
     return False, None
 
 
@@ -283,7 +319,7 @@ def get_smart_audio_map(file_path):
 def extract_audio(video_path, start, duration, output_path, map_arg="0:a:0"):
     cmd = ['ffmpeg', '-ss', str(start), '-t', str(duration), '-i', video_path, '-map', map_arg, '-vn', '-acodec',
            'pcm_s16le', '-ar', '16000', '-ac', '1', '-y', output_path]
-    res = run_cmd(cmd, capture=False, timeout=30)
+    res = run_cmd(cmd, capture=False, timeout=120)
     return res is not None and res.returncode == 0
 
 
@@ -339,6 +375,12 @@ def process_single_source(source):
     if new_source and os.path.exists(new_source):
         source = new_source
         PrettyLog.info(f"🔄 切换后续扫描目标为: {os.path.basename(source)}")
+
+    # ================= 🔥 音频检测开关逻辑 🔥 =================
+    if not CHECK_AUDIO:
+        PrettyLog.info("⏩ [Skip] 音频检测功能已关闭，跳过听写分析")
+        sys.exit(0)
+    # =======================================================
 
     dur = get_duration(source)
     if dur == 0: sys.exit(0)
