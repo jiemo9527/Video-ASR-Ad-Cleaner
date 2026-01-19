@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>全局设置 - Scanner Pro</title>
+    <link rel="icon" href="{{ url_for('static', filename='favicon.png') }}" type="image/png">
+
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.8.0/font/bootstrap-icons.css">
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <style>
+        .kw-tag { cursor: pointer; user-select: none; transition: all 0.2s; font-size: 14px; }
+        .kw-tag:hover { transform: translateY(-2px); box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        .kw-tag.disabled { opacity: 0.6; text-decoration: line-through; background-color: #e9ecef !important; color: #6c757d !important; border-color: #dee2e6 !important; }
+        .kw-close { margin-left: 8px; font-weight: bold; opacity: 0.7; transition: opacity 0.2s; }
+        .kw-close:hover { opacity: 1; color: #dc3545; }
+        .nav-tabs .nav-link { color: #495057; cursor: pointer; }
+        .nav-tabs .nav-link.active { font-weight: bold; color: #0d6efd; border-top: 3px solid #0d6efd; background: #fff; border-bottom-color: transparent; }
+        .animate-fade { animation: fadeIn 0.3s ease-in-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+        .form-check-input { margin-left: 0em !important; }
+    </style>
+</head>
+<body class="bg-light">
+<div id="app" class="container py-5" style="max-width: 1400px;">
+
+    <div class="d-flex justify-content-between align-items-center mb-5 border-bottom pb-3">
+        <div class="d-flex align-items-center">
+            <img src="{{ url_for('static', filename='favicon.png') }}" width="32" height="32" class="me-3" style="border-radius: 6px;">
+            <h3 class="mb-0 fw-bold text-dark">系统高级配置</h3>
+        </div>
+        <div><a href="/" class="btn btn-outline-primary"><i class="bi bi-arrow-left"></i> 返回控制台</a></div>
+    </div>
+
+    <div class="row g-4">
+        <div class="col-lg-7">
+            <div class="card shadow-sm border-0 mb-4" style="min-height: 550px;">
+                <div class="card-header bg-white pt-3 px-3 pb-0 border-bottom-0">
+                    <ul class="nav nav-tabs card-header-tabs">
+                        <li class="nav-item">
+                            <button class="nav-link small text-uppercase fw-bold" :class="{active: settingTab==='basic', 'text-primary': settingTab==='basic'}" @click="settingTab='basic'"><i class="bi bi-sliders me-1"></i>基础</button>
+                        </li>
+                        <li class="nav-item">
+                            <button class="nav-link small text-uppercase fw-bold" :class="{active: settingTab==='audio', 'text-success': settingTab==='audio'}" @click="settingTab='audio'"><i class="bi bi-soundwave me-1"></i>音频</button>
+                        </li>
+                        <li class="nav-item">
+                            <button class="nav-link small text-uppercase fw-bold" :class="{active: settingTab==='model', 'text-danger': settingTab==='model'}" @click="settingTab='model'"><i class="bi bi-cpu me-1"></i>模型</button>
+                        </li>
+                        <li class="nav-item">
+                            <button class="nav-link small text-uppercase fw-bold" :class="{active: settingTab==='notify', 'text-warning': settingTab==='notify'}" @click="settingTab='notify'"><i class="bi bi-bell me-1"></i>通知</button>
+                        </li>
+                        <li class="nav-item">
+                            <button class="nav-link small text-uppercase fw-bold" :class="{active: settingTab==='queue', 'text-info': settingTab==='queue'}" @click="settingTab='queue'"><i class="bi bi-collection-play me-1"></i>队列</button>
+                        </li>
+                        <li class="nav-item">
+                            <button class="nav-link small text-uppercase fw-bold" :class="{active: settingTab==='account', 'text-dark': settingTab==='account'}" @click="settingTab='account'"><i class="bi bi-shield-lock me-1"></i>账户</button>
+                        </li>
+                    </ul>
+                </div>
+
+                <div class="card-body d-flex flex-column" style="padding: 3rem !important;">
+
+                    <div class="flex-grow-1">
+
+                        <div v-show="settingTab === 'basic'" class="animate-fade">
+                            <h6 class="border-bottom pb-2 mb-3 text-muted small fw-bold">核心检测开关</h6>
+                            <div class="form-check form-switch mb-3 p-3 bg-light rounded border">
+                                <input class="form-check-input" type="checkbox" v-model="settings.check_audio" id="sw_audio">
+                                <label class="form-check-label fw-bold" for="sw_audio">音频违规检测 (ASR)</label>
+                                <div class="small text-muted mt-1" style="font-size: 11px">启用云端/本地模型识别音频中的敏感词。</div>
+                            </div>
+                            <div class="form-check form-switch mb-3 p-3 bg-light rounded border">
+                                <input class="form-check-input" type="checkbox" v-model="settings.check_subtitles" id="sw_sub">
+                                <label class="form-check-label fw-bold" for="sw_sub">字幕内容清洗</label>
+                                <div class="small text-muted mt-1" style="font-size: 11px">扫描字幕流，自动剔除包含推广关键词的字幕轨。</div>
+                            </div>
+                            <div class="form-check form-switch mb-4 p-3 bg-light rounded border">
+                                <input class="form-check-input" type="checkbox" v-model="settings.sanitize_metadata" id="sw_meta">
+                                <label class="form-check-label fw-bold" for="sw_meta">元数据深度清除</label>
+                                <div class="small text-muted mt-1" style="font-size: 11px">强制清除 Title/Comment 等所有标签 (防广告)。</div>
+                            </div>
+
+                            <div class="form-check form-switch mb-4 p-3 bg-light rounded border">
+                                <input class="form-check-input" type="checkbox" v-model="settings.detailed_mode" id="sw_detail">
+                                <label class="form-check-label fw-bold" for="sw_detail">详细日志模式</label>
+                                <div class="small text-muted mt-1" style="font-size: 11px">开启后将展示所有识别到的文本内容（无论是否违规）。关闭则仅展示违规内容。</div>
+                            </div>
+
+                            <h6 class="border-bottom pb-2 mb-3 text-muted small fw-bold mt-4">环境与路径配置</h6>
+                            <div class="mb-3">
+                                <label class="form-label fw-bold small">aria2下载根目录</label>
+                                <input type="text" class="form-control form-control-sm font-monospace" v-model="settings.scan_path">
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label fw-bold small">默认传输Rclone Remote(智能路径不生效时)</label>
+                                <input type="text" class="form-control form-control-sm font-monospace" v-model="settings.rclone_remote">
+                            </div>
+                        </div>
+
+                        <div v-show="settingTab === 'audio'" class="animate-fade">
+                            <div class="mb-4">
+                                <label class="form-label fw-bold small text-muted">触发阈值设置</label>
+                                <div class="row g-2">
+                                    <div class="col-12"><div class="input-group input-group-sm"><span class="input-group-text bg-white" style="width: 100px">多段检测</span><input type="number" class="form-control" v-model="settings.audio_threshold_multi"><span class="input-group-text">秒</span></div></div>
+                                    <div class="col-12"><div class="input-group input-group-sm"><span class="input-group-text bg-white" style="width: 100px">超长定义</span><input type="number" class="form-control" v-model="settings.audio_threshold_long"><span class="input-group-text">秒</span></div></div>
+                                </div>
+                            </div>
+                            <hr class="text-muted opacity-25">
+                            <div class="mb-3">
+                                <label class="form-label fw-bold small text-muted">采样长度控制</label>
+                                <div class="row g-2">
+                                    <div class="col-6"><label class="small text-muted mb-1">片头长度</label><input type="number" class="form-control form-control-sm" v-model="settings.audio_len_head"></div>
+                                    <div class="col-6"><label class="small text-muted mb-1">中间长度</label><input type="number" class="form-control form-control-sm" v-model="settings.audio_len_mid"></div>
+                                    <div class="col-6"><label class="small text-muted mb-1">标准片尾</label><input type="number" class="form-control form-control-sm" v-model="settings.audio_len_tail"></div>
+                                    <div class="col-6"><label class="small text-muted mb-1">超长片尾</label><input type="number" class="form-control form-control-sm" v-model="settings.audio_len_tail_long"></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div v-show="settingTab === 'model'" class="animate-fade">
+                            <div class="mb-4">
+                                <h6 class="border-bottom pb-2 mb-3 text-muted small fw-bold">☁️ API 云端模型</h6>
+                                <div class="mb-3"><label class="form-label fw-bold small">API Endpoint (URL)</label><input type="text" class="form-control form-control-sm font-monospace" v-model="settings.api_url"></div>
+                                <div class="mb-3"><label class="form-label fw-bold small">API Key</label><div class="input-group input-group-sm"><input type="password" class="form-control font-monospace" v-model="settings.api_key" id="apiKeyInput"><button class="btn btn-outline-secondary" type="button" onclick="const i=document.getElementById('apiKeyInput');i.type=i.type==='password'?'text':'password'"><i class="bi bi-eye"></i></button></div></div>
+                                <div class="mb-3"><label class="form-label fw-bold small">Model Name</label><input type="text" class="form-control form-control-sm" v-model="settings.api_model"></div>
+                            </div>
+                            <div class="mb-2">
+                                <h6 class="border-bottom pb-2 mb-3 text-muted small fw-bold">🏠 本地模型资源</h6>
+                                <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" v-model="settings.enable_local_model" id="sw_local" :disabled="!modelReady"><label class="form-check-label fw-bold" for="sw_local">启用本地模型 (Fallback)</label></div>
+                                <div v-if="!modelReady" class="text-danger small mb-2" style="font-size: 11px; margin-left: 2em;"><i class="bi bi-x-circle me-1"></i> 检测到本地模型文件缺失，无法启用。请先下载。</div>
+                                <div class="mb-3"><label class="form-label fw-bold small">下载代理 (Proxy)</label><input type="text" class="form-control form-control-sm font-monospace" v-model="settings.download_proxy" placeholder="http://127.0.0.1:7890"></div>
+                                <div class="card bg-light border-0 p-3 mb-3">
+                                    <div class="d-flex justify-content-between align-items-center mb-2"><span class="fw-bold small">SenseVoice (ONNX/Torch)</span><span class="badge" :class="modelReady ? 'bg-success' : 'bg-secondary'">[[ modelReady ? '已就绪' : '未检测/缺失' ]]</span></div>
+                                    <button class="btn btn-outline-primary btn-sm w-100" @click="startDownloadModel"><i class="bi bi-cloud-download me-1"></i> 一键下载 / 更新模型资源</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div v-show="settingTab === 'notify'" class="animate-fade">
+                            <div class="text-center py-4 text-muted"><i class="bi bi-telegram fs-1 d-block mb-3 text-primary opacity-75"></i><h6 class="fw-bold">Telegram 机器人通知</h6></div>
+                            <div class="mb-3"><label class="form-label fw-bold small">Bot Token</label><input type="text" class="form-control" v-model="settings.tg_bot_token"></div>
+                            <div class="mb-4"><label class="form-label fw-bold small">Chat ID</label><input type="text" class="form-control" v-model="settings.tg_chat_id"></div>
+                            <h6 class="fw-bold small mb-3 text-muted">通知触发条件</h6>
+                            <div class="form-check form-switch mb-3"><input class="form-check-input" type="checkbox" v-model="settings.notify_upload_success" id="notify_success"><label class="form-check-label small" for="notify_success">上传成功通知</label></div>
+                            <div class="form-check form-switch mb-3"><input class="form-check-input" type="checkbox" v-model="settings.notify_errors" id="notify_error"><label class="form-check-label small" for="notify_error">失败/异常通知</label></div>
+                        </div>
+
+                        <div v-show="settingTab === 'queue'" class="animate-fade">
+                            <div class="alert alert-warning border-0 py-2 small mb-4"><i class="bi bi-exclamation-triangle-fill me-1"></i> <strong>注意：</strong> 修改并发数需要重启服务才能生效。</div>
+                            <div class="row g-3">
+                                <div class="col-12"><label class="form-label fw-bold small">🕵️ 检测并发数</label><div class="input-group input-group-sm"><button class="btn btn-outline-secondary" @click="settings.concurrency_detect > 1 && settings.concurrency_detect--"><i class="bi bi-dash"></i></button><input type="number" class="form-control text-center font-monospace" v-model="settings.concurrency_detect" min="1" max="10"><button class="btn btn-outline-secondary" @click="settings.concurrency_detect++"><i class="bi bi-plus"></i></button></div></div>
+                                <div class="col-12"><label class="form-label fw-bold small">☁️ 上传并发数</label><div class="input-group input-group-sm"><button class="btn btn-outline-secondary" @click="settings.concurrency_upload > 1 && settings.concurrency_upload--"><i class="bi bi-dash"></i></button><input type="number" class="form-control text-center font-monospace" v-model="settings.concurrency_upload" min="1" max="20"><button class="btn btn-outline-secondary" @click="settings.concurrency_upload++"><i class="bi bi-plus"></i></button></div></div>
+                            </div>
+                            <hr class="my-4 text-muted opacity-25">
+                            <div class="d-grid"><button class="btn btn-danger py-2 shadow-sm rounded-3" @click="saveAndRestart"><i class="bi bi-bootstrap-reboot me-2"></i>保存并重启服务</button></div>
+                        </div>
+
+                        <div v-show="settingTab === 'account'" class="animate-fade">
+                            <h6 class="border-bottom pb-2 mb-3 text-muted small fw-bold">🔗 API 接入鉴权</h6>
+                            <div class="mb-4">
+                                <label class="form-label fw-bold small">Trigger API Token</label>
+                                <input type="text" class="form-control form-control-sm font-monospace" v-model="settings.api_token">
+                                <div class="form-text text-success" style="font-size: 11px">
+                                    <i class="bi bi-check-circle-fill"></i> 修改保存后，系统将自动同步更新 <code>trigger.sh</code> 脚本。
+                                </div>
+                                <div class="mt-3">
+                                    <button class="btn btn-primary w-100" @click="saveSettings" :disabled="saving">
+                                        <span v-if="saving" class="spinner-border spinner-border-sm me-2"></span>
+                                        <span v-else><i class="bi bi-save-fill me-2"></i></span>
+                                        保存 API Token
+                                    </button>
+                                </div>
+                            </div>
+
+                            <hr class="my-4 text-muted opacity-25">
+
+                            <h6 class="border-bottom pb-2 mb-4 text-muted small fw-bold">🛡️ 管理员凭证设置</h6>
+                            <div class="alert alert-light border small mb-3"><i class="bi bi-info-circle me-1"></i> 若仅修改用户名，留空密码框即可。</div>
+                            <div class="mb-3"><label class="form-label small fw-bold">用户名 (Username)</label><input type="text" class="form-control" v-model="account.username" placeholder="Admin Username"></div>
+                            <div class="mb-3"><label class="form-label small fw-bold">当前旧密码 (验证用)</label><input type="password" class="form-control" v-model="account.old_pass" placeholder="Current Password (Required)"></div>
+                            <div class="row g-2">
+                                <div class="col-6"><label class="form-label small fw-bold">新密码</label><input type="password" class="form-control" v-model="account.new_pass" placeholder="New Password"></div>
+                                <div class="col-6"><label class="form-label small fw-bold">确认新密码</label><input type="password" class="form-control" v-model="account.confirm_pass" placeholder="Confirm"></div>
+                            </div>
+                            <div class="mt-4"><button class="btn btn-dark w-100 py-2" @click="updateAccount" :disabled="saving"><i class="bi bi-shield-check me-2"></i>更新账户凭证</button></div>
+                        </div>
+
+                    </div>
+
+                    <div class="mt-4" v-if="settingTab !== 'queue' && settingTab !== 'account'">
+                        <button class="btn btn-primary w-100 py-2 rounded-3" @click="saveSettings" :disabled="saving">
+                            <span v-if="saving" class="spinner-border spinner-border-sm me-2"></span>
+                            <span v-else><i class="bi bi-save me-2"></i></span>
+                            保存当前配置
+                        </button>
+                    </div>
+
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-5">
+            <div class="card shadow-sm border-0 h-100">
+                <div class="card-header bg-white fw-bold py-3 d-flex justify-content-between align-items-center"><span><i class="bi bi-key text-success me-2"></i>关键词命中</span><button class="btn btn-sm btn-success px-3" @click="openAddModal"><i class="bi bi-plus-lg me-1"></i>新增</button></div>
+                <div class="card-body">
+                    <ul class="nav nav-tabs mb-4"><li class="nav-item"><button class="nav-link" :class="{active: tab==='audio'}" @click="tab='audio'">🔊 音频 <span class="badge bg-secondary ms-1 rounded-pill">[[ getCount('audio') ]]</span></button></li><li class="nav-item"><button class="nav-link" :class="{active: tab==='subtitle'}" @click="tab='subtitle'">📝 字幕 <span class="badge bg-secondary ms-1 rounded-pill">[[ getCount('subtitle') ]]</span></button></li><li class="nav-item"><button class="nav-link" :class="{active: tab==='meta'}" @click="tab='meta'">🏷️ 元数据 <span class="badge bg-secondary ms-1 rounded-pill">[[ getCount('meta') ]]</span></button></li></ul>
+                    <div class="d-flex flex-wrap gap-2 align-content-start" style="min-height: 200px;">
+                        <div v-for="kw in currentList" :key="kw.id" class="badge rounded-pill p-2 ps-3 kw-tag border" :class="kw.enabled ? 'bg-primary text-white' : 'disabled'" @click="toggleKw(kw)">[[ kw.content ]] <span class="kw-close" @click.stop="confirmAction('删除此关键词？', () => deleteKw(kw.id))"><i class="bi bi-x-lg"></i></span></div>
+                        <div v-if="currentList.length === 0" class="w-100 text-center py-5 text-muted"><i class="bi bi-inbox fs-1 d-block mb-2 opacity-50"></i>暂无 [[ tabName ]] 关键词</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast-container position-fixed bottom-0 end-0 p-3" style="z-index: 1100"><div id="liveToast" class="toast align-items-center text-white border-0" :class="toastClass" role="alert"><div class="d-flex"><div class="toast-body"><i :class="toastIcon" class="me-2"></i> [[ toastMsg ]]</div><button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button></div></div></div>
+    <div class="modal fade" id="confirmModal" tabindex="-1"><div class="modal-dialog modal-sm modal-dialog-centered"><div class="modal-content"><div class="modal-header border-0 pb-0"><h5 class="modal-title fs-6 fw-bold text-danger">⚠️ 确认操作</h5></div><div class="modal-body">[[ confirmMsg ]]</div><div class="modal-footer border-0 pt-0"><button type="button" class="btn btn-sm btn-light" data-bs-dismiss="modal">取消</button><button type="button" class="btn btn-sm btn-danger" @click="executeConfirm">确定</button></div></div></div></div>
+    <div class="modal fade" id="addKwModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content"><div class="modal-header"><h5 class="modal-title">新增 [[ tabName ]] 关键词</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="mb-3"><label class="form-label fw-bold">关键词内容</label><input type="text" class="form-control" v-model="newKw" placeholder="例如：加群|微信|推广" @keyup.enter="addKw"><div class="form-text text-muted">💡 支持批量添加：使用竖线 <code>|</code> 分隔多个词。</div></div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button><button type="button" class="btn btn-primary" @click="addKw">确认添加</button></div></div></div></div>
+    <div class="modal fade" id="downloadLogModal" tabindex="-1"><div class="modal-dialog modal-lg modal-dialog-centered"><div class="modal-content"><div class="modal-header bg-dark text-white border-0"><h5 class="modal-title fs-6"><i class="bi bi-terminal me-2"></i>模型资源下载器</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body bg-black p-0"><div ref="logBox" class="p-3 font-monospace" style="height: 400px; overflow-y: auto; color: #0f0; font-size: 12px; line-height: 1.5; white-space: pre-wrap;">[[ downloadLogs ]]</div></div><div class="modal-footer bg-dark border-0 py-2"><div v-if="downloading" class="d-flex align-items-center text-white small me-auto"><span class="spinner-border spinner-border-sm me-2"></span> 正在下载中...</div><button type="button" class="btn btn-sm btn-light" data-bs-dismiss="modal">[[ downloading ? '隐藏窗口 (后台继续)' : '关闭' ]]</button></div></div></div></div>
+
+</div>
+
+<script>
+let modalAdd, modalConfirm, toastInstance, modalDownload;
+
+Vue.createApp({
+    delimiters: ['[[', ']]'],
+    data(){
+        return{
+            settingTab: 'basic',
+            settings: {
+                check_audio: true, check_subtitles: true, sanitize_metadata: true, enable_local_model: false,
+                detailed_mode: false,
+                tg_bot_token: '', tg_chat_id: '',
+                audio_threshold_multi: 600, audio_threshold_long: 3600,
+                audio_len_head: 240, audio_len_mid: 240, audio_len_tail: 300, audio_len_tail_long: 600,
+                api_url: '', api_key: '', api_model: '',
+                scan_path: '', rclone_remote: '', api_token: '',
+                notify_upload_success: false, notify_errors: true,
+                concurrency_detect: 2, concurrency_upload: 9,
+                download_proxy: ''
+            },
+            account: { username: '', old_pass: '', new_pass: '', confirm_pass: '' },
+            keywords: [], tab: 'audio', newKw: '', saving: false,
+            toastMsg: '', toastClass: 'bg-primary', toastIcon: 'bi-info-circle',
+            confirmMsg: '', confirmCallback: null,
+            downloadLogs: '等待启动...', downloading: false, timer: null, modelReady: false
+        }
+    },
+    computed: {
+        currentList() { return this.keywords.filter(k => k.type === this.tab); },
+        tabName() { const map = {'audio': '音频', 'subtitle': '字幕', 'meta': '元数据'}; return map[this.tab]; }
+    },
+    mounted(){
+        this.loadSettings(); this.loadKeywords();
+        modalAdd = new bootstrap.Modal(document.getElementById('addKwModal'));
+        modalConfirm = new bootstrap.Modal(document.getElementById('confirmModal'));
+        modalDownload = new bootstrap.Modal(document.getElementById('downloadLogModal'));
+        toastInstance = new bootstrap.Toast(document.getElementById('liveToast'));
+    },
+    methods:{
+        showToast(msg, type='success'){
+            this.toastMsg = msg;
+            this.toastClass = type==='success' ? 'bg-success' : 'bg-danger';
+            this.toastIcon = type==='success' ? 'bi-check-circle-fill' : 'bi-exclamation-triangle-fill';
+            toastInstance.show();
+        },
+        confirmAction(msg, action){ this.confirmMsg = msg; this.confirmCallback = action; modalConfirm.show(); },
+        executeConfirm(){ if(this.confirmCallback) this.confirmCallback(); modalConfirm.hide(); },
+
+        loadSettings(){
+            axios.get('/api/settings').then(r=>{
+                const d = r.data;
+                ['check_audio','check_subtitles','sanitize_metadata', 'enable_local_model', 'detailed_mode', 'notify_upload_success', 'notify_errors'].forEach(k => this.settings[k] = (d[k]===true || d[k]==='true'));
+                this.settings.tg_bot_token = d.tg_bot_token||'';
+                this.settings.tg_chat_id = d.tg_chat_id||'';
+                const numKeys = ['audio_threshold_multi', 'audio_threshold_long', 'audio_len_head', 'audio_len_mid', 'audio_len_tail', 'audio_len_tail_long', 'concurrency_detect', 'concurrency_upload'];
+                numKeys.forEach(k => { if(d[k] !== undefined) this.settings[k] = d[k]; });
+                this.settings.api_url = d.api_url || '';
+                this.settings.api_key = d.api_key || '';
+                this.settings.api_model = d.api_model || '';
+                this.settings.scan_path = d.scan_path || '/root/downloads';
+                this.settings.rclone_remote = d.rclone_remote || 's25';
+                this.settings.api_token = d.api_token || '8pUoqOTHhEAhRnacl3c19';
+                this.settings.download_proxy = d.download_proxy || '';
+                this.modelReady = d.model_exists === true;
+                if(!this.modelReady && this.settings.enable_local_model) this.settings.enable_local_model = false;
+                if(d.username) this.account.username = d.username;
+            })
+        },
+        saveSettings(){
+            this.saving = true;
+            axios.post('/api/settings', this.settings).then(()=>{
+                setTimeout(()=>{ this.saving=false; this.showToast('配置已保存'); }, 500);
+            }).catch(() => { this.saving = false; this.showToast('保存失败', 'error'); });
+        },
+        saveAndRestart(){
+            this.saving = true;
+            axios.post('/api/settings', this.settings).then(()=>{
+                this.showToast('配置已保存，正在重启...');
+                axios.post('/api/restart').then(res => { setTimeout(() => { location.reload(); }, 3000); }).catch(()=>{ this.showToast('重启命令发送失败', 'error'); this.saving = false; });
+            });
+        },
+        updateAccount() {
+            if(!this.account.old_pass) return this.showToast('必须输入旧密码以验证身份', 'error');
+            if(this.account.new_pass && this.account.new_pass !== this.account.confirm_pass) return this.showToast('两次新密码输入不一致', 'error');
+
+            this.saving = true;
+            axios.post('/api/account/update', {
+                old_password: this.account.old_pass,
+                new_password: this.account.new_pass,
+                new_username: this.account.username
+            }).then(res => {
+                this.saving = false;
+                if(res.data.code === 200) {
+                    this.showToast('账户信息已更新，请重新登录');
+                    setTimeout(() => location.href='/logout', 1000);
+                } else {
+                    this.showToast(res.data.msg, 'error');
+                }
+            }).catch(err => {
+                this.saving = false;
+                this.showToast(err.response?.data?.msg || '请求失败', 'error');
+            });
+        },
+        loadKeywords(){ axios.get('/api/keywords').then(r => this.keywords = r.data); },
+        getCount(type){ return this.keywords.filter(k => k.type === type).length; },
+        toggleKw(kw){ axios.put('/api/keyword/'+kw.id, {enabled: !kw.enabled}).then(this.loadKeywords); },
+        deleteKw(id){ axios.delete('/api/keyword/'+id).then(()=>{ this.loadKeywords(); this.showToast('关键词已删除'); }); },
+        openAddModal(){ this.newKw = ''; modalAdd.show(); },
+        addKw(){
+            if(!this.newKw.trim()) return;
+            axios.post('/api/keywords', { type: this.tab, content: this.newKw }).then(res => { modalAdd.hide(); this.loadKeywords(); this.showToast(`成功添加 ${res.data.added} 个关键词`); });
+        },
+        startDownloadModel() {
+            this.downloadLogs = "🚀 正在请求启动下载任务..."; this.downloading = true; modalDownload.show();
+            axios.post('/api/model/download').then(res => { if(res.data.code === 200 || res.data.code === 409) this.pollDownloadLog(); else { this.downloadLogs = "❌ " + res.data.msg; this.downloading = false; } }).catch(e => { this.downloadLogs = "❌ " + e.message; this.downloading = false; });
+        },
+        pollDownloadLog() {
+            if(this.timer) clearTimeout(this.timer);
+            axios.get('/api/model/log').then(res => {
+                const data = res.data; this.downloadLogs = data.logs || '暂无日志...'; this.downloading = data.running;
+                this.$nextTick(() => { const el = this.$refs.logBox; if(el) el.scrollTop = el.scrollHeight; });
+                if (data.running) this.timer = setTimeout(this.pollDownloadLog, 1000);
+                else { this.showToast('下载任务已结束'); this.loadSettings(); }
+            }).catch(() => { this.downloading = false; });
+        }
+    }
+}).mount('#app')
+</script>
+</body>
+</html>

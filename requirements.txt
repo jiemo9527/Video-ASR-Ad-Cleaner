@@ -1,13 +1,9 @@
-# --- 语音识别核心 ---
+flask
+flask-sqlalchemy
+flask-login
+requests
 funasr
 modelscope
 torch
-torchaudio
-
-# --- 文本处理 & 匹配 ---
-pypinyin
 thefuzz
-python-Levenshtein
-
-# --- 视频/音频处理 ---
-ffmpeg-python
+pypinyin

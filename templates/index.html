@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Scanner Pro Dashboard</title>
+
+    <link rel="icon" href="{{ url_for('static', filename='favicon.png') }}" type="image/png">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.8.0/font/bootstrap-icons.css">
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <style>
+        .task-log-box {
+            height: 50px; overflow-y: hidden; background: #212529; color: #28a745;
+            font-family: 'Consolas', monospace; font-size: 11px; padding: 5px 8px;
+            border-radius: 3px; cursor: zoom-in; position: relative; line-height: 1.3;
+        }
+        .task-log-box:hover { background: #2c3034; }
+        .sys-log-box {
+            background-color: #1e1e1e; color: #d4d4d4; font-family: 'Consolas', monospace;
+            font-size: 13px; padding: 15px; border-radius: 4px; height: calc(100vh - 380px);
+            min-height: 500px; overflow-y: auto; white-space: pre-wrap; line-height: 1.5; border: 1px solid #343a40;
+        }
+        .config-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; transition: all 0.3s; }
+        .dot-on { background-color: #198754; box-shadow: 0 0 4px #198754; }
+        .dot-processing { background-color: #0d6efd; animation: pulse 1s infinite; }
+        .dot-dirty { background-color: #dc3545; box-shadow: 0 0 4px #dc3545; }
+        .dot-off { background-color: #adb5bd; opacity: 0.3; }
+        @keyframes pulse { 0% { opacity: 0.5; } 50% { opacity: 1; } 100% { opacity: 0.5; } }
+        .nav-tabs .nav-link { color: #495057; font-weight: 500; border-radius: 4px 4px 0 0; }
+        .nav-tabs .nav-link.active { font-weight: bold; color: #0d6efd; border-top: 3px solid #0d6efd; background: #fff; border-bottom-color: transparent; }
+        .full-log-content { background: #0d1117; color: #e6edf3; font-family: 'Consolas', monospace; font-size: 13px; padding: 20px; height: 75vh; overflow-y: auto; white-space: pre-wrap; }
+        .progress-bar { transition: width 0.5s ease; }
+    </style>
+</head>
+<body class="bg-light">
+<div id="app" class="container-fluid px-4 py-4">
+
+    <div class="d-flex justify-content-between align-items-center mb-4 bg-white p-3 rounded shadow-sm border">
+        <div class="d-flex align-items-center">
+            <h4 class="mb-0 fw-bold text-primary me-4">
+                <img src="{{ url_for('static', filename='favicon.png') }}" width="24" height="24" class="me-2" style="border-radius: 4px;">
+                Scanner Pro Dashboard
+            </h4>
+            <div class="d-flex gap-3">
+                <span class="badge bg-light text-dark border px-3 py-2"><i class="bi bi-search text-primary"></i> 检测中: [[ activeDetectCount ]]</span>
+                <span class="badge bg-light text-dark border px-3 py-2"><i class="bi bi-cloud-arrow-up text-info"></i> 上传中: [[ activeUploadCount ]]</span>
+            </div>
+        </div>
+        <div>
+            <button class="btn btn-outline-danger me-2 px-3" @click="confirmAction('确定要清空所有【已完成/违规/错误/已取消】的任务记录吗？此操作不可恢复。', () => clearHistory())"><i class="bi bi-trash"></i> 清空历史</button>
+            <a href="/settings_page" class="btn btn-outline-secondary me-2 px-3"><i class="bi bi-gear-fill"></i> 设置</a>
+            <a href="/logout" class="btn btn-outline-danger px-3"><i class="bi bi-box-arrow-right"></i></a>
+        </div>
+    </div>
+
+    <div class="card shadow-sm border-0">
+        <div class="card-header bg-light pt-3 pb-0 border-bottom-0">
+            <ul class="nav nav-tabs card-header-tabs">
+                <li class="nav-item"><button class="nav-link" :class="{active: view==='detect'}" @click="view='detect'">🔍 检测队列 <span class="badge bg-secondary rounded-pill ms-1" v-if="detectTasks.length > 0">[[ detectTasks.length ]]</span></button></li>
+                <li class="nav-item"><button class="nav-link" :class="{active: view==='upload'}" @click="view='upload'">☁️ 上传队列 <span class="badge bg-secondary rounded-pill ms-1" v-if="uploadTasks.length > 0">[[ uploadTasks.length ]]</span></button></li>
+                <li class="nav-item"><button class="nav-link" :class="{active: view==='syslog'}" @click="view='syslog'">📜 系统日志</button></li>
+            </ul>
+        </div>
+
+        <div class="card-body p-0 border-top bg-white">
+
+            <div v-if="view==='detect'">
+                <div class="p-2 border-bottom d-flex gap-2 bg-light bg-opacity-50 ps-3">
+                    <button class="btn btn-sm btn-outline-primary" @click="batchAction('detect', 'retry')"><i class="bi bi-arrow-repeat me-1"></i>全部重试 (错误/取消)</button>
+                    <button class="btn btn-sm btn-outline-danger" @click="batchAction('detect', 'stop')"><i class="bi bi-stop-circle me-1"></i>全部停止</button>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle mb-0">
+                        <thead class="table-light"><tr><th class="text-center">ID</th><th>文件信息</th><th class="text-center">状态指示</th><th class="text-center">结果</th><th>实时日志 (双击全屏)</th><th class="text-end pe-4">操作</th></tr></thead>
+                        <tbody>
+                            <tr v-for="t in detectTasks" :key="t.id">
+                                <td class="text-center fw-bold text-muted">[[ t.id ]]</td>
+                                <td><div class="text-truncate fw-bold text-dark" style="max-width:280px" :title="t.filename"><i class="bi bi-file-earmark-play me-1"></i>[[ t.filename ]]</div><div class="small text-muted mt-1"><i class="bi bi-clock"></i> [[ t.created_at ]]</div></td>
+                                <td class="text-center"><div class="d-flex justify-content-center bg-light rounded-pill py-1 px-2 border" style="width: fit-content; margin: 0 auto; gap:3px"><span v-for="i in 3" :class="['config-dot', getDotClass('audio', t, i)]"></span><span style="border-right:1px solid #ccc; margin:0 2px"></span><span :class="['config-dot', getDotClass('subtitle', t)]"></span><span :class="['config-dot', getDotClass('meta', t)]"></span></div></td>
+                                <td class="text-center"><span class="badge rounded-pill" :class="bg(t.status)">[[ statusText[t.status]||t.status ]]</span></td>
+                                <td style="width: 35%;"><div class="task-log-box" @dblclick="showFullLog(t)" v-html="fmt(t.log)"></div></td>
+                                <td class="text-end pe-3">
+                                    <div class="btn-group btn-group-sm">
+                                        <button v-if="canControl(t)" class="btn btn-outline-primary" @click="openConfig(t)" title="调整"><i class="bi bi-sliders"></i></button>
+                                        <button v-if="canControl(t)" class="btn btn-outline-success" @click="confirmAction('确定跳过检测直接上传吗？', () => directUpload(t.id))" title="直传"><i class="bi bi-forward-fill"></i></button>
+                                        <button v-if="isRunning(t)" class="btn btn-outline-danger" @click="confirmAction('确定强制停止该任务吗？', () => cancel(t.id))" title="停止"><i class="bi bi-stop-circle-fill"></i></button>
+                                        <button v-if="isError(t)" class="btn btn-outline-secondary" @click="retry(t.id)" title="重试"><i class="bi bi-arrow-clockwise"></i></button>
+                                        <button class="btn btn-outline-danger" @click="confirmAction('⚠️ 警告：确定要删除此任务吗？', () => deleteTask(t.id))" title="删除"><i class="bi bi-trash-fill"></i></button>
+                                    </div>
+                                </td>
+                            </tr>
+                            <tr v-if="detectTasks.length===0"><td colspan="6" class="text-center py-5 text-muted">当前没有等待检测的任务</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div v-if="view==='upload'">
+                <div class="p-2 border-bottom d-flex gap-2 bg-light bg-opacity-50 ps-3">
+                    <button class="btn btn-sm btn-outline-primary" @click="batchAction('upload', 'retry')"><i class="bi bi-arrow-repeat me-1"></i>全部重试 (错误/取消)</button>
+                    <button class="btn btn-sm btn-outline-danger" @click="batchAction('upload', 'stop')"><i class="bi bi-stop-circle me-1"></i>全部停止</button>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle mb-0">
+                        <thead class="table-light"><tr><th class="text-center">ID</th><th>文件信息</th><th>传输进度</th><th>速度 / ETA</th><th>结束时间</th><th class="text-center">状态</th><th class="text-end pe-4">操作</th></tr></thead>
+                        <tbody>
+                            <tr v-for="t in uploadTasks" :key="t.id">
+                                <td class="text-center fw-bold text-muted">[[ t.id ]]</td>
+                                <td class="text-truncate" style="max-width:250px" :title="t.filename"><i class="bi bi-file-earmark-arrow-up me-1"></i>[[ t.filename ]]</td>
+                                <td><div class="progress bg-secondary bg-opacity-10" style="height: 12px; border-radius: 6px;"><div class="progress-bar progress-bar-striped progress-bar-animated" :style="{width: t.progress + '%'}" :class="t.status==='uploaded'?'bg-success':'bg-primary'"></div></div><div class="small text-end text-muted mt-1">[[ t.progress ]]%</div></td>
+                                <td><div v-if="t.status==='uploading'" class="small"><div class="fw-bold text-dark">🚀 [[ t.upload_speed ]]</div><div class="text-muted">⏱ [[ t.upload_eta ]]</div></div><div v-else class="text-muted small">-</div></td>
+                                <td class="small text-muted">[[ t.finished_at || '-' ]]</td>
+                                <td class="text-center"><span class="badge rounded-pill" :class="bg(t.status)">[[ statusText[t.status]||t.status ]]</span></td>
+                                <td class="text-end pe-3"><div class="btn-group btn-group-sm"><button v-if="t.status==='uploading'" class="btn btn-outline-danger" @click="confirmAction('确定停止上传？', () => cancel(t.id))"><i class="bi bi-stop-fill"></i></button><button v-if="t.status==='error' || t.status==='cancelled'" class="btn btn-outline-secondary" @click="retry(t.id)"><i class="bi bi-arrow-repeat"></i></button><button class="btn btn-outline-danger" @click="confirmAction('⚠️ 确定删除此记录吗？', () => deleteTask(t.id))"><i class="bi bi-trash-fill"></i></button></div></td>
+                            </tr>
+                            <tr v-if="uploadTasks.length===0"><td colspan="7" class="text-center py-5 text-muted">暂无上传任务</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div v-if="view==='syslog'" class="p-0">
+                <div class="bg-white p-2 border-bottom d-flex justify-content-between align-items-center px-4">
+                    <div class="d-flex align-items-center gap-3">
+                        <span class="fw-bold text-dark"><i class="bi bi-terminal-fill me-2 text-secondary"></i>System Logs</span>
+                        <div class="input-group input-group-sm" style="width: 250px;"><span class="input-group-text bg-light"><i class="bi bi-funnel"></i></span><input type="text" class="form-control" v-model="sysLogFilter" placeholder="关键词过滤..."><button class="btn btn-outline-secondary" v-if="sysLogFilter" @click="sysLogFilter=''">×</button></div>
+                        <div class="form-check form-switch mb-0"><input class="form-check-input" type="checkbox" v-model="autoRefreshLogs" id="autoRef"><label class="form-check-label small text-muted" for="autoRef">自动</label></div>
+                    </div>
+                    <div class="btn-group btn-group-sm"><button class="btn btn-outline-secondary" @click="loadSysLogs"><i class="bi bi-arrow-clockwise"></i></button><button class="btn btn-outline-danger" @click="confirmAction('确定清空系统日志(journalctl)吗？', () => clearSysLogs())"><i class="bi bi-eraser-fill"></i></button></div>
+                </div>
+                <div class="sys-log-box m-0 border-0 rounded-0" id="sysLogBox">
+                    <div v-for="(line, idx) in filteredSystemLogs" :key="idx" :class="getLogClass(line)" style="padding-left:5px">[[ line ]]</div>
+                    <div v-if="!sysLogs" class="text-muted p-3">正在读取系统日志...</div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <div class="toast-container position-fixed bottom-0 end-0 p-3" style="z-index: 1100"><div id="liveToast" class="toast align-items-center text-white border-0" :class="toastClass" role="alert"><div class="d-flex"><div class="toast-body fs-6"><i :class="toastIcon" class="me-2 fs-5" style="vertical-align: middle;"></i> [[ toastMsg ]]</div><button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button></div></div></div>
+    <div class="modal fade" id="confirmModal" tabindex="-1"><div class="modal-dialog modal-sm modal-dialog-centered"><div class="modal-content shadow"><div class="modal-header border-0 pb-0"><h6 class="modal-title fw-bold text-danger"><i class="bi bi-exclamation-triangle-fill me-1"></i> 确认操作</h6></div><div class="modal-body text-center py-3" style="white-space: pre-line;">[[ confirmMsg ]]</div><div class="modal-footer border-0 pt-0 justify-content-center"><button type="button" class="btn btn-sm btn-light border px-3" data-bs-dismiss="modal">取消</button><button type="button" class="btn btn-sm btn-danger px-3" @click="executeConfirm">确定执行</button></div></div></div></div>
+    <div class="modal fade" id="fullLogModal" tabindex="-1"><div class="modal-dialog modal-xl modal-dialog-scrollable"><div class="modal-content bg-dark border-secondary"><div class="modal-header border-secondary py-2"><h6 class="modal-title text-light font-monospace text-truncate w-75"><i class="bi bi-file-text me-2"></i>[[ currentLogTitle ]]</h6><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body p-0"><div class="full-log-content">[[ currentLogContent ]]</div></div></div></div></div>
+    <div class="modal fade" id="configModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content"><div class="modal-header bg-light"><h5 class="modal-title">🔧 调整检测策略</h5><button class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body" v-if="curTask.config"><div class="alert alert-info small mb-3">任务 <b>#[[ curTask.id ]]</b> 独立设置。</div><div class="form-check form-switch mb-3 ps-5"><input class="form-check-input" type="checkbox" v-model="curTask.config.check_audio" style="scale: 1.3;"><label class="form-check-label ms-2">音频检测</label></div><div class="form-check form-switch mb-3 ps-5"><input class="form-check-input" type="checkbox" v-model="curTask.config.check_subtitles" style="scale: 1.3;"><label class="form-check-label ms-2">字幕清洗</label></div><div class="form-check form-switch ps-5"><input class="form-check-input" type="checkbox" v-model="curTask.config.sanitize_metadata" style="scale: 1.3;"><label class="form-check-label ms-2">元数据清除</label></div></div><div class="modal-footer bg-light"><button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button><button class="btn btn-primary btn-sm" @click="saveAndRetry">重试</button></div></div></div></div>
+
+</div>
+
+<script>
+let modalConfig, modalLog, modalConfirm, toastInstance;
+Vue.createApp({
+    delimiters: ['[[', ']]'],
+    data(){ return { tasks:[], view:'detect', curTask:{}, sysLogs:'', sysLogFilter:'', autoRefreshLogs:true, currentLogTitle:'', currentLogContent:'', statusText:{'pending':'⏳ 等待中','processing':'🔄 检测中','pending_upload':'✅ 待上传','uploading':'☁️ 上传中','uploaded':'🎉 已完成','dirty':'🚫 已拦截','error':'❌ 出错了','cancelled':'⏹ 已停止'}, toastMsg:'', toastClass:'bg-primary', toastIcon:'bi-info-circle', confirmMsg:'', confirmCallback:null, pollTimer: null }},
+    computed: {
+        filteredSystemLogs() { if(!this.sysLogs)return[]; const l=this.sysLogs.split('\n'); if(!this.sysLogFilter.trim())return l; const k=this.sysLogFilter.toLowerCase(); return l.filter(x=>x.toLowerCase().includes(k)) },
+        detectTasks() { return this.tasks.filter(t => !this.isUploadTask(t)) },
+        uploadTasks() { return this.tasks.filter(t => this.isUploadTask(t)) },
+        activeDetectCount() { return this.tasks.filter(t => t.status === 'processing').length },
+        activeUploadCount() { return this.tasks.filter(t => t.status === 'uploading').length }
+    },
+    mounted(){
+        this.load();
+        this.startPolling();
+        setInterval(()=>{if(this.view==='syslog'&&this.autoRefreshLogs)this.loadSysLogs(true)}, 5000);
+        modalConfig=new bootstrap.Modal(document.getElementById('configModal'));
+        modalLog=new bootstrap.Modal(document.getElementById('fullLogModal'));
+        modalConfirm=new bootstrap.Modal(document.getElementById('confirmModal'));
+        toastInstance=new bootstrap.Toast(document.getElementById('liveToast'))
+    },
+    watch: { view(n) { if(n==='syslog') { if(!this.sysLogs)this.loadSysLogs(); this.$nextTick(()=>{ const b=document.getElementById('sysLogBox'); if(b)b.scrollTop=b.scrollHeight }) } } },
+    methods:{
+        isUploadTask(t) {
+            if(['pending_upload', 'uploading', 'uploaded'].includes(t.status)) return true;
+            if(['error', 'cancelled', 'dirty'].includes(t.status)) {
+                if(t.config && t.config.direct_upload) return true;
+                if(t.upload_speed || (t.upload_eta && t.upload_eta !== '-')) return true;
+                const log = t.log || '';
+                if(log.includes('☁️ 上传') || log.includes('=== 批量重传 ===') || log.includes('=== 直传 ===')) return true;
+            }
+            return false;
+        },
+        getLogClass(l) { if(l.includes('Error')||l.includes('❌')||l.includes('Fail'))return 'text-danger fw-bold'; if(l.includes('✅')||l.includes('Success'))return 'text-success'; if(l.includes('Warning')||l.includes('⚠️'))return 'text-warning'; if(l.includes('Task-'))return 'text-info'; return '' },
+
+        load(){
+            if(!document.getElementById('configModal').classList.contains('show')) {
+                return axios.get('/api/tasks').then(r=>this.tasks=r.data)
+            }
+            return Promise.resolve();
+        },
+
+        startPolling() {
+            const step = () => {
+                this.load().finally(() => {
+                    const busy = this.activeDetectCount > 0 || this.activeUploadCount > 0;
+                    const delay = busy ? 1000 : 3000;
+                    this.pollTimer = setTimeout(step, delay);
+                });
+            };
+            step();
+        },
+
+        bg(s){ return {'uploaded':'bg-success','dirty':'bg-danger','processing':'bg-primary','pending_upload':'bg-success text-white','uploading':'bg-info text-dark'}[s]||'bg-secondary' },
+        fmt(l){ return l?l.replace(/\n/g,'<br>'):'' },
+        getDotClass(type,t,idx) {
+            let p=t.progress||0;
+            if(type==='audio'&&!t.config.check_audio)return 'dot-off'; if(type==='subtitle'&&!t.config.check_subtitles)return 'dot-off'; if(type==='meta'&&!t.config.sanitize_metadata)return 'dot-off';
+            if(['pending_upload','uploading','uploaded'].includes(t.status))return 'dot-on'; if(t.status==='dirty')return 'dot-dirty';
+            if(t.status==='processing'){ if(type==='meta')return p>=10?'dot-on':'dot-processing'; if(type==='subtitle')return p>=30?'dot-on':(p>=10?'dot-processing':'dot-off'); if(type==='audio'){ let th=50+(idx-1)*15; if(p>=th+15)return 'dot-on'; if(p>=th)return 'dot-processing'; return 'dot-off' } } return 'dot-off';
+        },
+        showToast(m,t='success'){ this.toastMsg=m; this.toastClass=t==='success'?'bg-success':'bg-danger'; this.toastIcon=t==='success'?'bi-check-circle-fill':'bi-exclamation-triangle-fill'; toastInstance.show() },
+        confirmAction(m,a){ this.confirmMsg=m; this.confirmCallback=a; modalConfirm.show() },
+        executeConfirm(){ if(this.confirmCallback)this.confirmCallback(); modalConfirm.hide() },
+        loadSysLogs(s=false){ if(!s)this.sysLogs='读取中...'; axios.get('/api/system_logs?lines=200&t='+Date.now()).then(r=>{ this.sysLogs=r.data.data; const b=document.getElementById('sysLogBox'); if(b&&(b.scrollHeight-b.scrollTop-b.clientHeight<100||!s))this.$nextTick(()=>b.scrollTop=b.scrollHeight) }) },
+        clearSysLogs(){ axios.post('/api/system_logs/clear').then(r=>{ this.loadSysLogs(); this.showToast(r.data.msg) }) },
+        showFullLog(t){ this.currentLogTitle=t.filename; this.currentLogContent=t.log; modalLog.show() },
+        isRunning(t){ return ['processing','uploading'].includes(t.status) }, isError(t){ return ['error','cancelled','dirty'].includes(t.status) }, canControl(t){ return ['pending','dirty','error','cancelled'].includes(t.status) },
+        cancel(id){ axios.post('/api/cancel/'+id).then(()=>{ this.load(); this.showToast('任务已停止','error') }) },
+        retry(id){ axios.post('/api/retry/'+id).then(()=>{ this.load(); this.showToast('重试任务') }) },
+        directUpload(id){ axios.post(`/api/task/${id}/direct_upload`).then(()=>{ this.load(); this.showToast('切换直传') }) },
+        deleteTask(id){ axios.post(`/api/task/${id}/delete`).then(r=>{ this.showToast(r.data.msg); this.load() }) },
+        clearHistory(){ axios.post('/api/tasks/clear').then(r=>{ this.showToast(r.data.msg); this.load() }) },
+        openConfig(t){ this.curTask=JSON.parse(JSON.stringify(t)); modalConfig.show() },
+        saveAndRetry(){ axios.post(`/api/task/${this.curTask.id}/save_and_retry`,this.curTask.config).then(()=>{ modalConfig.hide(); this.load(); this.showToast('策略更新') }) },
+
+        batchAction(type, action) {
+            const actName = action==='retry'?'重试':'停止';
+            this.confirmAction(`确定要对当前列表执行【全部${actName}】吗？`, () => {
+                axios.post('/api/tasks/batch', {type, action}).then(res => {
+                    this.showToast(res.data.msg);
+                    this.load();
+                });
+            });
+        }
+    }
+}).mount('#app')
+</script>
+</body>
+</html>
