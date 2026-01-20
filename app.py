@@ -511,9 +511,47 @@ def trigger():
 @app.route('/api/tasks')
 @login_required
 def get_tasks():
-    tasks = Task.query.order_by(Task.id.desc()).limit(50).all()
+    # UI 需要同时展示“检测队列/上传队列”，并且两边都最多展示 N 条。
+    # 这里用与 batch 操作、前端同样的规则来判断任务属于上传还是检测。
+    LIMIT_EACH = 200
+    SCAN_LIMIT = 2000
+
+    def _is_upload_task(t: Task) -> bool:
+        if t.status in ['pending_upload', 'uploading', 'uploaded']:
+            return True
+        if t.status in ['error', 'cancelled', 'dirty']:
+            try:
+                if t.overrides:
+                    ov = json.loads(t.overrides)
+                    if ov.get('direct_upload') is True:
+                        return True
+            except:
+                pass
+            if t.upload_speed:
+                return True
+            if t.upload_eta and t.upload_eta != '-':
+                return True
+            log = t.log or ''
+            if '☁️ 上传' in log or '=== 批量重传 ===' in log or '=== 直传 ===' in log:
+                return True
+        return False
+
+    scan = Task.query.order_by(Task.id.desc()).limit(SCAN_LIMIT).all()
+    detect_sel = []
+    upload_sel = []
+
+    for t in scan:
+        if _is_upload_task(t):
+            if len(upload_sel) < LIMIT_EACH:
+                upload_sel.append(t)
+        else:
+            if len(detect_sel) < LIMIT_EACH:
+                detect_sel.append(t)
+        if len(detect_sel) >= LIMIT_EACH and len(upload_sel) >= LIMIT_EACH:
+            break
+
     res = []
-    for t in tasks:
+    for t in (detect_sel + upload_sel):
         res.append({"id": t.id, "filename": t.filename, "status": t.status, "log": t.log,
                     "created_at": t.created_at.strftime("%m-%d %H:%M"),
                     "finished_at": t.finished_at.strftime("%H:%M:%S") if t.finished_at else "-", "progress": t.progress,
