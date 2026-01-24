@@ -85,7 +85,7 @@ def load_user(user_id): return User.query.get(user_id)
 AUDIO_BLACKLIST_INIT = ["加群", "交流群", "TG群", "Telegram", "QQ群", "Q群", "资源群", "微信号", "微信群", "微信公众号",
                         "关注公众号"]
 SUBTITLE_BLACKLIST_INIT = ["加群", "交流群", "微信号", "微信群", "QQ", "qq", "q群", "公众号", "网址", ".com",
-                           "http", "www", "link3.cc", "ysepan.com", "Tacit0924"]
+                           "http", "www", "link3.cc", "ysepan.com", "Tacit0924", "资源群"]
 SUB_META_BLACKLIST_INIT = ["http", "www", "weixin", "Telegram", "TG@", "TG频道@", "群：", "群:", "资源群", "加群",
                            "微信号", "微信群", "QQ", "qq", "q群", "公众号", "微博", "b站", "资源站", "资源网", "发布页",
                            "荣誉出品", "link3.cc", "ysepan.com", "GyWEB", "Qqun", "hehehe", ".com", "PTerWEB",
@@ -636,9 +636,13 @@ def retry(tid):
     t.finished_at = None;
     t.retry_count = 0
     if is_up:
-        t.status = 'pending_upload'; db.session.commit(); upload_queue.put(t.id)
+        t.status = 'pending_upload';
+        db.session.commit();
+        upload_queue.put(t.id)
     else:
-        t.status = 'pending'; db.session.commit(); detect_queue.put(t.id)
+        t.status = 'pending';
+        db.session.commit();
+        detect_queue.put(t.id)
     return jsonify({"code": 200})
 
 
@@ -647,7 +651,7 @@ def retry(tid):
 def direct_upload(tid):
     t = Task.query.get(tid);
     if t: t.overrides = json.dumps({
-                                       "direct_upload": True}); t.status = 'pending'; t.log += "\n=== 直传 ===\n"; t.finished_at = None; t.retry_count = 0; db.session.commit(); detect_queue.put(
+        "direct_upload": True}); t.status = 'pending'; t.log += "\n=== 直传 ===\n"; t.finished_at = None; t.retry_count = 0; db.session.commit(); detect_queue.put(
         t.id)
     return jsonify({"code": 200})
 
@@ -691,7 +695,8 @@ def delete_task_file(tid):
     for fp in files_to_remove:
         if fp and os.path.exists(fp):
             try:
-                os.remove(fp); deleted.append(os.path.basename(fp))
+                os.remove(fp);
+                deleted.append(os.path.basename(fp))
             except:
                 pass
 
@@ -837,7 +842,9 @@ if __name__ == '__main__':
 
         # 🔥 开启 WAL 模式 (大幅优化 I/O)
         try:
-            db.session.execute(text("PRAGMA journal_mode=WAL")); db.session.commit(); print("🚀 SQLite WAL Enabled")
+            db.session.execute(text("PRAGMA journal_mode=WAL"));
+            db.session.commit();
+            print("🚀 SQLite WAL Enabled")
         except:
             pass
 
