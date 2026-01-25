@@ -765,7 +765,7 @@ def update_account():
 def get_system_logs():
     try:
         r = subprocess.run(
-            ['journalctl', '-t', 'arup', '-n', str(request.args.get('lines', 200)), '--no-pager', '--output',
+            ['journalctl', '-t', 'arup', '-n', str(request.args.get('lines', 9999)), '--no-pager', '--output',
              'short-iso'], capture_output=True, text=True)
         return jsonify({"code": 200, "data": r.stdout})
     except Exception as e:

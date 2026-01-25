@@ -211,7 +211,7 @@ Vue.createApp({
         showToast(m,t='success'){ this.toastMsg=m; this.toastClass=t==='success'?'bg-success':'bg-danger'; this.toastIcon=t==='success'?'bi-check-circle-fill':'bi-exclamation-triangle-fill'; toastInstance.show() },
         confirmAction(m,a){ this.confirmMsg=m; this.confirmCallback=a; modalConfirm.show() },
         executeConfirm(){ if(this.confirmCallback)this.confirmCallback(); modalConfirm.hide() },
-        loadSysLogs(s=false){ if(!s)this.sysLogs='读取中...'; axios.get('/api/system_logs?lines=200&t='+Date.now()).then(r=>{ this.sysLogs=r.data.data; const b=document.getElementById('sysLogBox'); if(b&&(b.scrollHeight-b.scrollTop-b.clientHeight<100||!s))this.$nextTick(()=>b.scrollTop=b.scrollHeight) }) },
+        loadSysLogs(s=false){ if(!s)this.sysLogs='读取中...'; axios.get('/api/system_logs?lines=9999&t='+Date.now()).then(r=>{ this.sysLogs=r.data.data; const b=document.getElementById('sysLogBox'); if(b&&(b.scrollHeight-b.scrollTop-b.clientHeight<100||!s))this.$nextTick(()=>b.scrollTop=b.scrollHeight) }) },
         clearSysLogs(){ axios.post('/api/system_logs/clear').then(r=>{ this.loadSysLogs(); this.showToast(r.data.msg) }) },
         showFullLog(t){ this.currentLogTitle=t.filename; this.currentLogContent=t.log; modalLog.show() },
         isRunning(t){ return ['processing','uploading'].includes(t.status) }, isError(t){ return ['error','cancelled','dirty'].includes(t.status) }, canControl(t){ return ['pending','dirty','error','cancelled'].includes(t.status) },
