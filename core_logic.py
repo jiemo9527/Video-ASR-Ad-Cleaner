@@ -439,7 +439,7 @@ class ScannerCore:
         remote_path = f"{remote_prefix}:{filename}"
 
         self.log(f"☁️ 上传: {remote_path}")
-        cmd = ['rclone', 'moveto', local_path, remote_path, '--use-json-log', '--stats', '1s', '-v', '--ignore-size']
+        cmd = ['rclone', 'moveto', local_path, remote_path, '--use-json-log', '--stats', '1s', '-v', '--ignore-size','--no-traverse','--drive-chunk-size', '64M']
 
         try:
             self.current_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
