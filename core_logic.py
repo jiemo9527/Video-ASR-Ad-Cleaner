@@ -173,12 +173,22 @@ class ScannerCore:
     def sanitize_metadata(self, source, meta_keywords):
         if source.lower().endswith('.rmvb'): return
         self.log("🧹 [检测] 检查元数据标签...")
-        res = self.run_cmd(['ffprobe', '-v', 'error', '-show_entries', 'format_tags', '-of', 'csv=p=0', source],
-                           timeout=30)
+        res_format = self.run_cmd(['ffprobe', '-v', 'error', '-show_entries', 'format_tags', '-of', 'csv=p=0', source],
+                                  timeout=30)
+        res_stream = self.run_cmd(
+            ['ffprobe', '-v', 'error', '-show_entries', 'stream_tags=language,title,handler_name', '-of', 'csv=p=0',
+             source],
+            timeout=30
+        )
 
         hit_words = []
-        if res and res.stdout and meta_keywords:
-            lower = res.stdout.lower()
+        if meta_keywords:
+            scan_text = ""
+            if res_format and res_format.stdout:
+                scan_text += res_format.stdout.lower() + "\n"
+            if res_stream and res_stream.stdout:
+                scan_text += res_stream.stdout.lower()
+            lower = scan_text
             for kw in meta_keywords:
                 if kw.lower() in lower: hit_words.append(kw)
 
@@ -188,7 +198,12 @@ class ScannerCore:
             name, ext = os.path.splitext(os.path.basename(source))
             output = os.path.join(dir_name, f"{name}_clean_meta{ext}")
             cmd = ['ffmpeg', '-err_detect', 'ignore_err', '-i', source, '-map', '0:v:0', '-map', '0:a?', '-map', '0:s?',
-                   '-c', 'copy', '-dn', '-ignore_unknown', '-strict', '-2', '-map_metadata', '-1', '-y', output]
+                   '-c', 'copy', '-dn', '-ignore_unknown', '-strict', '-2', '-map_metadata', '-1',
+                   '-metadata', 'title=', '-metadata', 'comment=',
+                   '-metadata', 'description=', '-metadata', 'synopsis=',
+                   '-metadata', 'artist=', '-metadata', 'album=', '-metadata', 'copyright=',
+                   '-metadata:s', 'title=', '-metadata:s', 'language=und', '-metadata:s', 'handler_name=',
+                   '-y', output]
             if self.run_cmd(cmd, timeout=300) and self.verify_integrity(output):
                 shutil.move(output, source);
                 self.log("✅ 元数据已清洗")
