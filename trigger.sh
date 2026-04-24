@@ -15,12 +15,14 @@ else
     TOKEN="8pUoqOTHhEAhRnacl3c19"
 fi
 
-# 2. 执行回调 (这部分保持不变)
+# 2. 执行回调
+TASK_GID="$1"
+TASK_FILE_COUNT="$2"
 TASK_PATH="$3"
 
 if [ -f "$TASK_PATH" ]; then
     curl -s -X POST "http://127.0.0.1:5000/api/trigger" \
          -H "Content-Type: application/json" \
          -H "X-API-Token: $TOKEN" \
-         -d "{\"path\": \"$TASK_PATH\"}"
+         -d "{\"gid\": \"$TASK_GID\", \"file_count\": \"$TASK_FILE_COUNT\", \"path\": \"$TASK_PATH\"}"
 fi

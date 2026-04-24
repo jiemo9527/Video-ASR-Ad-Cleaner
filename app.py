@@ -1,5 +1,6 @@
 import os
 import json
+import shutil
 import subprocess
 import sys
 import threading
@@ -82,7 +83,8 @@ def reset_login_fail(ip):
 def load_user(user_id): return User.query.get(user_id)
 
 
-AUDIO_BLACKLIST_INIT = ["加群", "交流群", "TG群", "Telegram", "QQ群", "Q群", "资源群", "微信号", "微信群", "微信公众号","加群","关注公众号"]
+AUDIO_BLACKLIST_INIT = ["加群", "交流群", "TG群", "Telegram", "QQ群", "Q群", "资源群", "微信号", "微信群", "微信公众号","加群","关注公众号",
+                        "群36", "资源区"]
 SUBTITLE_BLACKLIST_INIT = ["加群", "交流群", "微信号", "微信群", "QQ", "qq", "q群", "公众号", "网址", ".com", "Q群","http",
                            "www", "link3.cc", "ysepan.com", "Tacit0924", "资源群"]
 SUB_META_BLACKLIST_INIT = ["http", "www", "weixin", "Telegram", "TG@", "TG频道@", "群：", "群:", "资源群", "加群",
@@ -90,7 +92,7 @@ SUB_META_BLACKLIST_INIT = ["http", "www", "weixin", "Telegram", "TG@", "TG频道
                            "荣誉出品", "link3.cc", "ysepan.com", "GyWEB", "Qqun", "hehehe", ".com", "PTerWEB",
                            "panclub", "BT之家", "CMCT", "Byakuya", "ed3000", "yunpantv", "KKYY", "盘酱酱", "TREX",
                            "£yhq@tv", "1000fr", "HDCTV", "HHWEB", "ADWeb", "PanWEB", "BestWEB", "hanWEB", "it.com",
-                           "Mandarin", "HDSky"]
+                           "Mandarin", "HDSky", "HDsky", "Feibanyama"]
 
 
 def seed_default_keywords():
@@ -155,6 +157,102 @@ def get_final_config(overrides_json=None):
     return final_conf
 
 
+def get_task_overrides(task):
+    try:
+        if not task or not task.overrides:
+            return {}
+        data = json.loads(task.overrides)
+        return data if isinstance(data, dict) else {}
+    except:
+        return {}
+
+
+def set_task_overrides(task, data):
+    task.overrides = json.dumps(data) if data else None
+
+
+def update_task_overrides(task, patch=None, remove_keys=None):
+    data = get_task_overrides(task)
+    if patch:
+        data.update(patch)
+    if remove_keys:
+        for key in remove_keys:
+            data.pop(key, None)
+    set_task_overrides(task, data)
+    return data
+
+
+def replace_public_task_overrides(task, new_values):
+    private_data = {k: v for k, v in get_task_overrides(task).items() if str(k).startswith('_')}
+    if new_values:
+        private_data.update(new_values)
+    set_task_overrides(task, private_data)
+    return private_data
+
+
+def is_directory_task(task, overrides=None):
+    ov = overrides if overrides is not None else get_task_overrides(task)
+    return bool(ov.get('_dir_task'))
+
+
+def list_directory_task_files(root_path):
+    files = []
+    if not root_path or not os.path.isdir(root_path):
+        return files
+
+    for dirpath, dirnames, filenames in os.walk(root_path):
+        dirnames.sort()
+        for name in sorted(filenames):
+            if name.endswith('.aria2'):
+                continue
+            full_path = os.path.join(dirpath, name)
+            if os.path.isfile(full_path):
+                files.append(full_path)
+    return files
+
+
+def resolve_directory_task_path(file_path, file_count, scan_path):
+    if not file_path or file_count <= 1:
+        return file_path
+
+    abs_path = os.path.abspath(file_path)
+    abs_scan = os.path.abspath(scan_path.rstrip('/\\'))
+    candidate = os.path.dirname(abs_path)
+
+    while candidate and candidate.startswith(abs_scan):
+        count = 0
+        try:
+            for dirpath, dirnames, filenames in os.walk(candidate):
+                dirnames.sort()
+                for name in filenames:
+                    if name.endswith('.aria2'):
+                        continue
+                    count += 1
+                    if count >= file_count:
+                        return candidate
+        except:
+            break
+
+        if os.path.normpath(candidate) == os.path.normpath(abs_scan):
+            break
+        parent = os.path.dirname(candidate)
+        if parent == candidate:
+            break
+        candidate = parent
+
+    return os.path.dirname(abs_path)
+
+
+def build_directory_remote_path(root_path, file_path, root_dir_name, default_remote):
+    normalized_root = root_path.rstrip('/\\')
+    root_name = os.path.basename(normalized_root)
+    parent_name = os.path.basename(os.path.dirname(normalized_root))
+    remote_prefix = default_remote if (parent_name == root_dir_name or not parent_name) else parent_name
+    rel_path = os.path.relpath(file_path, root_path).replace(os.sep, '/')
+    remote_rel = f"{root_name}/{rel_path}" if rel_path and rel_path != '.' else root_name
+    return remote_prefix, f"{remote_prefix}:{remote_rel}"
+
+
 def get_next_persistent_id():
     c = Config.query.filter_by(key='sys_task_counter').first()
     if not c:
@@ -205,14 +303,6 @@ def detection_worker():
                 else:
                     final_settings['enable_local_model'] = user_local_pref
 
-                passed_segments = []
-                try:
-                    if task.overrides:
-                        ov = json.loads(task.overrides)
-                        passed_segments = ov.get('_passed', [])
-                except:
-                    pass
-
                 scan_path = final_settings.get('scan_path', '/root/downloads')
                 rclone_remote = final_settings.get('rclone_remote', 's25')
                 current_root_name = os.path.basename(scan_path.rstrip('/'))
@@ -226,19 +316,61 @@ def detection_worker():
                     t = Task.query.get(task_id);
                     if t: t.log = (t.log or "") + f"{msg}\n"; db.session.commit()
 
+                task_overrides = get_task_overrides(task)
+                dir_task = is_directory_task(task, task_overrides)
+                current_process_path = task.filepath
+                passed_segments = []
+
+                if dir_task:
+                    remaining_files = list_directory_task_files(task.filepath)
+                    if not remaining_files:
+                        total_files = max(1, int(task_overrides.get('_dir_total_files', 1) or 1))
+                        uploaded_count = int(task_overrides.get('_dir_uploaded_count', 0) or 0)
+                        task.status = 'uploaded' if uploaded_count >= total_files else 'error'
+                        task.progress = 100 if task.status == 'uploaded' else 0
+                        task.upload_eta = "完成" if task.status == 'uploaded' else "-"
+                        task.finished_at = datetime.now()
+                        db_logger("✅ 目录任务已完成" if task.status == 'uploaded' else "❌ 目录任务中未找到可处理文件")
+                        detect_queue.task_done()
+                        continue
+
+                    current_process_path = remaining_files[0]
+                    if task_overrides.get('_current_item') != current_process_path or task_overrides.get('_dir_stage') != 'detect':
+                        task_overrides = update_task_overrides(
+                            task,
+                            {'_current_item': current_process_path, '_dir_stage': 'detect'},
+                            remove_keys=['_passed', '_passed_file']
+                        )
+                        db.session.commit()
+                    if task_overrides.get('_passed_file') == current_process_path:
+                        passed_segments = task_overrides.get('_passed', [])
+                else:
+                    passed_segments = task_overrides.get('_passed', [])
+
                 def detect_prog(pct, msg, _):
                     t = Task.query.get(task_id);
-                    if t: t.progress = pct; db.session.commit()
+                    if not t:
+                        return
+                    if dir_task:
+                        ov = get_task_overrides(t)
+                        total_files = max(1, int(ov.get('_dir_total_files', 1) or 1))
+                        uploaded_count = int(ov.get('_dir_uploaded_count', 0) or 0)
+                        t.progress = int(min(99, ((uploaded_count + (pct / 100.0) * 0.5) / total_files) * 100))
+                    else:
+                        t.progress = pct
+                    db.session.commit()
 
                 def save_checkpoint(seg_name):
                     try:
                         t = Task.query.get(task_id)
-                        ov = json.loads(t.overrides) if t.overrides else {}
+                        ov = get_task_overrides(t)
+                        current_item = ov.get('_current_item') if dir_task else current_process_path
                         passed = ov.get('_passed', [])
                         if seg_name not in passed:
                             passed.append(seg_name)
                             ov['_passed'] = passed
-                            t.overrides = json.dumps(ov)
+                            ov['_passed_file'] = current_item
+                            set_task_overrides(t, ov)
                             db.session.commit()
                     except:
                         pass
@@ -246,11 +378,19 @@ def detection_worker():
                 def update_filepath(new_path):
                     try:
                         t = Task.query.get(task_id)
-                        if t and new_path and t.filepath != new_path:
+                        if not t or not new_path:
+                            return
+                        if dir_task:
+                            ov = update_task_overrides(t, {'_current_item': new_path})
+                            if ov.get('_passed_file') and ov.get('_passed_file') != new_path:
+                                ov['_passed_file'] = new_path
+                                set_task_overrides(t, ov)
+                            t.log = (t.log or "") + f"🔄 当前文件已更新为: {os.path.basename(new_path)}\n"
+                        elif t.filepath != new_path:
                             t.filepath = new_path
                             t.filename = os.path.basename(new_path)
                             t.log = (t.log or "") + f"🔄 文件已更新为: {t.filename}\n"
-                            db.session.commit()
+                        db.session.commit()
                     except:
                         pass
 
@@ -261,7 +401,7 @@ def detection_worker():
 
                 try:
                     res = core.process_file(
-                        task.filepath, final_settings, keywords_config,
+                        current_process_path, final_settings, keywords_config,
                         passed_segments=passed_segments,
                         checkpoint_cb=save_checkpoint,
                         rename_cb=update_filepath
@@ -274,16 +414,30 @@ def detection_worker():
                     elif res['status'] == 'dirty':
                         task.status = 'dirty';
                         task.finished_at = datetime.now()
-                        if os.path.exists(task.filepath): os.remove(task.filepath)
+                        if dir_task:
+                            update_task_overrides(task, remove_keys=['_passed', '_passed_file'])
+                            db_logger(f"🚫 命中文件: {os.path.basename(current_process_path)}")
+                        elif os.path.exists(task.filepath):
+                            os.remove(task.filepath)
                         if final_settings.get('notify_errors', True): core.send_tg_msg(final_settings,
-                                                                                       f"🚫 拦截: {task.filename}\n原因: {res['msg']}")
+                                                                                      f"🚫 拦截: {task.filename}\n原因: {res['msg']}")
                     elif res['status'] == 'ready_to_upload':
-                        if res.get('new_filepath'):
+                        if dir_task:
+                            current_upload_path = res.get('new_filepath') or get_task_overrides(task).get('_current_item') or current_process_path
+                            update_task_overrides(task, {'_current_item': current_upload_path, '_dir_stage': 'upload'}, remove_keys=['_passed', '_passed_file'])
+                        elif res.get('new_filepath'):
                             task.filepath = res['new_filepath'];
                             task.filename = os.path.basename(res['new_filepath'])
                         task.status = 'pending_upload';
-                        task.progress = 0;
-                        db_logger("✅ 检测通过，加入上传队列");
+                        if dir_task:
+                            ov = get_task_overrides(task)
+                            total_files = max(1, int(ov.get('_dir_total_files', 1) or 1))
+                            uploaded_count = int(ov.get('_dir_uploaded_count', 0) or 0)
+                            task.progress = int(min(99, ((uploaded_count + 0.5) / total_files) * 100))
+                            db_logger(f"✅ 文件检测通过，加入上传队列: {os.path.basename(current_upload_path)}")
+                        else:
+                            task.progress = 0
+                            db_logger("✅ 检测通过，加入上传队列")
                         db.session.commit();
                         upload_queue.put(task_id)
                     else:
@@ -335,8 +489,32 @@ def upload_worker():
                 scan_path = final_settings.get('scan_path', '/root/downloads')
                 rclone_remote = final_settings.get('rclone_remote', 's25')
                 current_root_name = os.path.basename(scan_path.rstrip('/'))
-                folder_name = os.path.basename(os.path.dirname(task.filepath))
-                dest_remote = rclone_remote if (folder_name == current_root_name or not folder_name) else folder_name
+                task_overrides = get_task_overrides(task)
+                dir_task = is_directory_task(task, task_overrides)
+                current_upload_path = task_overrides.get('_current_item') if dir_task else task.filepath
+
+                if dir_task and (not current_upload_path or not os.path.exists(current_upload_path)):
+                    remaining_files = list_directory_task_files(task.filepath)
+                    if remaining_files:
+                        current_upload_path = remaining_files[0]
+                        update_task_overrides(task, {'_current_item': current_upload_path, '_dir_stage': 'upload'}, remove_keys=['_passed', '_passed_file'])
+                        db.session.commit()
+
+                if dir_task and not current_upload_path:
+                    task.status = 'error'
+                    task.finished_at = datetime.now()
+                    task.log = (task.log or "") + "❌ 上传失败：目录任务未找到待上传文件\n"
+                    db.session.commit()
+                    upload_queue.task_done()
+                    continue
+
+                if dir_task:
+                    dest_remote, remote_path = build_directory_remote_path(task.filepath, current_upload_path, current_root_name,
+                                                                          rclone_remote)
+                else:
+                    folder_name = os.path.basename(os.path.dirname(task.filepath))
+                    dest_remote = rclone_remote if (folder_name == current_root_name or not folder_name) else folder_name
+                    remote_path = None
 
                 def db_logger(msg):
                     try:
@@ -348,7 +526,16 @@ def upload_worker():
                 def upload_prog(pct, speed, eta):
                     try:
                         t = Task.query.get(task_id);
-                        if t: t.progress = pct; t.upload_speed = speed; t.upload_eta = eta; db.session.commit()
+                        if not t:
+                            return
+                        if dir_task:
+                            ov = get_task_overrides(t)
+                            total_files = max(1, int(ov.get('_dir_total_files', 1) or 1))
+                            uploaded_count = int(ov.get('_dir_uploaded_count', 0) or 0)
+                            t.progress = int(min(99, ((uploaded_count + 0.5 + (pct / 100.0) * 0.5) / total_files) * 100))
+                        else:
+                            t.progress = pct
+                        t.upload_speed = speed; t.upload_eta = eta; db.session.commit()
                     except:
                         pass
 
@@ -357,15 +544,50 @@ def upload_worker():
                 core.prog_cb = upload_prog
                 running_tasks[task_id] = core
                 try:
-                    if core.upload_with_progress(task.filepath):
-                        task.status = 'uploaded';
-                        task.progress = 100;
-                        task.upload_eta = "完成";
-                        task.finished_at = datetime.now();
-                        db_logger("✅ 上传成功");
-                        core.cleanup_empty_dirs(task.filepath)
-                        if final_settings.get('notify_upload_success', False): core.send_tg_msg(final_settings,
-                                                                                                f"🎉 上传成功: {task.filename}\n☁️ 节点: {dest_remote}")
+                    if core.upload_with_progress(current_upload_path, remote_path=remote_path):
+                        if dir_task:
+                            core.cleanup_empty_dirs(current_upload_path)
+                            ov = update_task_overrides(
+                                task,
+                                {
+                                    '_dir_uploaded_count': int(get_task_overrides(task).get('_dir_uploaded_count', 0) or 0) + 1,
+                                    '_dir_stage': 'detect'
+                                },
+                                remove_keys=['_current_item', '_passed', '_passed_file']
+                            )
+                            total_files = max(1, int(ov.get('_dir_total_files', 1) or 1))
+                            uploaded_count = int(ov.get('_dir_uploaded_count', 0) or 0)
+                            remaining_files = list_directory_task_files(task.filepath)
+                            task.upload_speed = ""
+                            if not remaining_files:
+                                task.status = 'uploaded';
+                                task.progress = 100;
+                                task.upload_eta = "完成";
+                                task.finished_at = datetime.now();
+                                db_logger("✅ 目录任务上传完成")
+                                if os.path.isdir(task.filepath):
+                                    shutil.rmtree(task.filepath, ignore_errors=True)
+                                if final_settings.get('notify_upload_success', False): core.send_tg_msg(
+                                    final_settings,
+                                    f"🎉 上传成功: {task.filename}\n☁️ 节点: {dest_remote}"
+                                )
+                            else:
+                                task.status = 'pending'
+                                task.progress = int(min(99, (uploaded_count / total_files) * 100))
+                                task.upload_eta = "-"
+                                task.finished_at = None
+                                db_logger(f"✅ 文件上传成功 ({uploaded_count}/{total_files})，继续处理下一文件")
+                                db.session.commit()
+                                detect_queue.put(task_id)
+                        else:
+                            task.status = 'uploaded';
+                            task.progress = 100;
+                            task.upload_eta = "完成";
+                            task.finished_at = datetime.now();
+                            db_logger("✅ 上传成功");
+                            core.cleanup_empty_dirs(task.filepath)
+                            if final_settings.get('notify_upload_success', False): core.send_tg_msg(final_settings,
+                                                                                                    f"🎉 上传成功: {task.filename}\n☁️ 节点: {dest_remote}")
                     else:
                         # 🔥🔥🔥 修复逻辑：检查是“失败”还是“手动停止”
                         if core._stopped:
@@ -374,7 +596,7 @@ def upload_worker():
                         elif task.status != 'cancelled':
                             task.status = 'error';
                             task.finished_at = datetime.now();
-                            db_logger("❌ 上传失败")
+                            db_logger(f"❌ 上传失败{': ' + os.path.basename(current_upload_path) if dir_task and current_upload_path else ''}")
                             if final_settings.get('notify_errors', True): core.send_tg_msg(final_settings,
                                                                                            f"❌ 上传失败: {task.filename}")
                 except Exception as e:
@@ -497,11 +719,36 @@ def trigger():
         except:
             pass
     if request.headers.get('X-API-Token') != t: return jsonify({"code": 403}), 403
-    path = request.json.get('path')
+    req = request.json or {}
+    path = req.get('path')
+    try:
+        file_count = int(req.get('file_count', 1) or 1)
+    except:
+        file_count = 1
     if not path or not os.path.exists(path): return jsonify({"code": 400})
 
+    task_path = path
+    task_name = os.path.basename(path)
+    task_overrides = {}
+    if file_count > 1:
+        task_path = resolve_directory_task_path(path, file_count, c.get('scan_path', '/root/downloads'))
+        if not os.path.exists(task_path):
+            task_path = os.path.dirname(path)
+        task_name = os.path.basename(task_path.rstrip('/\\'))
+        task_overrides = {
+            '_dir_task': True,
+            '_dir_total_files': file_count,
+            '_dir_uploaded_count': 0
+        }
+
     new_id = get_next_persistent_id()
-    task = Task(id=new_id, filename=os.path.basename(path), filepath=path, status="pending")
+    task = Task(
+        id=new_id,
+        filename=task_name,
+        filepath=task_path,
+        status="pending",
+        overrides=json.dumps(task_overrides) if task_overrides else None
+    )
     db.session.add(task);
     db.session.commit();
     detect_queue.put(task.id)
@@ -517,14 +764,15 @@ def get_tasks():
     SCAN_LIMIT = 2000
 
     def _is_upload_task(t: Task) -> bool:
+        ov = get_task_overrides(t)
         if t.status in ['pending_upload', 'uploading', 'uploaded']:
             return True
+        if ov.get('_dir_task'):
+            return ov.get('_dir_stage') == 'upload'
         if t.status in ['error', 'cancelled', 'dirty']:
             try:
-                if t.overrides:
-                    ov = json.loads(t.overrides)
-                    if ov.get('direct_upload') is True:
-                        return True
+                if ov.get('direct_upload') is True:
+                    return True
             except:
                 pass
             if t.upload_speed:
@@ -573,7 +821,10 @@ def batch_tasks():
     upload_ids = []
 
     for t in Task.query.all():
-        is_up = '上传' in (t.log or "") or t.status in ['uploading', 'pending_upload', 'uploaded']
+        ov = get_task_overrides(t)
+        is_up = t.status in ['uploading', 'pending_upload', 'uploaded'] or ov.get('_dir_stage') == 'upload' or (
+            not ov.get('_dir_task') and '上传' in (t.log or "")
+        )
 
         if target == 'detect':
             if action == 'retry' and t.status in ['error', 'cancelled', 'dirty'] and not is_up:
@@ -584,9 +835,10 @@ def batch_tasks():
                 count += 1
                 if t.overrides:
                     try:
-                        ov = json.loads(t.overrides)
-                        if '_passed' in ov: del ov['_passed']
-                        t.overrides = json.dumps(ov)
+                        ov = get_task_overrides(t)
+                        ov.pop('_passed', None)
+                        ov.pop('_passed_file', None)
+                        set_task_overrides(t, ov)
                     except:
                         pass
 
@@ -624,14 +876,15 @@ def retry(tid):
 
     if t.overrides:
         try:
-            ov = json.loads(t.overrides)
-            if '_passed' in ov:
-                del ov['_passed']
-                t.overrides = json.dumps(ov)
+            ov = get_task_overrides(t)
+            ov.pop('_passed', None)
+            ov.pop('_passed_file', None)
+            set_task_overrides(t, ov)
         except:
             pass
 
-    is_up = t.status == 'uploading' or (t.log and '上传' in t.log)
+    ov = get_task_overrides(t)
+    is_up = t.status in ['uploading', 'pending_upload'] or ov.get('_dir_stage') == 'upload' or (t.log and '上传' in t.log and not is_directory_task(t, ov))
     t.log += "\n=== 人工重试 ===\n";
     t.finished_at = None;
     t.retry_count = 0
@@ -650,9 +903,10 @@ def retry(tid):
 @login_required
 def direct_upload(tid):
     t = Task.query.get(tid);
-    if t: t.overrides = json.dumps({
-        "direct_upload": True}); t.status = 'pending'; t.log += "\n=== 直传 ===\n"; t.finished_at = None; t.retry_count = 0; db.session.commit(); detect_queue.put(
-        t.id)
+    if t:
+        update_task_overrides(t, {'direct_upload': True})
+        t.status = 'pending'; t.log += "\n=== 直传 ===\n"; t.finished_at = None; t.retry_count = 0; db.session.commit(); detect_queue.put(
+            t.id)
     return jsonify({"code": 200})
 
 
@@ -660,9 +914,10 @@ def direct_upload(tid):
 @login_required
 def save_and_retry(tid):
     t = Task.query.get(tid);
-    if t: t.overrides = json.dumps(
-        request.json); t.status = 'pending'; t.log += "\n=== 调整重试 ===\n"; t.finished_at = None; t.retry_count = 0; db.session.commit(); detect_queue.put(
-        t.id)
+    if t:
+        replace_public_task_overrides(t, request.json or {})
+        t.status = 'pending'; t.log += "\n=== 调整重试 ===\n"; t.finished_at = None; t.retry_count = 0; db.session.commit(); detect_queue.put(
+            t.id)
     return jsonify({"code": 200})
 
 
@@ -692,13 +947,21 @@ def delete_task_file(tid):
             pass
 
     deleted = []
-    for fp in files_to_remove:
-        if fp and os.path.exists(fp):
+    if is_directory_task(t):
+        if t.filepath and os.path.isdir(t.filepath):
             try:
-                os.remove(fp);
-                deleted.append(os.path.basename(fp))
+                shutil.rmtree(t.filepath)
+                deleted.append(os.path.basename(t.filepath.rstrip('/\\')))
             except:
                 pass
+    else:
+        for fp in files_to_remove:
+            if fp and os.path.exists(fp):
+                try:
+                    os.remove(fp);
+                    deleted.append(os.path.basename(fp))
+                except:
+                    pass
 
     db.session.delete(t);
     db.session.commit()
@@ -821,7 +1084,9 @@ def clear_tasks():
 @login_required
 def update_task_config(tid):
     t = Task.query.get(tid);
-    if t: t.overrides = json.dumps(request.json); db.session.commit()
+    if t:
+        replace_public_task_overrides(t, request.json or {})
+        db.session.commit()
     return jsonify({"code": 200})
 
 

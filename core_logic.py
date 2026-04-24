@@ -445,13 +445,14 @@ class ScannerCore:
                 self.log(f"❌ 流程中断: {e}")
             return {"status": "error", "msg": err_str}
 
-    def upload_with_progress(self, local_path):
+    def upload_with_progress(self, local_path, remote_path=None):
         if self._stopped: return False
-        filename = os.path.basename(local_path)
-        parent_dir = os.path.dirname(local_path)
-        folder_name = os.path.basename(parent_dir)
-        remote_prefix = self.rclone_remote if (folder_name == self.root_dir_name or not folder_name) else folder_name
-        remote_path = f"{remote_prefix}:{filename}"
+        if not remote_path:
+            filename = os.path.basename(local_path)
+            parent_dir = os.path.dirname(local_path)
+            folder_name = os.path.basename(parent_dir)
+            remote_prefix = self.rclone_remote if (folder_name == self.root_dir_name or not folder_name) else folder_name
+            remote_path = f"{remote_prefix}:{filename}"
 
         self.log(f"☁️ 上传: {remote_path}")
         cmd = ['rclone', 'moveto', local_path, remote_path, '--use-json-log', '--stats', '1s', '-v', '--ignore-size','--no-traverse','--drive-chunk-size', '64M']
