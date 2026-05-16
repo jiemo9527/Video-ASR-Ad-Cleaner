@@ -5,18 +5,36 @@ import time
 import signal
 import json
 import shutil
-import syslog
 import gc
 import re
 import threading
 import ctypes  # 🔥 [关键修改1] 必须引入这个库才能操作底层内存
 from datetime import datetime
 
+try:
+    import syslog
+except ImportError:
+    class _SyslogFallback:
+        LOG_PID = 0
+        LOG_USER = 0
+        LOG_INFO = 0
+
+        @staticmethod
+        def openlog(*args, **kwargs):
+            pass
+
+        @staticmethod
+        def syslog(*args, **kwargs):
+            pass
+
+    syslog = _SyslogFallback()
+
 # ================= ⚙️ 核心配置区域 =================
 inference_lock = threading.Lock()
 
 BASE_DIR = os.getcwd()
 MODELS_ROOT = os.path.join(BASE_DIR, "models")
+SCAN_IGNORED_CHARS_RE = re.compile(r'[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]')
 
 MODEL_DIR = os.path.join(MODELS_ROOT, "iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch")
 VAD_MODEL = os.path.join(MODELS_ROOT, "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch")
@@ -57,11 +75,28 @@ class ScannerCore:
     def stop(self):
         self._stopped = True
         self.log("🛑 收到停止指令...")
-        if self.current_proc:
-            try:
-                os.killpg(os.getpgid(self.current_proc.pid), signal.SIGKILL)
-            except:
-                pass
+
+        self._kill_current_proc()
+
+    def _popen_group_kwargs(self):
+        if os.name == 'posix':
+            return {'preexec_fn': os.setsid}
+        if os.name == 'nt':
+            flags = getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
+            return {'creationflags': flags} if flags else {}
+        return {}
+
+    def _kill_current_proc(self):
+        proc = self.current_proc
+        if not proc:
+            return
+        try:
+            if os.name == 'posix':
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            else:
+                proc.kill()
+        except:
+            pass
 
     def run_cmd(self, cmd, timeout=300, capture=True):
         if self._stopped: return None
@@ -69,13 +104,19 @@ class ScannerCore:
             self.current_proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
                 stderr=subprocess.PIPE if capture else subprocess.DEVNULL,
-                text=True, encoding='utf-8', errors='ignore', preexec_fn=os.setsid
+                text=True, encoding='utf-8', errors='ignore', **self._popen_group_kwargs()
             )
             stdout, stderr = self.current_proc.communicate(timeout=timeout)
-            return subprocess.CompletedProcess(cmd, self.current_proc.returncode, stdout, stderr)
+            result = subprocess.CompletedProcess(cmd, self.current_proc.returncode, stdout, stderr)
+            if result.returncode != 0 and capture and not self._stopped:
+                self.log(f"⚠️ 命令失败 ({cmd[0]}, code={result.returncode})")
+                detail = (stderr or stdout or '').strip()
+                if detail:
+                    self.log(f"↳ {detail[-1200:]}")
+            return result
         except subprocess.TimeoutExpired:
             self.log(f"⚠️ 命令超时 ({timeout}s)")
-            if self.current_proc: os.killpg(os.getpgid(self.current_proc.pid), signal.SIGKILL)
+            self._kill_current_proc()
             return None
         except Exception as e:
             if not self._stopped: self.log(f"命令出错: {e}")
@@ -126,20 +167,78 @@ class ScannerCore:
         except:
             pass
 
+    def normalize_scan_text(self, text):
+        if not text: return ""
+        return SCAN_IGNORED_CHARS_RE.sub('', str(text)).lower()
+
+    def find_keywords(self, text, keywords):
+        if not text or not keywords: return []
+        scan_text = self.normalize_scan_text(text)
+        hit_words = []
+        for kw in keywords:
+            normalized_kw = self.normalize_scan_text(kw)
+            if normalized_kw and normalized_kw in scan_text:
+                hit_words.append(kw)
+        return hit_words
+
+    def get_audio_streams(self, file_path):
+        res = self.run_cmd(
+            ['ffprobe', '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index,codec_name', '-of',
+             'json', file_path], timeout=30)
+        if not res or res.returncode != 0 or not res.stdout:
+            return None
+        try:
+            data = json.loads(res.stdout)
+        except Exception as e:
+            self.log(f"⚠️ 音频流解析失败: {e}")
+            return None
+
+        streams = []
+        for stream in data.get('streams', []):
+            index = stream.get('index')
+            if index is None:
+                continue
+            streams.append({
+                'index': str(index),
+                'codec': (stream.get('codec_name') or '').strip().lower()
+            })
+        return streams
+
+    def is_copyable_audio_stream(self, stream):
+        codec = stream.get('codec')
+        return bool(codec and codec not in ('unknown', 'none'))
+
+    def get_safe_audio_map_args(self, file_path):
+        streams = self.get_audio_streams(file_path)
+        if streams is None:
+            self.log("⚠️ 音频流探测失败，退回默认音频映射")
+            return ['-map', '0:a?']
+
+        args = []
+        skipped = []
+        for stream in streams:
+            if self.is_copyable_audio_stream(stream):
+                args.extend(['-map', f"0:{stream['index']}"])
+            else:
+                skipped.append(f"#{stream['index']}({stream.get('codec') or 'unknown'})")
+
+        if skipped:
+            self.log(f"⚠️ 跳过无法复制的音频流: {', '.join(skipped)}")
+        if streams and not args:
+            self.log("⚠️ 未发现可复制音频流，输出将不包含音频")
+        return args
+
     def get_smart_audio_map(self, file_path):
         try:
-            cmd = ['ffprobe', '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index,codec_name', '-of',
-                   'csv=p=0', file_path]
-            res = self.run_cmd(cmd, timeout=10)
-            if res and res.stdout:
-                streams = []
-                for line in res.stdout.strip().splitlines():
-                    parts = line.split(',')
-                    if len(parts) >= 2: streams.append({'index': parts[0], 'codec': parts[1].strip().lower()})
+            streams = self.get_audio_streams(file_path)
+            if streams:
+                streams = [s for s in streams if self.is_copyable_audio_stream(s)]
                 if streams and 'flac' in streams[0]['codec'] and len(streams) > 1:
                     second = streams[1]['index']
                     self.log(f"⚠️ 首选音轨为 FLAC，自动切换至 Stream #{second}")
                     return f"0:{second}"
+                if streams:
+                    return f"0:{streams[0]['index']}"
         except:
             pass
         return "0:a:0"
@@ -152,8 +251,7 @@ class ScannerCore:
         return float(res.stdout.strip()) > 0 if res and res.stdout.strip() else False
 
     def check_keywords(self, text, keywords):
-        if not text or not keywords: return False, None
-        hit_words = [kw for kw in keywords if kw in text]
+        hit_words = self.find_keywords(text, keywords)
         if hit_words:
             self.log(f"💥 [音频违规] 命中: {', '.join(hit_words)}")
             return True, f"命中: {', '.join(hit_words)}"
@@ -162,7 +260,8 @@ class ScannerCore:
     def extract_audio(self, video, start, duration, output, map_arg="0:a:0"):
         cmd = ['ffmpeg', '-ss', str(start), '-t', str(duration), '-i', video,
                '-map', map_arg, '-vn', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', '-y', output]
-        return self.run_cmd(cmd, timeout=120) is not None
+        res = self.run_cmd(cmd, timeout=120)
+        return res is not None and res.returncode == 0
 
     def clean_transcription(self, text):
         if not text: return ""
@@ -181,30 +280,28 @@ class ScannerCore:
             timeout=30
         )
 
-        hit_words = []
-        if meta_keywords:
-            scan_text = ""
-            if res_format and res_format.stdout:
-                scan_text += res_format.stdout.lower() + "\n"
-            if res_stream and res_stream.stdout:
-                scan_text += res_stream.stdout.lower()
-            lower = scan_text
-            for kw in meta_keywords:
-                if kw.lower() in lower: hit_words.append(kw)
+        scan_text = ""
+        if res_format and res_format.stdout:
+            scan_text += res_format.stdout + "\n"
+        if res_stream and res_stream.stdout:
+            scan_text += res_stream.stdout
+        hit_words = self.find_keywords(scan_text, meta_keywords)
 
         if hit_words:
             self.log(f"🚫 发现敏感标签: {hit_words} -> 执行清洗...")
             dir_name = os.path.dirname(source);
             name, ext = os.path.splitext(os.path.basename(source))
             output = os.path.join(dir_name, f"{name}_clean_meta{ext}")
-            cmd = ['ffmpeg', '-err_detect', 'ignore_err', '-i', source, '-map', '0:v:0', '-map', '0:a?', '-map', '0:s?',
-                   '-c', 'copy', '-dn', '-ignore_unknown', '-strict', '-2', '-map_metadata', '-1',
+            cmd = ['ffmpeg', '-err_detect', 'ignore_err', '-i', source, '-map', '0:v:0']
+            cmd.extend(self.get_safe_audio_map_args(source))
+            cmd.extend(['-map', '0:s?', '-c', 'copy', '-dn', '-ignore_unknown', '-strict', '-2', '-map_metadata', '-1',
                    '-metadata', 'title=', '-metadata', 'comment=',
                    '-metadata', 'description=', '-metadata', 'synopsis=',
                    '-metadata', 'artist=', '-metadata', 'album=', '-metadata', 'copyright=',
                    '-metadata:s', 'title=', '-metadata:s', 'language=und', '-metadata:s', 'handler_name=',
-                   '-y', output]
-            if self.run_cmd(cmd, timeout=300) and self.verify_integrity(output):
+                   '-y', output])
+            res = self.run_cmd(cmd, timeout=300)
+            if res and res.returncode == 0 and self.verify_integrity(output):
                 shutil.move(output, source);
                 self.log("✅ 元数据已清洗")
             else:
@@ -226,11 +323,10 @@ class ScannerCore:
                 proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
                                       encoding='utf-8', errors='ignore', timeout=90)
                 if proc.stdout:
-                    for kw in sub_keywords:
-                        if kw in proc.stdout:
-                            self.log(f"🚫 字幕轨 #{idx} 命中: {kw}");
-                            dirty_idxs.append(idx);
-                            break
+                    hit_words = self.find_keywords(proc.stdout, sub_keywords)
+                    if hit_words:
+                        self.log(f"🚫 字幕轨 #{idx} 命中: {', '.join(hit_words)}");
+                        dirty_idxs.append(idx);
             except:
                 pass
 
@@ -239,11 +335,13 @@ class ScannerCore:
             dir_name = os.path.dirname(source);
             name, ext = os.path.splitext(os.path.basename(source))
             output = os.path.join(dir_name, f"{name}_clean{ext}")
-            cmd = ['ffmpeg', '-err_detect', 'ignore_err', '-i', source, '-map', '0:v:0', '-map', '0:a?']
+            cmd = ['ffmpeg', '-err_detect', 'ignore_err', '-i', source, '-map', '0:v:0']
+            cmd.extend(self.get_safe_audio_map_args(source))
             for idx in all_idxs:
                 if idx not in dirty_idxs: cmd.extend(['-map', f'0:{idx}'])
             cmd.extend(['-c', 'copy', '-dn', '-ignore_unknown', '-y', output])
-            if self.run_cmd(cmd, timeout=300) and self.verify_integrity(output):
+            res = self.run_cmd(cmd, timeout=300)
+            if res and res.returncode == 0 and self.verify_integrity(output):
                 os.remove(source);
                 self.log(f"✅ 字幕清洗完成");
                 return output
@@ -459,9 +557,9 @@ class ScannerCore:
 
         try:
             self.current_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                                 encoding='utf-8', errors='ignore', preexec_fn=os.setsid)
+                                                 encoding='utf-8', errors='ignore', **self._popen_group_kwargs())
             while True:
-                if self._stopped: os.killpg(os.getpgid(self.current_proc.pid), signal.SIGKILL); return False
+                if self._stopped: self._kill_current_proc(); return False
                 line = self.current_proc.stderr.readline()
                 if not line and self.current_proc.poll() is not None: break
                 if line:

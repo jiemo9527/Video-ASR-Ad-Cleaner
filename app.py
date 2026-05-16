@@ -42,6 +42,8 @@ app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///tasks.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
 
+APP_VERSION = os.environ.get('APP_VERSION', 'v2026.05.16')
+
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 
@@ -706,7 +708,7 @@ def index(): return render_template('index.html')
 
 @app.route('/settings_page')
 @login_required
-def settings_page(): return render_template('settings.html')
+def settings_page(): return render_template('settings.html', app_version=APP_VERSION)
 
 
 @app.route('/api/trigger', methods=['POST'])
@@ -1003,6 +1005,7 @@ def settings():
     c = get_final_config(None);
     c['model_exists'] = check_local_models_exist();
     c['username'] = current_user.id
+    c['app_version'] = APP_VERSION
     return jsonify(c)
 
 

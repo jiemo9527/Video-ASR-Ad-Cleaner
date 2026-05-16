@@ -30,7 +30,10 @@
     <div class="d-flex justify-content-between align-items-center mb-5 border-bottom pb-3">
         <div class="d-flex align-items-center">
             <img src="{{ url_for('static', filename='favicon.png') }}" width="32" height="32" class="me-3" style="border-radius: 6px;">
-            <h3 class="mb-0 fw-bold text-dark">系统高级配置</h3>
+            <div>
+                <h3 class="mb-1 fw-bold text-dark">系统高级配置</h3>
+                <span class="badge bg-light text-dark border font-monospace">版本 {{ app_version }}</span>
+            </div>
         </div>
         <div><a href="/" class="btn btn-outline-primary"><i class="bi bi-arrow-left"></i> 返回控制台</a></div>
     </div>
