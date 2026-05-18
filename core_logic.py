@@ -331,6 +331,58 @@ class ScannerCore:
         res = self.run_cmd(cmd, timeout=120)
         return res is not None and res.returncode == 0
 
+    def get_audio_cache_paths(self, task_id, segment_name):
+        name_map = {'片尾': 'tail', '中间': 'middle', '片头': 'head'}
+        safe_segment = name_map.get(segment_name) or re.sub(r'[^a-zA-Z0-9_-]+', '_', str(segment_name)).strip('_')
+        if not safe_segment:
+            safe_segment = 'segment'
+        task_part = str(task_id) if task_id is not None else 'manual'
+        base = os.path.join(tempfile.gettempdir(), f"scan_{task_part}_{safe_segment}")
+        return f"{base}.wav", f"{base}.json"
+
+    def get_audio_cache_meta(self, video, task, map_arg):
+        try:
+            size = os.path.getsize(video)
+            mtime = int(os.path.getmtime(video))
+        except:
+            size = 0
+            mtime = 0
+        return {
+            'source': os.path.abspath(video),
+            'size': size,
+            'mtime': mtime,
+            'segment': task.get('name'),
+            'start': round(float(task.get('start', 0)), 3),
+            'duration': round(float(task.get('duration', 0)), 3),
+            'map': map_arg
+        }
+
+    def can_reuse_audio_cache(self, audio_path, meta_path, expected_meta):
+        if not os.path.exists(audio_path) or not os.path.exists(meta_path):
+            return False
+        try:
+            if os.path.getsize(audio_path) < 1024:
+                return False
+            with open(meta_path, 'r', encoding='utf-8') as f:
+                return json.load(f) == expected_meta
+        except:
+            return False
+
+    def write_audio_cache_meta(self, meta_path, meta):
+        try:
+            with open(meta_path, 'w', encoding='utf-8') as f:
+                json.dump(meta, f, ensure_ascii=False)
+        except:
+            pass
+
+    def remove_audio_cache(self, *paths):
+        for path in paths:
+            try:
+                if path and os.path.exists(path):
+                    os.remove(path)
+            except:
+                pass
+
     def clean_transcription(self, text):
         if not text: return ""
         text = re.sub(r'[\U00010000-\U0010ffff]', '', text)
@@ -450,8 +502,6 @@ class ScannerCore:
             tasks.append({"start": max(0, (duration / 2) - (LEN_MID / 2)), "duration": LEN_MID, "name": "中间"})
             tasks.append({"start": 0, "duration": LEN_HEAD, "name": "片头"})
 
-        temp_audio = f"/tmp/scan_{task_id}.wav"
-
         for i, task in enumerate(tasks):
             if self._stopped: return False, None
 
@@ -460,25 +510,36 @@ class ScannerCore:
                 self.prog_cb(50 + ((i + 1) * 15), f"跳过: {task['name']}", "")
                 continue
 
-            self.log(f"✂️ 提取音频 [{task['name']}]: {task['start']:.1f}s - {task['duration']}s")
-            if not self.extract_audio(file_path, task['start'], task['duration'], temp_audio, map_arg=audio_map):
-                if self._stopped: return False, None
-                raise RuntimeError(f"音频提取失败: {task['name']}")
+            temp_audio, temp_meta = self.get_audio_cache_paths(task_id, task['name'])
+            cache_meta = self.get_audio_cache_meta(file_path, task, audio_map)
+            if self.can_reuse_audio_cache(temp_audio, temp_meta, cache_meta):
+                self.log(f"♻️ 复用音频 [{task['name']}]: {os.path.basename(temp_audio)}")
+            else:
+                self.remove_audio_cache(temp_audio, temp_meta)
+                self.log(f"✂️ 提取音频 [{task['name']}]: {task['start']:.1f}s - {task['duration']}s")
+                if not self.extract_audio(file_path, task['start'], task['duration'], temp_audio, map_arg=audio_map):
+                    self.remove_audio_cache(temp_audio, temp_meta)
+                    if self._stopped: return False, None
+                    raise RuntimeError(f"音频提取失败: {task['name']}")
+                self.write_audio_cache_meta(temp_meta, cache_meta)
 
             cloud_success = False
             try:
-                self.log(f"☁️ 云端识别中...")
-                files = {"file": open(temp_audio, "rb")}
+                read_timeout = 180 if task['duration'] >= 450 else 120
+                self.log(f"☁️ 云端识别中... (timeout={read_timeout}s)")
                 data = {"model": config.get('api_model'), "language": "zh", "response_format": "json"}
                 headers = {"Authorization": f"Bearer {config.get('api_key')}"}
-                resp = requests.post(config.get('api_url'), headers=headers, files=files, data=data, timeout=(10, 60))
+                with open(temp_audio, "rb") as f:
+                    files = {"file": f}
+                    resp = requests.post(config.get('api_url'), headers=headers, files=files, data=data,
+                                         timeout=(10, read_timeout))
 
                 if resp.status_code == 200:
                     text = self.clean_transcription(resp.json().get('text', ''))
                     hit, reason = self.check_keywords(text, audio_keywords)
                     if hit:
                         self.log(f"☁️ [违规] 内容: {text}")
-                        if os.path.exists(temp_audio): os.remove(temp_audio)
+                        self.remove_audio_cache(temp_audio, temp_meta)
                         return True, reason
 
                     if config.get('detailed_mode'):
@@ -500,7 +561,14 @@ class ScannerCore:
                 if self._stopped: return False, None
 
                 if not enable_local:
-                    if os.path.exists(temp_audio): os.remove(temp_audio)
+                    try:
+                        has_retry = int(config.get('current_retry', 1)) <= int(config.get('retry_limit', 3))
+                    except:
+                        has_retry = True
+                    if has_retry:
+                        self.log(f"♻️ 保留音频供重试复用: {task['name']}")
+                    else:
+                        self.remove_audio_cache(temp_audio, temp_meta)
                     raise RuntimeError(f"云端失败且策略限制本地模型 -> 请求重排队")
 
                 self.log("⏳ 等待本地模型资源锁...")
@@ -524,7 +592,7 @@ class ScannerCore:
                         hit, reason = self.check_keywords(text, audio_keywords)
                         if hit:
                             self.log(f"🏠 [违规] 本地内容: {text}")
-                            if os.path.exists(temp_audio): os.remove(temp_audio)
+                            self.remove_audio_cache(temp_audio, temp_meta)
                             return True, f"本地拦截: {reason}"
 
                         if config.get('detailed_mode'):
@@ -534,7 +602,7 @@ class ScannerCore:
 
                     except Exception as e:
                         self.log(f"❌ 本地模型崩溃: {e}")
-                        if os.path.exists(temp_audio): os.remove(temp_audio)
+                        self.remove_audio_cache(temp_audio, temp_meta)
                         raise RuntimeError(f"本地模型失败: {e}")
                     finally:
                         # 🔥 [关键修改3] 无论推理成功与否，强制销毁对象并调用 drop_caches
@@ -552,10 +620,10 @@ class ScannerCore:
                         self.drop_caches()
                         self.log("🧹 [系统] 本地模型内存已强制回收")
 
+            self.remove_audio_cache(temp_audio, temp_meta)
             if checkpoint_cb: checkpoint_cb(task['name'])
             self.prog_cb(50 + ((i + 1) * 15), "检测进行中", "")
 
-        if os.path.exists(temp_audio): os.remove(temp_audio)
         return False, None
 
     def process_file(self, file_path, config, keywords_config, passed_segments=None, checkpoint_cb=None,
