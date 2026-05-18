@@ -9,6 +9,7 @@ import gc
 import re
 import threading
 import ctypes  # 🔥 [关键修改1] 必须引入这个库才能操作底层内存
+import tempfile
 from datetime import datetime
 
 try:
@@ -35,6 +36,7 @@ inference_lock = threading.Lock()
 BASE_DIR = os.getcwd()
 MODELS_ROOT = os.path.join(BASE_DIR, "models")
 SCAN_IGNORED_CHARS_RE = re.compile(r'[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]')
+IMAGE_SUBTITLE_CODECS = {'hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle', 'xsub'}
 
 MODEL_DIR = os.path.join(MODELS_ROOT, "iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch")
 VAD_MODEL = os.path.join(MODELS_ROOT, "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch")
@@ -228,6 +230,72 @@ class ScannerCore:
             self.log("⚠️ 未发现可复制音频流，输出将不包含音频")
         return args
 
+    def get_subtitle_streams(self, file_path):
+        res = self.run_cmd(
+            ['ffprobe', '-v', 'error', '-select_streams', 's', '-show_entries',
+             'stream=index,codec_name:stream_tags=language,title,handler_name', '-of', 'json', file_path], timeout=30)
+        if not res or res.returncode != 0 or not res.stdout:
+            return None
+        try:
+            data = json.loads(res.stdout)
+        except Exception as e:
+            self.log(f"⚠️ 字幕流解析失败: {e}")
+            return None
+
+        streams = []
+        for stream in data.get('streams', []):
+            index = stream.get('index')
+            if index is None:
+                continue
+            tags = stream.get('tags') or {}
+            streams.append({
+                'index': str(index),
+                'codec': (stream.get('codec_name') or '').strip().lower(),
+                'language': tags.get('language') or '',
+                'title': tags.get('title') or '',
+                'handler_name': tags.get('handler_name') or ''
+            })
+        return streams
+
+    def is_text_subtitle_stream(self, stream):
+        codec = stream.get('codec') or ''
+        return codec not in IMAGE_SUBTITLE_CODECS
+
+    def subtitle_metadata_text(self, stream):
+        return "\n".join([
+            stream.get('codec') or '',
+            stream.get('language') or '',
+            stream.get('title') or '',
+            stream.get('handler_name') or ''
+        ])
+
+    def extract_subtitle_texts(self, source, streams):
+        if not streams: return {}
+        timeout = max(120, min(300, 30 + len(streams) * 5))
+        texts = {}
+        with tempfile.TemporaryDirectory(prefix='subscan_') as tmp_dir:
+            outputs = {}
+            cmd = ['ffmpeg', '-v', 'error', '-y', '-i', source]
+            for stream in streams:
+                idx = stream['index']
+                output = os.path.join(tmp_dir, f"sub_{idx}.vtt")
+                outputs[idx] = output
+                cmd.extend(['-map', f'0:{idx}', '-f', 'webvtt', output])
+
+            res = self.run_cmd(cmd, timeout=timeout)
+            if not res:
+                return texts
+
+            for idx, output in outputs.items():
+                if not os.path.exists(output):
+                    continue
+                try:
+                    with open(output, 'r', encoding='utf-8', errors='ignore') as f:
+                        texts[idx] = f.read()
+                except Exception as e:
+                    self.log(f"⚠️ 字幕轨 #{idx} 读取失败: {e}")
+        return texts
+
     def get_smart_audio_map(self, file_path):
         try:
             streams = self.get_audio_streams(file_path)
@@ -309,26 +377,43 @@ class ScannerCore:
 
     def check_subtitles(self, source, sub_keywords):
         if not sub_keywords: return None
+        started_at = time.time()
         self.log(f"📝 [检测] 分析字幕内容...")
-        res = self.run_cmd(
-            ['ffprobe', '-v', 'error', '-select_streams', 's', '-show_entries', 'stream=index', '-of', 'csv=p=0',
-             source], timeout=15)
-        if not res or not res.stdout.strip(): return None
+        streams = self.get_subtitle_streams(source)
+        if not streams: return None
 
-        all_idxs = [x.strip() for x in res.stdout.splitlines() if x.strip()]
-        dirty_idxs = []
-        for idx in all_idxs:
-            try:
-                cmd = ['ffmpeg', '-v', 'error', '-i', source, '-map', f'0:{idx}', '-f', 'webvtt', '-']
-                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-                                      encoding='utf-8', errors='ignore', timeout=90)
-                if proc.stdout:
-                    hit_words = self.find_keywords(proc.stdout, sub_keywords)
-                    if hit_words:
-                        self.log(f"🚫 字幕轨 #{idx} 命中: {', '.join(hit_words)}");
-                        dirty_idxs.append(idx);
-            except:
-                pass
+        all_idxs = [stream['index'] for stream in streams]
+        dirty_idxs = set()
+        image_count = 0
+
+        for stream in streams:
+            idx = stream['index']
+            hit_words = self.find_keywords(self.subtitle_metadata_text(stream), sub_keywords)
+            if hit_words:
+                self.log(f"🚫 字幕轨 #{idx} 元数据命中: {', '.join(hit_words)}")
+                dirty_idxs.add(idx)
+
+        text_streams = []
+        for stream in streams:
+            if not self.is_text_subtitle_stream(stream):
+                image_count += 1
+                continue
+            if stream['index'] not in dirty_idxs:
+                text_streams.append(stream)
+
+        self.log(f"ℹ️ 字幕轨 {len(streams)} 条，待扫文本轨 {len(text_streams)} 条，图片轨 {image_count} 条")
+        subtitle_texts = self.extract_subtitle_texts(source, text_streams)
+        for stream in text_streams:
+            idx = stream['index']
+            text = subtitle_texts.get(idx, '')
+            if not text:
+                continue
+            hit_words = self.find_keywords(text, sub_keywords)
+            if hit_words:
+                self.log(f"🚫 字幕轨 #{idx} 内容命中: {', '.join(hit_words)}")
+                dirty_idxs.add(idx)
+
+        self.log(f"⏱️ 字幕分析完成: {len(streams)}轨/命中{len(dirty_idxs)}轨，用时 {time.time() - started_at:.1f}s")
 
         if dirty_idxs:
             self.log(f"🧹 剔除违规字幕...")
