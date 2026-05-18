@@ -42,7 +42,7 @@ app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///tasks.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
 
-APP_VERSION = os.environ.get('APP_VERSION', 'v2026.05.16')
+APP_VERSION = os.environ.get('APP_VERSION', 'v2026.05.18')
 
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
