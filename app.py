@@ -116,7 +116,7 @@ def seed_default_keywords():
 def get_final_config(overrides_json=None):
     final_conf = {
         "check_audio": True, "check_subtitles": True, "sanitize_metadata": True, "enable_local_model": False,
-        "detailed_mode": False,
+        "detailed_mode": False, "asr_use_flac": False,
         "tg_bot_token": "", "tg_chat_id": "",
         "audio_threshold_multi": 600, "audio_threshold_long": 3600,
         "audio_len_head": 240, "audio_len_mid": 240, "audio_len_tail": 300, "audio_len_tail_long": 600,
@@ -125,15 +125,15 @@ def get_final_config(overrides_json=None):
         "api_model": "FunAudioLLM/SenseVoiceSmall",
         "scan_path": "/root/downloads", "rclone_remote": "s25", "api_token": "8pUoqOTHhEAhRnacl3c19",
         "notify_upload_success": False, "notify_errors": True,
-        "concurrency_detect": 2, "concurrency_upload": 9, "download_proxy": ""
+        "concurrency_detect": 2, "concurrency_upload": 9, "detect_retry_limit": 3, "download_proxy": ""
     }
     db_configs = {c.key: c.value for c in Config.query.all()}
     for k, v in db_configs.items():
-        if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_local_model", "detailed_mode",
+        if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_local_model", "detailed_mode", "asr_use_flac",
                  "notify_upload_success", "notify_errors"]:
             final_conf[k] = (str(v).lower() == 'true')
         elif k in ["audio_threshold_multi", "audio_threshold_long", "audio_len_head", "audio_len_mid", "audio_len_tail",
-                   "audio_len_tail_long", "concurrency_detect", "concurrency_upload"]:
+                   "audio_len_tail_long", "concurrency_detect", "concurrency_upload", "detect_retry_limit"]:
             try:
                 final_conf[k] = int(v)
             except:
@@ -294,7 +294,10 @@ def detection_worker():
 
                 final_settings = get_final_config(task.overrides)
 
-                RETRY_LIMIT = 3
+                try:
+                    RETRY_LIMIT = max(0, int(final_settings.get('detect_retry_limit', 3)))
+                except:
+                    RETRY_LIMIT = 3
                 user_local_pref = final_settings.get('enable_local_model', False)
 
                 final_settings['current_retry'] = task.retry_count + 1
@@ -985,7 +988,7 @@ def cancel(tid):
 def settings():
     if request.method == 'POST':
         for k, v in request.json.items():
-            if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_local_model", "detailed_mode",
+            if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_local_model", "detailed_mode", "asr_use_flac",
                      "notify_upload_success", "notify_errors"]:
                 val = "true" if (v is True or str(v).lower() == 'true') else "false"
             else:
@@ -1007,6 +1010,70 @@ def settings():
     c['username'] = current_user.id
     c['app_version'] = APP_VERSION
     return jsonify(c)
+
+
+@app.route('/api/settings/backup', methods=['GET'])
+@login_required
+def export_settings_backup():
+    configs = {
+        k: v
+        for k, v in get_final_config(None).items()
+        if not str(k).startswith('sys_')
+    }
+    keywords = [
+        {'type': k.type, 'content': k.content, 'enabled': bool(k.enabled)}
+        for k in Keyword.query.order_by(Keyword.type.asc(), Keyword.id.asc()).all()
+    ]
+    return jsonify({
+        'schema_version': 1,
+        'app_version': APP_VERSION,
+        'exported_at': datetime.now().isoformat(timespec='seconds'),
+        'config': configs,
+        'keywords': keywords
+    })
+
+
+@app.route('/api/settings/restore', methods=['POST'])
+@login_required
+def restore_settings_backup():
+    data = request.json or {}
+    configs = data.get('config') or data.get('configs') or {}
+    keywords = data.get('keywords')
+
+    if not isinstance(configs, dict):
+        return jsonify({'code': 400, 'msg': '配置备份格式无效'}), 400
+
+    for k, v in configs.items():
+        key = str(k).strip()
+        if not key or key.startswith('sys_'):
+            continue
+        c = Config.query.get(key) or Config(key=key)
+        c.value = str(v)
+        db.session.add(c)
+
+    if isinstance(keywords, list):
+        Keyword.query.delete()
+        for item in keywords:
+            if not isinstance(item, dict):
+                continue
+            kw_type = str(item.get('type', '')).strip()
+            content = str(item.get('content', '')).strip()
+            if kw_type not in ['audio', 'subtitle', 'meta'] or not content:
+                continue
+            enabled = item.get('enabled', True)
+            db.session.add(Keyword(type=kw_type, content=content, enabled=(enabled is True or str(enabled).lower() == 'true')))
+
+    db.session.commit()
+    token = configs.get('api_token') if isinstance(configs, dict) else None
+    if token:
+        tk = str(token).strip()
+        if re.match(r'^[a-zA-Z0-9_\-]+$', tk):
+            try:
+                open(os.path.join(os.path.dirname(__file__), '.token_secret'), 'w').write(tk)
+            except:
+                pass
+
+    return jsonify({'code': 200})
 
 
 @app.route('/api/account/update', methods=['POST'])

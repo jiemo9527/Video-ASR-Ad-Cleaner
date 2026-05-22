@@ -331,6 +331,45 @@ class ScannerCore:
         res = self.run_cmd(cmd, timeout=120)
         return res is not None and res.returncode == 0
 
+    def get_cloud_flac_path(self, audio_path):
+        base, _ = os.path.splitext(audio_path)
+        return f"{base}_cloud.flac"
+
+    def prepare_cloud_audio(self, audio_path, use_flac=False):
+        if not use_flac:
+            return audio_path, None
+
+        cloud_path = self.get_cloud_flac_path(audio_path)
+        try:
+            src_size = os.path.getsize(audio_path)
+            src_mtime = os.path.getmtime(audio_path)
+        except:
+            return audio_path, None
+
+        try:
+            if (os.path.exists(cloud_path) and os.path.getsize(cloud_path) > 1024
+                    and os.path.getmtime(cloud_path) >= src_mtime):
+                self.log(f"♻️ 复用 FLAC 音频: {os.path.basename(cloud_path)} ({os.path.getsize(cloud_path) / 1048576:.1f}MB)")
+                return cloud_path, 'audio/flac'
+        except:
+            pass
+
+        self.remove_audio_cache(cloud_path)
+        cmd = ['ffmpeg', '-i', audio_path, '-vn', '-acodec', 'flac', '-y', cloud_path]
+        res = self.run_cmd(cmd, timeout=120)
+        try:
+            cloud_size = os.path.getsize(cloud_path)
+        except:
+            cloud_size = 0
+
+        if res and res.returncode == 0 and cloud_size > 1024:
+            self.log(f"☁️ ASR 音频源: FLAC 无损 ({src_size / 1048576:.1f}MB -> {cloud_size / 1048576:.1f}MB)")
+            return cloud_path, 'audio/flac'
+
+        self.remove_audio_cache(cloud_path)
+        self.log("⚠️ FLAC 生成失败，回退使用 WAV 音频源")
+        return audio_path, None
+
     def get_audio_cache_paths(self, task_id, segment_name):
         name_map = {'片尾': 'tail', '中间': 'middle', '片头': 'head'}
         safe_segment = name_map.get(segment_name) or re.sub(r'[^a-zA-Z0-9_-]+', '_', str(segment_name)).strip('_')
@@ -515,22 +554,29 @@ class ScannerCore:
             if self.can_reuse_audio_cache(temp_audio, temp_meta, cache_meta):
                 self.log(f"♻️ 复用音频 [{task['name']}]: {os.path.basename(temp_audio)}")
             else:
-                self.remove_audio_cache(temp_audio, temp_meta)
+                self.remove_audio_cache(temp_audio, temp_meta, self.get_cloud_flac_path(temp_audio))
                 self.log(f"✂️ 提取音频 [{task['name']}]: {task['start']:.1f}s - {task['duration']}s")
                 if not self.extract_audio(file_path, task['start'], task['duration'], temp_audio, map_arg=audio_map):
-                    self.remove_audio_cache(temp_audio, temp_meta)
+                    self.remove_audio_cache(temp_audio, temp_meta, self.get_cloud_flac_path(temp_audio))
                     if self._stopped: return False, None
                     raise RuntimeError(f"音频提取失败: {task['name']}")
                 self.write_audio_cache_meta(temp_meta, cache_meta)
 
             cloud_success = False
+            cloud_audio = None
             try:
                 read_timeout = 180 if task['duration'] >= 450 else 120
-                self.log(f"☁️ 云端识别中... (timeout={read_timeout}s)")
+                cloud_audio, cloud_mime = self.prepare_cloud_audio(temp_audio, config.get('asr_use_flac'))
+                cloud_size = os.path.getsize(cloud_audio) if os.path.exists(cloud_audio) else 0
+                source_type = 'FLAC' if cloud_mime else 'WAV'
+                self.log(f"☁️ 云端识别中... (source={source_type}, timeout={read_timeout}s, size={cloud_size / 1048576:.1f}MB)")
                 data = {"model": config.get('api_model'), "language": "zh", "response_format": "json"}
                 headers = {"Authorization": f"Bearer {config.get('api_key')}"}
-                with open(temp_audio, "rb") as f:
-                    files = {"file": f}
+                with open(cloud_audio, "rb") as f:
+                    if cloud_mime:
+                        files = {"file": (os.path.basename(cloud_audio), f, cloud_mime)}
+                    else:
+                        files = {"file": f}
                     resp = requests.post(config.get('api_url'), headers=headers, files=files, data=data,
                                          timeout=(10, read_timeout))
 
@@ -539,7 +585,7 @@ class ScannerCore:
                     hit, reason = self.check_keywords(text, audio_keywords)
                     if hit:
                         self.log(f"☁️ [违规] 内容: {text}")
-                        self.remove_audio_cache(temp_audio, temp_meta)
+                        self.remove_audio_cache(temp_audio, temp_meta, cloud_audio)
                         return True, reason
 
                     if config.get('detailed_mode'):
@@ -568,7 +614,7 @@ class ScannerCore:
                     if has_retry:
                         self.log(f"♻️ 保留音频供重试复用: {task['name']}")
                     else:
-                        self.remove_audio_cache(temp_audio, temp_meta)
+                        self.remove_audio_cache(temp_audio, temp_meta, cloud_audio)
                     raise RuntimeError(f"云端失败且策略限制本地模型 -> 请求重排队")
 
                 self.log("⏳ 等待本地模型资源锁...")
@@ -592,7 +638,7 @@ class ScannerCore:
                         hit, reason = self.check_keywords(text, audio_keywords)
                         if hit:
                             self.log(f"🏠 [违规] 本地内容: {text}")
-                            self.remove_audio_cache(temp_audio, temp_meta)
+                            self.remove_audio_cache(temp_audio, temp_meta, cloud_audio)
                             return True, f"本地拦截: {reason}"
 
                         if config.get('detailed_mode'):
@@ -602,7 +648,7 @@ class ScannerCore:
 
                     except Exception as e:
                         self.log(f"❌ 本地模型崩溃: {e}")
-                        self.remove_audio_cache(temp_audio, temp_meta)
+                        self.remove_audio_cache(temp_audio, temp_meta, cloud_audio)
                         raise RuntimeError(f"本地模型失败: {e}")
                     finally:
                         # 🔥 [关键修改3] 无论推理成功与否，强制销毁对象并调用 drop_caches
@@ -620,7 +666,7 @@ class ScannerCore:
                         self.drop_caches()
                         self.log("🧹 [系统] 本地模型内存已强制回收")
 
-            self.remove_audio_cache(temp_audio, temp_meta)
+            self.remove_audio_cache(temp_audio, temp_meta, cloud_audio)
             if checkpoint_cb: checkpoint_cb(task['name'])
             self.prog_cb(50 + ((i + 1) * 15), "检测进行中", "")
 

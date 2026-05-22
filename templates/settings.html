@@ -129,6 +129,11 @@
                                 <div class="mb-3"><label class="form-label fw-bold small">API Endpoint (URL)</label><input type="text" class="form-control form-control-sm font-monospace" v-model="settings.api_url"></div>
                                 <div class="mb-3"><label class="form-label fw-bold small">API Key</label><div class="input-group input-group-sm"><input type="password" class="form-control font-monospace" v-model="settings.api_key" id="apiKeyInput"><button class="btn btn-outline-secondary" type="button" onclick="const i=document.getElementById('apiKeyInput');i.type=i.type==='password'?'text':'password'"><i class="bi bi-eye"></i></button></div></div>
                                 <div class="mb-3"><label class="form-label fw-bold small">Model Name</label><input type="text" class="form-control form-control-sm" v-model="settings.api_model"></div>
+                                <div class="form-check form-switch mb-3 p-3 bg-light rounded border">
+                                    <input class="form-check-input" type="checkbox" v-model="settings.asr_use_flac" id="sw_asr_flac">
+                                    <label class="form-check-label fw-bold" for="sw_asr_flac">ASR 上传使用 FLAC 无损压缩</label>
+                                    <div class="small text-muted mt-1" style="font-size: 11px">开启后云端识别请求上传 FLAC 临时音频，保留语音细节并减少体积；关闭则上传原始 WAV。</div>
+                                </div>
                             </div>
                             <div class="mb-2">
                                 <h6 class="border-bottom pb-2 mb-3 text-muted small fw-bold">🏠 本地模型资源</h6>
@@ -156,6 +161,7 @@
                             <div class="row g-3">
                                 <div class="col-12"><label class="form-label fw-bold small">🕵️ 检测并发数</label><div class="input-group input-group-sm"><button class="btn btn-outline-secondary" @click="settings.concurrency_detect > 1 && settings.concurrency_detect--"><i class="bi bi-dash"></i></button><input type="number" class="form-control text-center font-monospace" v-model="settings.concurrency_detect" min="1" max="10"><button class="btn btn-outline-secondary" @click="settings.concurrency_detect++"><i class="bi bi-plus"></i></button></div></div>
                                 <div class="col-12"><label class="form-label fw-bold small">☁️ 上传并发数</label><div class="input-group input-group-sm"><button class="btn btn-outline-secondary" @click="settings.concurrency_upload > 1 && settings.concurrency_upload--"><i class="bi bi-dash"></i></button><input type="number" class="form-control text-center font-monospace" v-model="settings.concurrency_upload" min="1" max="20"><button class="btn btn-outline-secondary" @click="settings.concurrency_upload++"><i class="bi bi-plus"></i></button></div></div>
+                                <div class="col-12"><label class="form-label fw-bold small">🔁 检测失败自动重试次数</label><div class="input-group input-group-sm"><button class="btn btn-outline-secondary" @click="settings.detect_retry_limit > 0 && settings.detect_retry_limit--"><i class="bi bi-dash"></i></button><input type="number" class="form-control text-center font-monospace" v-model="settings.detect_retry_limit" min="0" max="10"><button class="btn btn-outline-secondary" @click="settings.detect_retry_limit++"><i class="bi bi-plus"></i></button></div><div class="form-text" style="font-size: 11px">默认 3 次。云端异常、提取异常等检测失败会按此次数重新排队。</div></div>
                             </div>
                             <hr class="my-4 text-muted opacity-25">
                             <div class="d-grid"><button class="btn btn-danger py-2 shadow-sm rounded-3" @click="saveAndRestart"><i class="bi bi-bootstrap-reboot me-2"></i>保存并重启服务</button></div>
@@ -176,6 +182,16 @@
                                         保存 API Token
                                     </button>
                                 </div>
+                            </div>
+
+                            <hr class="my-4 text-muted opacity-25">
+
+                            <h6 class="border-bottom pb-2 mb-4 text-muted small fw-bold">💾 配置备份与恢复</h6>
+                            <div class="alert alert-light border small mb-3"><i class="bi bi-info-circle me-1"></i> 备份包含设置项和关键词，也会包含 API Key/通知 Token 等敏感配置。</div>
+                            <div class="row g-2 mb-4">
+                                <div class="col-6"><button class="btn btn-outline-primary w-100" @click="exportBackup"><i class="bi bi-download me-1"></i>导出备份</button></div>
+                                <div class="col-6"><button class="btn btn-outline-warning w-100" @click="$refs.backupFile.click()"><i class="bi bi-upload me-1"></i>恢复备份</button></div>
+                                <input ref="backupFile" type="file" accept="application/json,.json" class="d-none" @change="importBackup">
                             </div>
 
                             <hr class="my-4 text-muted opacity-25">
@@ -236,14 +252,14 @@ Vue.createApp({
             settingTab: 'basic',
             settings: {
                 check_audio: true, check_subtitles: true, sanitize_metadata: true, enable_local_model: false,
-                detailed_mode: false,
+                detailed_mode: false, asr_use_flac: false,
                 tg_bot_token: '', tg_chat_id: '',
                 audio_threshold_multi: 600, audio_threshold_long: 3600,
                 audio_len_head: 240, audio_len_mid: 240, audio_len_tail: 300, audio_len_tail_long: 600,
                 api_url: '', api_key: '', api_model: '',
                 scan_path: '', rclone_remote: '', api_token: '',
                 notify_upload_success: false, notify_errors: true,
-                concurrency_detect: 2, concurrency_upload: 9,
+                concurrency_detect: 2, concurrency_upload: 9, detect_retry_limit: 3,
                 download_proxy: ''
             },
             account: { username: '', old_pass: '', new_pass: '', confirm_pass: '' },
@@ -277,10 +293,10 @@ Vue.createApp({
         loadSettings(){
             axios.get('/api/settings').then(r=>{
                 const d = r.data;
-                ['check_audio','check_subtitles','sanitize_metadata', 'enable_local_model', 'detailed_mode', 'notify_upload_success', 'notify_errors'].forEach(k => this.settings[k] = (d[k]===true || d[k]==='true'));
+                ['check_audio','check_subtitles','sanitize_metadata', 'enable_local_model', 'detailed_mode', 'asr_use_flac', 'notify_upload_success', 'notify_errors'].forEach(k => this.settings[k] = (d[k]===true || d[k]==='true'));
                 this.settings.tg_bot_token = d.tg_bot_token||'';
                 this.settings.tg_chat_id = d.tg_chat_id||'';
-                const numKeys = ['audio_threshold_multi', 'audio_threshold_long', 'audio_len_head', 'audio_len_mid', 'audio_len_tail', 'audio_len_tail_long', 'concurrency_detect', 'concurrency_upload'];
+                const numKeys = ['audio_threshold_multi', 'audio_threshold_long', 'audio_len_head', 'audio_len_mid', 'audio_len_tail', 'audio_len_tail_long', 'concurrency_detect', 'concurrency_upload', 'detect_retry_limit'];
                 numKeys.forEach(k => { if(d[k] !== undefined) this.settings[k] = d[k]; });
                 this.settings.api_url = d.api_url || '';
                 this.settings.api_key = d.api_key || '';
@@ -306,6 +322,40 @@ Vue.createApp({
                 this.showToast('配置已保存，正在重启...');
                 axios.post('/api/restart').then(res => { setTimeout(() => { location.reload(); }, 3000); }).catch(()=>{ this.showToast('重启命令发送失败', 'error'); this.saving = false; });
             });
+        },
+        exportBackup(){
+            axios.get('/api/settings/backup').then(r=>{
+                const blob = new Blob([JSON.stringify(r.data, null, 2)], {type: 'application/json'});
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                const ts = new Date().toISOString().replace(/[:.]/g, '-');
+                a.href = url;
+                a.download = `scanner-settings-${ts}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+                this.showToast('备份已导出');
+            }).catch(() => this.showToast('导出失败', 'error'));
+        },
+        importBackup(e){
+            const file = e.target.files && e.target.files[0];
+            e.target.value = '';
+            if(!file) return;
+            const reader = new FileReader();
+            reader.onload = () => {
+                try {
+                    const data = JSON.parse(reader.result);
+                    this.confirmAction('恢复备份会覆盖当前设置和关键词，确定继续？', () => {
+                        axios.post('/api/settings/restore', data).then(()=>{
+                            this.showToast('备份已恢复');
+                            this.loadSettings();
+                            this.loadKeywords();
+                        }).catch(() => this.showToast('恢复失败', 'error'));
+                    });
+                } catch(err) {
+                    this.showToast('备份文件格式无效', 'error');
+                }
+            };
+            reader.readAsText(file);
         },
         updateAccount() {
             if(!this.account.old_pass) return this.showToast('必须输入旧密码以验证身份', 'error');
