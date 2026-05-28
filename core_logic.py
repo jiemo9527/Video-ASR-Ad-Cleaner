@@ -311,12 +311,23 @@ class ScannerCore:
             pass
         return "0:a:0"
 
-    def verify_integrity(self, path):
-        if not os.path.exists(path) or os.path.getsize(path) < 1024: return False
+    def get_media_duration(self, path):
         res = self.run_cmd(
             ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1',
              path], timeout=30)
-        return float(res.stdout.strip()) > 0 if res and res.stdout.strip() else False
+        try:
+            return float(res.stdout.strip()) if res and res.stdout.strip() else 0
+        except:
+            return 0
+
+    def verify_integrity(self, path):
+        if not os.path.exists(path) or os.path.getsize(path) < 1024: return False
+        return self.get_media_duration(path) > 0
+
+    def verify_audio_segment(self, path, min_duration=1.0):
+        if not os.path.exists(path) or os.path.getsize(path) < 1024:
+            return False
+        return self.get_media_duration(path) >= min_duration
 
     def check_keywords(self, text, keywords):
         hit_words = self.find_keywords(text, keywords)
@@ -325,17 +336,27 @@ class ScannerCore:
             return True, f"命中: {', '.join(hit_words)}"
         return False, None
 
-    def extract_audio(self, video, start, duration, output, map_arg="0:a:0"):
+    def extract_audio(self, video, start, duration, output, map_arg="0:a:0", min_duration=1.0):
         cmd = ['ffmpeg', '-ss', str(start), '-t', str(duration), '-i', video,
                '-map', map_arg, '-vn', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', '-y', output]
         res = self.run_cmd(cmd, timeout=120)
-        return res is not None and res.returncode == 0
+        if not res or res.returncode != 0:
+            return False
+        if not self.verify_audio_segment(output, min_duration=min_duration):
+            self.log(f"⚠️ 提取音频无有效时长: {os.path.basename(output)}")
+            self.remove_audio_cache(output)
+            return False
+        return True
 
     def get_cloud_flac_path(self, audio_path):
         base, _ = os.path.splitext(audio_path)
         return f"{base}_cloud.flac"
 
     def prepare_cloud_audio(self, audio_path, use_flac=False):
+        if not self.verify_audio_segment(audio_path):
+            self.log("⚠️ ASR 音频无有效时长，跳过云端上传")
+            return None, None
+
         if not use_flac:
             return audio_path, None
 
@@ -347,7 +368,7 @@ class ScannerCore:
             return audio_path, None
 
         try:
-            if (os.path.exists(cloud_path) and os.path.getsize(cloud_path) > 1024
+            if (os.path.exists(cloud_path) and self.verify_audio_segment(cloud_path)
                     and os.path.getmtime(cloud_path) >= src_mtime):
                 self.log(f"♻️ 复用 FLAC 音频: {os.path.basename(cloud_path)} ({os.path.getsize(cloud_path) / 1048576:.1f}MB)")
                 return cloud_path, 'audio/flac'
@@ -362,7 +383,7 @@ class ScannerCore:
         except:
             cloud_size = 0
 
-        if res and res.returncode == 0 and cloud_size > 1024:
+        if res and res.returncode == 0 and self.verify_audio_segment(cloud_path):
             self.log(f"☁️ ASR 音频源: FLAC 无损 ({src_size / 1048576:.1f}MB -> {cloud_size / 1048576:.1f}MB)")
             return cloud_path, 'audio/flac'
 
@@ -396,11 +417,11 @@ class ScannerCore:
             'map': map_arg
         }
 
-    def can_reuse_audio_cache(self, audio_path, meta_path, expected_meta):
+    def can_reuse_audio_cache(self, audio_path, meta_path, expected_meta, min_duration=1.0):
         if not os.path.exists(audio_path) or not os.path.exists(meta_path):
             return False
         try:
-            if os.path.getsize(audio_path) < 1024:
+            if not self.verify_audio_segment(audio_path, min_duration=min_duration):
                 return False
             with open(meta_path, 'r', encoding='utf-8') as f:
                 return json.load(f) == expected_meta
@@ -550,13 +571,47 @@ class ScannerCore:
                 continue
 
             temp_audio, temp_meta = self.get_audio_cache_paths(task_id, task['name'])
-            cache_meta = self.get_audio_cache_meta(file_path, task, audio_map)
-            if self.can_reuse_audio_cache(temp_audio, temp_meta, cache_meta):
-                self.log(f"♻️ 复用音频 [{task['name']}]: {os.path.basename(temp_audio)}")
-            else:
+            min_audio_duration = min(5.0, max(1.0, float(task['duration']) * 0.05))
+            extract_tasks = [task]
+            if task['name'] == '片尾' and task['start'] > 0:
+                fallback_start = max(0, task['start'] - task['duration'])
+                if fallback_start < task['start']:
+                    fallback_task = dict(task)
+                    fallback_task['start'] = fallback_start
+                    extract_tasks.append(fallback_task)
+
+            cache_meta = None
+            reused = False
+            for cache_idx, cache_task in enumerate(extract_tasks):
+                candidate_meta = self.get_audio_cache_meta(file_path, cache_task, audio_map)
+                if self.can_reuse_audio_cache(temp_audio, temp_meta, candidate_meta, min_duration=min_audio_duration):
+                    cache_meta = candidate_meta
+                    reused = True
+                    if cache_idx > 0:
+                        self.log(f"♻️ 复用回退音频 [{task['name']}]: {os.path.basename(temp_audio)}")
+                    else:
+                        self.log(f"♻️ 复用音频 [{task['name']}]: {os.path.basename(temp_audio)}")
+                    break
+
+            if not reused:
+                cache_meta = self.get_audio_cache_meta(file_path, task, audio_map)
                 self.remove_audio_cache(temp_audio, temp_meta, self.get_cloud_flac_path(temp_audio))
-                self.log(f"✂️ 提取音频 [{task['name']}]: {task['start']:.1f}s - {task['duration']}s")
-                if not self.extract_audio(file_path, task['start'], task['duration'], temp_audio, map_arg=audio_map):
+
+                extracted = False
+                for extract_idx, extract_task in enumerate(extract_tasks):
+                    if extract_idx > 0:
+                        self.remove_audio_cache(temp_audio, self.get_cloud_flac_path(temp_audio))
+                        self.log(f"↩️ 音频片尾为空，向前重试: {extract_task['start']:.1f}s - {extract_task['duration']}s")
+                    else:
+                        self.log(f"✂️ 提取音频 [{task['name']}]: {extract_task['start']:.1f}s - {extract_task['duration']}s")
+
+                    if self.extract_audio(file_path, extract_task['start'], extract_task['duration'], temp_audio,
+                                          map_arg=audio_map, min_duration=min_audio_duration):
+                        cache_meta = self.get_audio_cache_meta(file_path, extract_task, audio_map)
+                        extracted = True
+                        break
+
+                if not extracted:
                     self.remove_audio_cache(temp_audio, temp_meta, self.get_cloud_flac_path(temp_audio))
                     if self._stopped: return False, None
                     raise RuntimeError(f"音频提取失败: {task['name']}")
@@ -567,6 +622,8 @@ class ScannerCore:
             try:
                 read_timeout = 180 if task['duration'] >= 450 else 120
                 cloud_audio, cloud_mime = self.prepare_cloud_audio(temp_audio, config.get('asr_use_flac'))
+                if not cloud_audio:
+                    raise RuntimeError("ASR 音频无有效时长")
                 cloud_size = os.path.getsize(cloud_audio) if os.path.exists(cloud_audio) else 0
                 source_type = 'FLAC' if cloud_mime else 'WAV'
                 self.log(f"☁️ 云端识别中... (source={source_type}, timeout={read_timeout}s, size={cloud_size / 1048576:.1f}MB)")
