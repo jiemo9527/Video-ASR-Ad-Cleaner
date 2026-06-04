@@ -104,6 +104,11 @@
                         </div>
 
                         <div v-show="settingTab === 'audio'" class="animate-fade">
+                            <div class="form-check form-switch mb-4 p-3 bg-light rounded border">
+                                <input class="form-check-input" type="checkbox" v-model="settings.audio_double_sample" id="sw_audio_double">
+                                <label class="form-check-label fw-bold" for="sw_audio_double">双倍抽样</label>
+                                <div class="small text-muted mt-1" style="font-size: 11px">开启后音频检测按全片均匀抽取 6 段；短到单段可覆盖的视频仍只识别一段，避免重复上传。</div>
+                            </div>
                             <div class="mb-4">
                                 <label class="form-label fw-bold small text-muted">触发阈值设置</label>
                                 <div class="row g-2">
@@ -252,7 +257,7 @@ Vue.createApp({
             settingTab: 'basic',
             settings: {
                 check_audio: true, check_subtitles: true, sanitize_metadata: true, enable_local_model: false,
-                detailed_mode: false, asr_use_flac: false,
+                detailed_mode: false, asr_use_flac: false, audio_double_sample: false,
                 tg_bot_token: '', tg_chat_id: '',
                 audio_threshold_multi: 600, audio_threshold_long: 3600,
                 audio_len_head: 240, audio_len_mid: 240, audio_len_tail: 300, audio_len_tail_long: 600,
@@ -293,7 +298,7 @@ Vue.createApp({
         loadSettings(){
             axios.get('/api/settings').then(r=>{
                 const d = r.data;
-                ['check_audio','check_subtitles','sanitize_metadata', 'enable_local_model', 'detailed_mode', 'asr_use_flac', 'notify_upload_success', 'notify_errors'].forEach(k => this.settings[k] = (d[k]===true || d[k]==='true'));
+                ['check_audio','check_subtitles','sanitize_metadata', 'enable_local_model', 'detailed_mode', 'asr_use_flac', 'audio_double_sample', 'notify_upload_success', 'notify_errors'].forEach(k => this.settings[k] = (d[k]===true || d[k]==='true'));
                 this.settings.tg_bot_token = d.tg_bot_token||'';
                 this.settings.tg_chat_id = d.tg_chat_id||'';
                 const numKeys = ['audio_threshold_multi', 'audio_threshold_long', 'audio_len_head', 'audio_len_mid', 'audio_len_tail', 'audio_len_tail_long', 'concurrency_detect', 'concurrency_upload', 'detect_retry_limit'];

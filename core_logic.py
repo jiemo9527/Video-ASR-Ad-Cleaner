@@ -393,7 +393,12 @@ class ScannerCore:
 
     def get_audio_cache_paths(self, task_id, segment_name):
         name_map = {'片尾': 'tail', '中间': 'middle', '片头': 'head'}
-        safe_segment = name_map.get(segment_name) or re.sub(r'[^a-zA-Z0-9_-]+', '_', str(segment_name)).strip('_')
+        if str(segment_name).startswith('抽样'):
+            m = re.search(r'(\d+)', str(segment_name))
+            safe_segment = f"sample_{m.group(1)}" if m else None
+        else:
+            safe_segment = name_map.get(segment_name)
+        safe_segment = safe_segment or re.sub(r'[^a-zA-Z0-9_-]+', '_', str(segment_name)).strip('_')
         if not safe_segment:
             safe_segment = 'segment'
         task_part = str(task_id) if task_id is not None else 'manual'
@@ -556,18 +561,39 @@ class ScannerCore:
         LEN_TAIL = config.get('audio_len_tail', 300);
         LEN_TAIL_LONG = config.get('audio_len_tail_long', 600)
 
-        tail_dur = LEN_TAIL_LONG if duration >= TH_LONG else LEN_TAIL
-        tasks.append({"start": max(0, duration - tail_dur), "duration": tail_dur, "name": "片尾"})
-        if duration > TH_MULTI:
-            tasks.append({"start": max(0, (duration / 2) - (LEN_MID / 2)), "duration": LEN_MID, "name": "中间"})
-            tasks.append({"start": 0, "duration": LEN_HEAD, "name": "片头"})
+        if config.get('audio_double_sample') and duration > max(1, LEN_MID):
+            sample_count = 6
+            sample_len = max(1, LEN_MID)
+            max_start = max(0, duration - sample_len)
+            for idx in range(sample_count):
+                start = (max_start * idx) / (sample_count - 1) if sample_count > 1 else max_start
+                if idx == 0:
+                    name = "片头"
+                elif idx == sample_count - 1:
+                    name = "片尾"
+                else:
+                    name = f"抽样{idx + 1:02d}"
+                tasks.append({"start": start, "duration": sample_len, "name": name})
+            self.log(f"🎚️ 双倍抽样开启: {sample_count}段 x {sample_len}s")
+        else:
+            tail_dur = LEN_TAIL_LONG if duration >= TH_LONG else LEN_TAIL
+            tasks.append({"start": max(0, duration - tail_dur), "duration": tail_dur, "name": "片尾"})
+            if duration > TH_MULTI:
+                tasks.append({"start": max(0, (duration / 2) - (LEN_MID / 2)), "duration": LEN_MID, "name": "中间"})
+                tasks.append({"start": 0, "duration": LEN_HEAD, "name": "片头"})
+
+        audio_progress_base = 50
+        audio_progress_span = 45
+
+        def audio_progress_pct(index):
+            return int(audio_progress_base + ((index + 1) * audio_progress_span / max(1, len(tasks))))
 
         for i, task in enumerate(tasks):
             if self._stopped: return False, None
 
             if passed_segments and task['name'] in passed_segments:
                 self.log(f"⏭️ [断点] 跳过: {task['name']}")
-                self.prog_cb(50 + ((i + 1) * 15), f"跳过: {task['name']}", "")
+                self.prog_cb(audio_progress_pct(i), f"跳过: {task['name']}", "")
                 continue
 
             temp_audio, temp_meta = self.get_audio_cache_paths(task_id, task['name'])
@@ -725,7 +751,7 @@ class ScannerCore:
 
             self.remove_audio_cache(temp_audio, temp_meta, cloud_audio)
             if checkpoint_cb: checkpoint_cb(task['name'])
-            self.prog_cb(50 + ((i + 1) * 15), "检测进行中", "")
+            self.prog_cb(audio_progress_pct(i), "检测进行中", "")
 
         return False, None
 

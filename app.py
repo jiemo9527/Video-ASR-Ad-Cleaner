@@ -116,7 +116,7 @@ def seed_default_keywords():
 def get_final_config(overrides_json=None):
     final_conf = {
         "check_audio": True, "check_subtitles": True, "sanitize_metadata": True, "enable_local_model": False,
-        "detailed_mode": False, "asr_use_flac": False,
+        "detailed_mode": False, "asr_use_flac": False, "audio_double_sample": False,
         "tg_bot_token": "", "tg_chat_id": "",
         "audio_threshold_multi": 600, "audio_threshold_long": 3600,
         "audio_len_head": 240, "audio_len_mid": 240, "audio_len_tail": 300, "audio_len_tail_long": 600,
@@ -129,7 +129,7 @@ def get_final_config(overrides_json=None):
     }
     db_configs = {c.key: c.value for c in Config.query.all()}
     for k, v in db_configs.items():
-        if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_local_model", "detailed_mode", "asr_use_flac",
+        if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample",
                  "notify_upload_success", "notify_errors"]:
             final_conf[k] = (str(v).lower() == 'true')
         elif k in ["audio_threshold_multi", "audio_threshold_long", "audio_len_head", "audio_len_mid", "audio_len_tail",
@@ -915,6 +915,29 @@ def direct_upload(tid):
     return jsonify({"code": 200})
 
 
+@app.route('/api/task/<int:tid>/double_sample', methods=['POST'])
+@login_required
+def double_sample_task(tid):
+    t = Task.query.get(tid)
+    if not t:
+        return jsonify({"code": 404}), 404
+    if t.status in ['processing', 'uploading']:
+        return jsonify({"code": 409, "msg": "任务运行中，无法切换抽样"}), 409
+
+    update_task_overrides(
+        t,
+        {'check_audio': True, 'audio_double_sample': True},
+        remove_keys=['_passed', '_passed_file']
+    )
+    t.status = 'pending'
+    t.log += "\n=== 单任务双倍抽样 ===\n"
+    t.finished_at = None
+    t.retry_count = 0
+    db.session.commit()
+    detect_queue.put(t.id)
+    return jsonify({"code": 200})
+
+
 @app.route('/api/task/<int:tid>/save_and_retry', methods=['POST'])
 @login_required
 def save_and_retry(tid):
@@ -988,7 +1011,7 @@ def cancel(tid):
 def settings():
     if request.method == 'POST':
         for k, v in request.json.items():
-            if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_local_model", "detailed_mode", "asr_use_flac",
+            if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample",
                      "notify_upload_success", "notify_errors"]:
                 val = "true" if (v is True or str(v).lower() == 'true') else "false"
             else:
