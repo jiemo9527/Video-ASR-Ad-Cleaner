@@ -50,10 +50,35 @@ login_manager.login_view = 'login'
 detect_queue = queue.Queue()
 upload_queue = queue.Queue()
 running_tasks = {}
+active_detect_tasks = set()
+active_upload_tasks = set()
+task_state_lock = threading.Lock()
 download_proc = None;
 download_logs = [];
 download_lock = threading.Lock()
 LOGIN_ATTEMPTS = {}
+
+
+def claim_task_stage(task_id, stage):
+    current_set = active_detect_tasks if stage == 'detect' else active_upload_tasks
+    other_set = active_upload_tasks if stage == 'detect' else active_detect_tasks
+    with task_state_lock:
+        if task_id in current_set or task_id in other_set:
+            return False
+        current_set.add(task_id)
+        return True
+
+
+def release_task_stage(task_id, stage):
+    current_set = active_detect_tasks if stage == 'detect' else active_upload_tasks
+    with task_state_lock:
+        current_set.discard(task_id)
+
+
+def clear_running_task(task_id, core):
+    with task_state_lock:
+        if running_tasks.get(task_id) is core:
+            del running_tasks[task_id]
 
 
 def check_ip_ban(ip):
@@ -286,8 +311,14 @@ def detection_worker():
         while True:
             try:
                 task_id = detect_queue.get()
+                if not claim_task_stage(task_id, 'detect'):
+                    detect_queue.task_done()
+                    continue
                 task = Task.query.get(task_id)
-                if not task or task.status == 'cancelled': detect_queue.task_done(); continue
+                if not task or task.status != 'pending':
+                    release_task_stage(task_id, 'detect')
+                    detect_queue.task_done()
+                    continue
                 task.status = 'processing';
                 task.progress = 0;
                 db.session.commit()
@@ -402,7 +433,8 @@ def detection_worker():
                 core = ScannerCore(logger_callback=db_logger, task_id=task_id, root_dir_name=current_root_name,
                                    rclone_remote=rclone_remote)
                 core.prog_cb = detect_prog
-                running_tasks[task_id] = core
+                with task_state_lock:
+                    running_tasks[task_id] = core
 
                 try:
                     res = core.process_file(
@@ -473,7 +505,8 @@ def detection_worker():
                         if final_settings.get('notify_errors', True): core.send_tg_msg(final_settings,
                                                                                        f"❌ 系统异常: {task.filename}")
                 finally:
-                    if task_id in running_tasks: del running_tasks[task_id]
+                    clear_running_task(task_id, core)
+                    release_task_stage(task_id, 'detect')
                     db.session.commit();
                     detect_queue.task_done()
             except Exception as e:
@@ -485,8 +518,14 @@ def upload_worker():
         while True:
             try:
                 task_id = upload_queue.get()
+                if not claim_task_stage(task_id, 'upload'):
+                    upload_queue.task_done()
+                    continue
                 task = Task.query.get(task_id)
-                if not task or task.status == 'cancelled': upload_queue.task_done(); continue
+                if not task or task.status != 'pending_upload':
+                    release_task_stage(task_id, 'upload')
+                    upload_queue.task_done()
+                    continue
                 task.status = 'uploading';
                 db.session.commit()
 
@@ -547,7 +586,8 @@ def upload_worker():
                 core = ScannerCore(logger_callback=db_logger, task_id=task_id, root_dir_name=current_root_name,
                                    rclone_remote=rclone_remote)
                 core.prog_cb = upload_prog
-                running_tasks[task_id] = core
+                with task_state_lock:
+                    running_tasks[task_id] = core
                 try:
                     if core.upload_with_progress(current_upload_path, remote_path=remote_path):
                         if dir_task:
@@ -613,7 +653,8 @@ def upload_worker():
                         if final_settings.get('notify_errors', True): core.send_tg_msg(final_settings,
                                                                                        f"❌ 上传异常: {task.filename}")
                 finally:
-                    if task_id in running_tasks: del running_tasks[task_id]
+                    clear_running_task(task_id, core)
+                    release_task_stage(task_id, 'upload')
                     try:
                         db.session.commit()
                     except:
