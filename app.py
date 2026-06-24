@@ -14,7 +14,7 @@ from flask import Flask, request, jsonify, render_template, redirect, url_for
 from flask_login import LoginManager, login_user, login_required, logout_user, current_user
 from werkzeug.security import check_password_hash, generate_password_hash
 from database import db, Task, Config, Keyword, User
-from core_logic import ScannerCore
+from core_logic import ScannerCore, sensevoice_gguf_ready
 from sqlalchemy import text
 
 app = Flask(__name__)
@@ -140,8 +140,8 @@ def seed_default_keywords():
 
 def get_final_config(overrides_json=None):
     final_conf = {
-        "check_audio": True, "check_subtitles": True, "sanitize_metadata": True, "enable_local_model": False,
-        "detailed_mode": False, "asr_use_flac": False, "audio_double_sample": False,
+        "check_audio": True, "check_subtitles": True, "sanitize_metadata": True, "enable_cloud_asr": True,
+        "enable_local_model": False, "detailed_mode": False, "asr_use_flac": False, "audio_double_sample": False,
         "tg_bot_token": "", "tg_chat_id": "",
         "audio_threshold_multi": 600, "audio_threshold_long": 3600,
         "audio_len_head": 240, "audio_len_mid": 240, "audio_len_tail": 300, "audio_len_tail_long": 600,
@@ -154,7 +154,7 @@ def get_final_config(overrides_json=None):
     }
     db_configs = {c.key: c.value for c in Config.query.all()}
     for k, v in db_configs.items():
-        if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample",
+        if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample",
                  "notify_upload_success", "notify_errors"]:
             final_conf[k] = (str(v).lower() == 'true')
         elif k in ["audio_threshold_multi", "audio_threshold_long", "audio_len_head", "audio_len_mid", "audio_len_tail",
@@ -330,11 +330,14 @@ def detection_worker():
                 except:
                     RETRY_LIMIT = 3
                 user_local_pref = final_settings.get('enable_local_model', False)
+                cloud_enabled = final_settings.get('enable_cloud_asr', True)
 
                 final_settings['current_retry'] = task.retry_count + 1
                 final_settings['retry_limit'] = RETRY_LIMIT
 
-                if task.retry_count < RETRY_LIMIT:
+                if not cloud_enabled:
+                    final_settings['enable_local_model'] = user_local_pref
+                elif task.retry_count < RETRY_LIMIT:
                     final_settings['enable_local_model'] = False
                 else:
                     final_settings['enable_local_model'] = user_local_pref
@@ -478,7 +481,8 @@ def detection_worker():
                         db.session.commit();
                         upload_queue.put(task_id)
                     else:
-                        if task.retry_count < RETRY_LIMIT:
+                        err_msg = str(res.get('msg', ''))
+                        if task.retry_count < RETRY_LIMIT and '云端 API 已停用且本地模型未启用' not in err_msg:
                             task.retry_count += 1
                             task.status = 'pending'
                             db_logger(f"⚠️ 云端异常/超时 -> 重新排队 (尝试 {task.retry_count}/{RETRY_LIMIT})")
@@ -666,11 +670,7 @@ def upload_worker():
 
 # ----------------- Model & System Routes -----------------
 def check_local_models_exist():
-    base = os.path.join(os.getcwd(), 'models', 'iic')
-    paths = [os.path.join(base, 'speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch'),
-             os.path.join(base, 'speech_fsmn_vad_zh-cn-16k-common-pytorch'),
-             os.path.join(base, 'punc_ct-transformer_zh-cn-common-vocab272727-pytorch')]
-    return all(os.path.exists(p) for p in paths)
+    return sensevoice_gguf_ready(os.getcwd())
 
 
 @app.route('/api/model/download', methods=['POST'])
@@ -681,30 +681,164 @@ def download_model():
     proxy_url = sys_conf.get('download_proxy', '')
     with download_lock:
         if download_proc and download_proc.poll() is None: return jsonify({"code": 409, "msg": "下载任务正在进行"})
-        download_logs = ["=== 🚀 初始化并行下载任务 (支持自动重试) ==="]
+        download_logs = ["=== 🚀 初始化 GGUF 本地模型资源下载 ==="]
         env = os.environ.copy()
         if proxy_url: env['HTTP_PROXY'] = proxy_url; env['HTTPS_PROXY'] = proxy_url
         script = """
-import sys, os, time, concurrent.futures
-try: from modelscope.hub.snapshot_download import snapshot_download
-except: print("❌ 未安装 modelscope", flush=True); sys.exit(1)
-root_dir = os.path.join(os.getcwd(), 'models'); os.makedirs(root_dir, exist_ok=True)
-models = [{'id':'iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch','name':'主模型'},{'id':'iic/speech_fsmn_vad_zh-cn-16k-common-pytorch','name':'VAD'},{'id':'iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch','name':'标点'}]
-def dl(m):
-    for i in range(10):
-        try: print(f"⬇️ [{m['name']}] 下载中...",flush=True); snapshot_download(m['id'], cache_dir=root_dir); print(f"✅ [{m['name']}] 完成",flush=True); return
-        except Exception as e: print(f"⚠️ [{m['name']}] 错误: {str(e).splitlines()[0]}",flush=True); time.sleep(5)
-    raise Exception(f"{m['name']} 失败")
-with concurrent.futures.ThreadPoolExecutor(3) as ex:
-    for f in concurrent.futures.as_completed([ex.submit(dl, m) for m in models]):
-        try: f.result()
-        except: sys.exit(1)
-print('🎉 下载完成', flush=True)
+import json, os, platform, shutil, stat, subprocess, sys, tarfile, tempfile, time, urllib.request, zipfile
+
+ROOT = os.path.join(os.getcwd(), 'models', 'sensevoice-gguf')
+GGUF_DIR = os.path.join(ROOT, 'gguf')
+RUNTIME_MARKER = os.path.join(ROOT, 'runtime-generic-arm64.txt')
+os.makedirs(GGUF_DIR, exist_ok=True)
+
+def log(msg):
+    print(msg, flush=True)
+
+def download(url, dest, min_size=1):
+    if os.path.exists(dest) and os.path.getsize(dest) >= min_size:
+        log(f"✅ 已存在，跳过: {os.path.basename(dest)}")
+        return
+    tmp = dest + '.part'
+    for attempt in range(1, 6):
+        try:
+            log(f"⬇️ 下载: {os.path.basename(dest)} (尝试 {attempt}/5)")
+            req = urllib.request.Request(url, headers={'User-Agent': 'scanner-web/gguf-downloader'})
+            with urllib.request.urlopen(req, timeout=60) as r, open(tmp, 'wb') as f:
+                shutil.copyfileobj(r, f)
+            if os.path.getsize(tmp) < min_size:
+                raise RuntimeError('下载文件过小')
+            os.replace(tmp, dest)
+            log(f"✅ 完成: {os.path.basename(dest)} ({os.path.getsize(dest) / 1048576:.1f}MB)")
+            return
+        except Exception as e:
+            try:
+                if os.path.exists(tmp): os.remove(tmp)
+            except: pass
+            log(f"⚠️ 下载失败: {str(e).splitlines()[0]}")
+            time.sleep(5)
+    raise RuntimeError(f"下载失败: {url}")
+
+def runtime_asset_name():
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    is_arm = machine in ('aarch64', 'arm64')
+    if system == 'linux':
+        return 'funasr-llamacpp-linux-arm64.tar.gz' if is_arm else 'funasr-llamacpp-linux-x64.tar.gz'
+    if system == 'darwin' and is_arm:
+        return 'funasr-llamacpp-macos-arm64.tar.gz'
+    if system == 'windows':
+        return 'funasr-llamacpp-windows-x64.zip'
+    raise RuntimeError(f'暂不支持的平台: {system}/{machine}')
+
+def is_arm64_linux():
+    return platform.system().lower() == 'linux' and platform.machine().lower() in ('aarch64', 'arm64')
+
+def stream_cmd(cmd, cwd=None, timeout=None):
+    log('$ ' + ' '.join(cmd))
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            if line:
+                log(line)
+        rc = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise RuntimeError('命令超时: ' + ' '.join(cmd))
+    if rc != 0:
+        raise RuntimeError(f'命令失败({rc}): ' + ' '.join(cmd))
+
+def build_runtime_from_source():
+    binary_name = 'llama-funasr-sensevoice'
+    binary_path = os.path.join(ROOT, binary_name)
+    if os.path.exists(RUNTIME_MARKER) and os.path.exists(binary_path) and os.path.getsize(binary_path) > 1024 * 1024:
+        log('✅ ARM 通用 runtime 已存在，跳过编译')
+        return
+
+    missing = [tool for tool in ('git', 'cmake', 'c++') if not shutil.which(tool)]
+    if missing:
+        raise RuntimeError('ARM 服务器需要本机编译 runtime，缺少工具: ' + ', '.join(missing))
+
+    log('🛠️ ARM64 Linux 检测到预编译包可能不兼容，开始本机编译 GGML_NATIVE=OFF')
+    with tempfile.TemporaryDirectory(prefix='sensevoice_runtime_build_') as tmpdir:
+        repo = os.path.join(tmpdir, 'SenseVoice')
+        stream_cmd(['git', 'clone', '--depth', '1', '--branch', 'runtime-llamacpp-v0.1.2',
+                    'https://github.com/FunAudioLLM/SenseVoice.git', repo], timeout=300)
+        runtime_dir = os.path.join(repo, 'runtime', 'llama.cpp')
+        stream_cmd(['cmake', '-B', 'build', '-DCMAKE_BUILD_TYPE=Release', '-DGGML_NATIVE=OFF', '-DLLAMA_CURL=OFF'],
+                   cwd=runtime_dir, timeout=300)
+        stream_cmd(['cmake', '--build', 'build', '-j', '2', '--target', 'llama-funasr-sensevoice'],
+                   cwd=runtime_dir, timeout=1200)
+        built = os.path.join(runtime_dir, 'build', 'bin', binary_name)
+        if not os.path.exists(built):
+            raise RuntimeError('编译完成但未找到 llama-funasr-sensevoice')
+        shutil.copy2(built, binary_path)
+        os.chmod(binary_path, os.stat(binary_path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        with open(RUNTIME_MARKER, 'w', encoding='utf-8') as f:
+            f.write('runtime-llamacpp-v0.1.2 GGML_NATIVE=OFF arm64\n')
+        log('✅ ARM 通用 runtime 编译完成')
+
+def latest_runtime_url(asset_name):
+    try:
+        req = urllib.request.Request('https://api.github.com/repos/FunAudioLLM/SenseVoice/releases/latest', headers={'User-Agent': 'scanner-web/gguf-downloader'})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            release = json.load(r)
+        for asset in release.get('assets', []):
+            if asset.get('name') == asset_name:
+                return asset.get('browser_download_url')
+    except Exception as e:
+        log(f"⚠️ 获取最新 release 失败，使用固定版本: {str(e).splitlines()[0]}")
+    return f'https://github.com/FunAudioLLM/SenseVoice/releases/download/runtime-llamacpp-v0.1.2/{asset_name}'
+
+def extract_runtime(archive_path):
+    log('📦 解压 llama.cpp runtime...')
+    with tempfile.TemporaryDirectory(prefix='sensevoice_runtime_') as tmpdir:
+        if archive_path.endswith('.zip'):
+            with zipfile.ZipFile(archive_path) as z:
+                z.extractall(tmpdir)
+        else:
+            with tarfile.open(archive_path, 'r:gz') as t:
+                t.extractall(tmpdir)
+
+        binary_name = 'llama-funasr-sensevoice.exe' if platform.system().lower() == 'windows' else 'llama-funasr-sensevoice'
+        script_name = 'download-funasr-model.sh'
+        found_binary = None
+        found_script = None
+        for dirpath, _, filenames in os.walk(tmpdir):
+            for filename in filenames:
+                full = os.path.join(dirpath, filename)
+                if filename == binary_name:
+                    found_binary = full
+                elif filename == script_name:
+                    found_script = full
+        if not found_binary:
+            raise RuntimeError('runtime 包中未找到 llama-funasr-sensevoice')
+        shutil.copy2(found_binary, os.path.join(ROOT, binary_name))
+        if found_script:
+            shutil.copy2(found_script, os.path.join(ROOT, script_name))
+        if platform.system().lower() != 'windows':
+            for name in (binary_name, script_name):
+                path = os.path.join(ROOT, name)
+                if os.path.exists(path):
+                    os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        log('✅ runtime 已就绪')
+
+if is_arm64_linux():
+    build_runtime_from_source()
+else:
+    asset = runtime_asset_name()
+    archive = os.path.join(ROOT, asset)
+    download(latest_runtime_url(asset), archive, 1024 * 1024)
+    extract_runtime(archive)
+download('https://huggingface.co/FunAudioLLM/SenseVoiceSmall-GGUF/resolve/main/sensevoice-small-q8.gguf', os.path.join(GGUF_DIR, 'sensevoice-small-q8.gguf'), 100 * 1024 * 1024)
+download('https://huggingface.co/FunAudioLLM/fsmn-vad-GGUF/resolve/main/fsmn-vad.gguf', os.path.join(GGUF_DIR, 'fsmn-vad.gguf'), 100 * 1024)
+log('🎉 GGUF 本地模型资源下载完成')
 """
 
         def run():
             global download_proc;
-            download_proc = subprocess.Popen(['python3', '-u', '-c', script], stdout=subprocess.PIPE,
+            download_proc = subprocess.Popen([sys.executable, '-u', '-c', script], stdout=subprocess.PIPE,
                                              stderr=subprocess.STDOUT, text=True, env=env)
             for l in download_proc.stdout: download_logs.append(l.strip()); (
                 download_logs.pop(0) if len(download_logs) > 500 else None)
@@ -1052,7 +1186,7 @@ def cancel(tid):
 def settings():
     if request.method == 'POST':
         for k, v in request.json.items():
-            if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample",
+            if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample",
                      "notify_upload_success", "notify_errors"]:
                 val = "true" if (v is True or str(v).lower() == 'true') else "false"
             else:

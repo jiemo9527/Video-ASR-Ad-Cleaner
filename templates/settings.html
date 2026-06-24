@@ -131,6 +131,11 @@
                         <div v-show="settingTab === 'model'" class="animate-fade">
                             <div class="mb-4">
                                 <h6 class="border-bottom pb-2 mb-3 text-muted small fw-bold">☁️ API 云端模型</h6>
+                                <div class="form-check form-switch mb-3 p-3 bg-light rounded border">
+                                    <input class="form-check-input" type="checkbox" v-model="settings.enable_cloud_asr" id="sw_cloud_asr">
+                                    <label class="form-check-label fw-bold" for="sw_cloud_asr">启用云端 API 识别</label>
+                                    <div class="small text-muted mt-1" style="font-size: 11px">关闭后不请求云端 ASR，音频检测直接使用本地 GGUF 模型；请同时启用本地模型。</div>
+                                </div>
                                 <div class="mb-3"><label class="form-label fw-bold small">API Endpoint (URL)</label><input type="text" class="form-control form-control-sm font-monospace" v-model="settings.api_url"></div>
                                 <div class="mb-3"><label class="form-label fw-bold small">API Key</label><div class="input-group input-group-sm"><input type="password" class="form-control font-monospace" v-model="settings.api_key" id="apiKeyInput"><button class="btn btn-outline-secondary" type="button" onclick="const i=document.getElementById('apiKeyInput');i.type=i.type==='password'?'text':'password'"><i class="bi bi-eye"></i></button></div></div>
                                 <div class="mb-3"><label class="form-label fw-bold small">Model Name</label><input type="text" class="form-control form-control-sm" v-model="settings.api_model"></div>
@@ -143,11 +148,12 @@
                             <div class="mb-2">
                                 <h6 class="border-bottom pb-2 mb-3 text-muted small fw-bold">🏠 本地模型资源</h6>
                                 <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" v-model="settings.enable_local_model" id="sw_local" :disabled="!modelReady"><label class="form-check-label fw-bold" for="sw_local">启用本地模型 (Fallback)</label></div>
-                                <div v-if="!modelReady" class="text-danger small mb-2" style="font-size: 11px; margin-left: 2em;"><i class="bi bi-x-circle me-1"></i> 检测到本地模型文件缺失，无法启用。请先下载。</div>
+                                <div v-if="!modelReady" class="text-danger small mb-2" style="font-size: 11px; margin-left: 2em;"><i class="bi bi-x-circle me-1"></i> 检测到 GGUF 本地模型资源缺失，无法启用。请先下载。</div>
                                 <div class="mb-3"><label class="form-label fw-bold small">下载代理 (Proxy)</label><input type="text" class="form-control form-control-sm font-monospace" v-model="settings.download_proxy" placeholder="http://127.0.0.1:7890"></div>
                                 <div class="card bg-light border-0 p-3 mb-3">
-                                    <div class="d-flex justify-content-between align-items-center mb-2"><span class="fw-bold small">SenseVoice (ONNX/Torch)</span><span class="badge" :class="modelReady ? 'bg-success' : 'bg-secondary'">[[ modelReady ? '已就绪' : '未检测/缺失' ]]</span></div>
-                                    <button class="btn btn-outline-primary btn-sm w-100" @click="startDownloadModel"><i class="bi bi-cloud-download me-1"></i> 一键下载 / 更新模型资源</button>
+                                    <div class="d-flex justify-content-between align-items-center mb-2"><span class="fw-bold small">SenseVoice GGUF / llama.cpp</span><span class="badge" :class="modelReady ? 'bg-success' : 'bg-secondary'">[[ modelReady ? '已就绪' : '未检测/缺失' ]]</span></div>
+                                    <div class="small text-muted mb-2" style="font-size: 11px;">CPU 本地推理，无需 Python 模型环境；下载 q8 模型和 FSMN-VAD。</div>
+                                    <button class="btn btn-outline-primary btn-sm w-100" @click="startDownloadModel"><i class="bi bi-cloud-download me-1"></i> 一键下载 / 更新 GGUF 资源</button>
                                 </div>
                             </div>
                         </div>
@@ -243,7 +249,7 @@
     <div class="toast-container position-fixed bottom-0 end-0 p-3" style="z-index: 1100"><div id="liveToast" class="toast align-items-center text-white border-0" :class="toastClass" role="alert"><div class="d-flex"><div class="toast-body"><i :class="toastIcon" class="me-2"></i> [[ toastMsg ]]</div><button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button></div></div></div>
     <div class="modal fade" id="confirmModal" tabindex="-1"><div class="modal-dialog modal-sm modal-dialog-centered"><div class="modal-content"><div class="modal-header border-0 pb-0"><h5 class="modal-title fs-6 fw-bold text-danger">⚠️ 确认操作</h5></div><div class="modal-body">[[ confirmMsg ]]</div><div class="modal-footer border-0 pt-0"><button type="button" class="btn btn-sm btn-light" data-bs-dismiss="modal">取消</button><button type="button" class="btn btn-sm btn-danger" @click="executeConfirm">确定</button></div></div></div></div>
     <div class="modal fade" id="addKwModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content"><div class="modal-header"><h5 class="modal-title">新增 [[ tabName ]] 关键词</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="mb-3"><label class="form-label fw-bold">关键词内容</label><input type="text" class="form-control" v-model="newKw" placeholder="例如：加群|微信|推广" @keyup.enter="addKw"><div class="form-text text-muted">💡 支持批量添加：使用竖线 <code>|</code> 分隔多个词。</div></div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button><button type="button" class="btn btn-primary" @click="addKw">确认添加</button></div></div></div></div>
-    <div class="modal fade" id="downloadLogModal" tabindex="-1"><div class="modal-dialog modal-lg modal-dialog-centered"><div class="modal-content"><div class="modal-header bg-dark text-white border-0"><h5 class="modal-title fs-6"><i class="bi bi-terminal me-2"></i>模型资源下载器</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body bg-black p-0"><div ref="logBox" class="p-3 font-monospace" style="height: 400px; overflow-y: auto; color: #0f0; font-size: 12px; line-height: 1.5; white-space: pre-wrap;">[[ downloadLogs ]]</div></div><div class="modal-footer bg-dark border-0 py-2"><div v-if="downloading" class="d-flex align-items-center text-white small me-auto"><span class="spinner-border spinner-border-sm me-2"></span> 正在下载中...</div><button type="button" class="btn btn-sm btn-light" data-bs-dismiss="modal">[[ downloading ? '隐藏窗口 (后台继续)' : '关闭' ]]</button></div></div></div></div>
+    <div class="modal fade" id="downloadLogModal" tabindex="-1"><div class="modal-dialog modal-lg modal-dialog-centered"><div class="modal-content"><div class="modal-header bg-dark text-white border-0"><h5 class="modal-title fs-6"><i class="bi bi-terminal me-2"></i>GGUF 模型资源下载器</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body bg-black p-0"><div ref="logBox" class="p-3 font-monospace" style="height: 400px; overflow-y: auto; color: #0f0; font-size: 12px; line-height: 1.5; white-space: pre-wrap;">[[ downloadLogs ]]</div></div><div class="modal-footer bg-dark border-0 py-2"><div v-if="downloading" class="d-flex align-items-center text-white small me-auto"><span class="spinner-border spinner-border-sm me-2"></span> 正在下载中...</div><button type="button" class="btn btn-sm btn-light" data-bs-dismiss="modal">[[ downloading ? '隐藏窗口 (后台继续)' : '关闭' ]]</button></div></div></div></div>
 
 </div>
 
@@ -256,8 +262,8 @@ Vue.createApp({
         return{
             settingTab: 'basic',
             settings: {
-                check_audio: true, check_subtitles: true, sanitize_metadata: true, enable_local_model: false,
-                detailed_mode: false, asr_use_flac: false, audio_double_sample: false,
+                check_audio: true, check_subtitles: true, sanitize_metadata: true, enable_cloud_asr: true,
+                enable_local_model: false, detailed_mode: false, asr_use_flac: false, audio_double_sample: false,
                 tg_bot_token: '', tg_chat_id: '',
                 audio_threshold_multi: 600, audio_threshold_long: 3600,
                 audio_len_head: 240, audio_len_mid: 240, audio_len_tail: 300, audio_len_tail_long: 600,
@@ -298,7 +304,7 @@ Vue.createApp({
         loadSettings(){
             axios.get('/api/settings').then(r=>{
                 const d = r.data;
-                ['check_audio','check_subtitles','sanitize_metadata', 'enable_local_model', 'detailed_mode', 'asr_use_flac', 'audio_double_sample', 'notify_upload_success', 'notify_errors'].forEach(k => this.settings[k] = (d[k]===true || d[k]==='true'));
+                ['check_audio','check_subtitles','sanitize_metadata', 'enable_cloud_asr', 'enable_local_model', 'detailed_mode', 'asr_use_flac', 'audio_double_sample', 'notify_upload_success', 'notify_errors'].forEach(k => this.settings[k] = (d[k]===true || d[k]==='true'));
                 this.settings.tg_bot_token = d.tg_bot_token||'';
                 this.settings.tg_chat_id = d.tg_chat_id||'';
                 const numKeys = ['audio_threshold_multi', 'audio_threshold_long', 'audio_len_head', 'audio_len_mid', 'audio_len_tail', 'audio_len_tail_long', 'concurrency_detect', 'concurrency_upload', 'detect_retry_limit'];

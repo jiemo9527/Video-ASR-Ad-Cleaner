@@ -38,10 +38,6 @@ MODELS_ROOT = os.path.join(BASE_DIR, "models")
 SCAN_IGNORED_CHARS_RE = re.compile(r'[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]')
 IMAGE_SUBTITLE_CODECS = {'hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle', 'xsub'}
 
-MODEL_DIR = os.path.join(MODELS_ROOT, "iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch")
-VAD_MODEL = os.path.join(MODELS_ROOT, "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch")
-PUNC_MODEL = os.path.join(MODELS_ROOT, "iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch")
-
 VIDEO_EXTENSIONS = {
     '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm',
     '.m4v', '.ts', '.mts', '.m2ts', '.vob', '.mpg', '.mpeg',
@@ -50,6 +46,34 @@ VIDEO_EXTENSIONS = {
 
 
 # ===================================================
+
+def get_sensevoice_gguf_paths(base_dir=None):
+    root = os.path.join(base_dir or BASE_DIR, "models", "sensevoice-gguf")
+    binary_name = "llama-funasr-sensevoice.exe" if os.name == 'nt' else "llama-funasr-sensevoice"
+    return {
+        'root': root,
+        'binary': os.path.join(root, binary_name),
+        'model': os.path.join(root, "gguf", "sensevoice-small-q8.gguf"),
+        'vad': os.path.join(root, "gguf", "fsmn-vad.gguf"),
+    }
+
+
+def sensevoice_gguf_ready(base_dir=None):
+    paths = get_sensevoice_gguf_paths(base_dir)
+    checks = [
+        (paths['binary'], 1024 * 1024),
+        (paths['model'], 100 * 1024 * 1024),
+        (paths['vad'], 100 * 1024),
+    ]
+    for path, min_size in checks:
+        try:
+            if not os.path.exists(path) or os.path.getsize(path) < min_size:
+                return False
+            if path == paths['binary'] and os.name != 'nt' and not os.access(path, os.X_OK):
+                return False
+        except:
+            return False
+    return True
 
 class ScannerCore:
     def __init__(self, logger_callback=None, progress_callback=None, task_id=None, root_dir_name="downloads",
@@ -450,9 +474,49 @@ class ScannerCore:
 
     def clean_transcription(self, text):
         if not text: return ""
+        text = re.sub(r'<\|[^|]*\|>', '', text)
         text = re.sub(r'[\U00010000-\U0010ffff]', '', text)
         text = re.sub(r'[🎼♪♫♬♭♮♯😡😔]', '', text)
         return text.strip()
+
+    def extract_local_asr_text(self, output):
+        if not output:
+            return ""
+        lines = [line.strip() for line in str(output).splitlines() if line.strip()]
+        filtered = []
+        noise_prefixes = ('main:', 'ggml_', 'llama_', 'build:', 'system_info:', 'load_', 'init:', '[sensevoice]')
+        for line in lines:
+            lower = line.lower()
+            if lower.startswith(noise_prefixes):
+                continue
+            filtered.append(line)
+        return "\n".join(filtered or lines).strip()
+
+    def run_local_sensevoice_gguf(self, audio_path, segment_duration):
+        paths = get_sensevoice_gguf_paths()
+        if not sensevoice_gguf_ready():
+            raise RuntimeError("本地 GGUF 模型资源缺失，请在设置页下载")
+
+        timeout = max(300, int(float(segment_duration or 0) * 3) + 120)
+        cmd = [paths['binary'], '-m', paths['model'], '--vad', paths['vad'], '-a', audio_path]
+        res = self.run_cmd(cmd, timeout=timeout)
+        if not res or res.returncode != 0:
+            raise RuntimeError("GGUF 推理命令失败")
+        text = self.extract_local_asr_text((res.stdout or '') + "\n" + (res.stderr or ''))
+        text = self.clean_transcription(text)
+        if not text:
+            raise RuntimeError("GGUF 推理无识别文本")
+        return text
+
+    def get_retry_attempt_label(self, config):
+        try:
+            current = int(config.get('current_retry', 1))
+            retry_limit = int(config.get('retry_limit', 3))
+        except:
+            current = 1
+            retry_limit = 3
+        total = max(1, retry_limit + 1, current)
+        return current, total
 
     def sanitize_metadata(self, source, meta_keywords):
         if source.lower().endswith('.rmvb'): return
@@ -646,50 +710,54 @@ class ScannerCore:
             cloud_success = False
             cloud_audio = None
             try:
-                read_timeout = 180 if task['duration'] >= 450 else 120
-                cloud_audio, cloud_mime = self.prepare_cloud_audio(temp_audio, config.get('asr_use_flac'))
-                if not cloud_audio:
-                    raise RuntimeError("ASR 音频无有效时长")
-                cloud_size = os.path.getsize(cloud_audio) if os.path.exists(cloud_audio) else 0
-                source_type = 'FLAC' if cloud_mime else 'WAV'
-                self.log(f"☁️ 云端识别中... (source={source_type}, timeout={read_timeout}s, size={cloud_size / 1048576:.1f}MB)")
-                data = {"model": config.get('api_model'), "language": "zh", "response_format": "json"}
-                headers = {"Authorization": f"Bearer {config.get('api_key')}"}
-                with open(cloud_audio, "rb") as f:
-                    if cloud_mime:
-                        files = {"file": (os.path.basename(cloud_audio), f, cloud_mime)}
-                    else:
-                        files = {"file": f}
-                    resp = requests.post(config.get('api_url'), headers=headers, files=files, data=data,
-                                         timeout=(10, read_timeout))
-
-                if resp.status_code == 200:
-                    text = self.clean_transcription(resp.json().get('text', ''))
-                    hit, reason = self.check_keywords(text, audio_keywords)
-                    if hit:
-                        self.log(f"☁️ [违规] 内容: {text}")
-                        self.remove_audio_cache(temp_audio, temp_meta, cloud_audio)
-                        return True, reason
-
-                    if config.get('detailed_mode'):
-                        self.log(f"✅ [通过] 内容: {text}")
-                    else:
-                        self.log("✅ 云端识别通过")
-                    cloud_success = True
+                if not config.get('enable_cloud_asr', True):
+                    self.log("☁️ 云端 API 已停用，跳过云端识别")
                 else:
-                    c = config.get('current_retry', 1);
-                    m = config.get('retry_limit', 3)
-                    self.log(f"⚠️ 云端 API 报错 (第{c}/{m}次): {resp.status_code}")
+                    read_timeout = 180 if task['duration'] >= 450 else 120
+                    cloud_audio, cloud_mime = self.prepare_cloud_audio(temp_audio, config.get('asr_use_flac'))
+                    if not cloud_audio:
+                        raise RuntimeError("ASR 音频无有效时长")
+                    cloud_size = os.path.getsize(cloud_audio) if os.path.exists(cloud_audio) else 0
+                    source_type = 'FLAC' if cloud_mime else 'WAV'
+                    self.log(f"☁️ 云端识别中... (source={source_type}, timeout={read_timeout}s, size={cloud_size / 1048576:.1f}MB)")
+                    data = {"model": config.get('api_model'), "language": "zh", "response_format": "json"}
+                    headers = {"Authorization": f"Bearer {config.get('api_key')}"}
+                    with open(cloud_audio, "rb") as f:
+                        if cloud_mime:
+                            files = {"file": (os.path.basename(cloud_audio), f, cloud_mime)}
+                        else:
+                            files = {"file": f}
+                        resp = requests.post(config.get('api_url'), headers=headers, files=files, data=data,
+                                             timeout=(10, read_timeout))
+
+                    if resp.status_code == 200:
+                        text = self.clean_transcription(resp.json().get('text', ''))
+                        hit, reason = self.check_keywords(text, audio_keywords)
+                        if hit:
+                            self.log(f"☁️ [违规] 内容: {text}")
+                            self.remove_audio_cache(temp_audio, temp_meta, cloud_audio)
+                            return True, reason
+
+                        if config.get('detailed_mode'):
+                            self.log(f"✅ [通过] 内容: {text}")
+                        else:
+                            self.log("✅ 云端识别通过")
+                        cloud_success = True
+                    else:
+                        c, m = self.get_retry_attempt_label(config)
+                        self.log(f"⚠️ 云端 API 报错 (第{c}/{m}次): {resp.status_code}")
 
             except Exception as e:
-                c = config.get('current_retry', 1);
-                m = config.get('retry_limit', 3)
+                c, m = self.get_retry_attempt_label(config)
                 self.log(f"⚠️ 云端连接异常 (第{c}/{m}次): {str(e)}")
 
             if not cloud_success:
                 if self._stopped: return False, None
 
                 if not enable_local:
+                    if not config.get('enable_cloud_asr', True):
+                        self.remove_audio_cache(temp_audio, temp_meta, cloud_audio)
+                        raise RuntimeError("云端 API 已停用且本地模型未启用")
                     try:
                         has_retry = int(config.get('current_retry', 1)) <= int(config.get('retry_limit', 3))
                     except:
@@ -704,19 +772,13 @@ class ScannerCore:
                 with inference_lock:
                     if self._stopped: return False, None
 
-                    self.log("🔒 获得锁，本地推理中...")
+                    self.log("🔒 获得锁，本地 GGUF 推理中...")
                     self.drop_caches()
 
-                    # 🔥 引入 finally 结构，确保 100% 内存回收
-                    model = None
                     try:
-                        from funasr import AutoModel
-                        model = AutoModel(model=MODEL_DIR, vad_model=VAD_MODEL, punc_model=PUNC_MODEL,
-                                          disable_update=True, log_level="ERROR")
                         st = time.time();
-                        res = model.generate(input=temp_audio);
+                        text = self.run_local_sensevoice_gguf(temp_audio, task['duration'])
                         dur = time.time() - st
-                        text = self.clean_transcription(res[0]['text'] if res else "")
 
                         hit, reason = self.check_keywords(text, audio_keywords)
                         if hit:
@@ -734,20 +796,8 @@ class ScannerCore:
                         self.remove_audio_cache(temp_audio, temp_meta, cloud_audio)
                         raise RuntimeError(f"本地模型失败: {e}")
                     finally:
-                        # 🔥 [关键修改3] 无论推理成功与否，强制销毁对象并调用 drop_caches
-                        if model:
-                            del model
-
-                        # 如果有 torch，尝试清空 CUDA 缓存(如果有的话)
-                        try:
-                            import torch
-                            if torch.cuda.is_available(): torch.cuda.empty_cache()
-                        except:
-                            pass
-
-                        # 调用我们上方定义的、带 malloc_trim 的强力回收函数
                         self.drop_caches()
-                        self.log("🧹 [系统] 本地模型内存已强制回收")
+                        self.log("🧹 [系统] 本地 GGUF 推理资源已释放")
 
             self.remove_audio_cache(temp_audio, temp_meta, cloud_audio)
             if checkpoint_cb: checkpoint_cb(task['name'])
