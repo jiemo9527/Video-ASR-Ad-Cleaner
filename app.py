@@ -691,7 +691,7 @@ import json, os, platform, shutil, stat, subprocess, sys, tarfile, tempfile, tim
 
 ROOT = os.path.join(os.getcwd(), 'models', 'sensevoice-gguf')
 GGUF_DIR = os.path.join(ROOT, 'gguf')
-RUNTIME_MARKER = os.path.join(ROOT, 'runtime-generic-arm64.txt')
+RUNTIME_VERSION = 'runtime-llamacpp-v0.1.2'
 os.makedirs(GGUF_DIR, exist_ok=True)
 
 def log(msg):
@@ -721,20 +721,33 @@ def download(url, dest, min_size=1):
             time.sleep(5)
     raise RuntimeError(f"下载失败: {url}")
 
+def normalized_machine():
+    machine = platform.machine().lower()
+    if machine in ('x86_64', 'amd64'):
+        return 'x64'
+    if machine in ('aarch64', 'arm64'):
+        return 'arm64'
+    raise RuntimeError(f'暂不支持的平台架构: {platform.system().lower()}/{machine}')
+
 def runtime_asset_name():
     system = platform.system().lower()
-    machine = platform.machine().lower()
-    is_arm = machine in ('aarch64', 'arm64')
+    machine = normalized_machine()
     if system == 'linux':
-        return 'funasr-llamacpp-linux-arm64.tar.gz' if is_arm else 'funasr-llamacpp-linux-x64.tar.gz'
-    if system == 'darwin' and is_arm:
+        return 'funasr-llamacpp-linux-arm64.tar.gz' if machine == 'arm64' else 'funasr-llamacpp-linux-x64.tar.gz'
+    if system == 'darwin' and machine == 'arm64':
         return 'funasr-llamacpp-macos-arm64.tar.gz'
-    if system == 'windows':
+    if system == 'windows' and machine == 'x64':
         return 'funasr-llamacpp-windows-x64.zip'
-    raise RuntimeError(f'暂不支持的平台: {system}/{machine}')
+    raise RuntimeError(f'暂不支持的平台: {system}/{platform.machine().lower()}')
 
-def is_arm64_linux():
-    return platform.system().lower() == 'linux' and platform.machine().lower() in ('aarch64', 'arm64')
+def is_linux():
+    return platform.system().lower() == 'linux'
+
+def runtime_build_id():
+    return f'{RUNTIME_VERSION} GGML_NATIVE=OFF linux/{normalized_machine()}'
+
+def runtime_marker_path():
+    return os.path.join(ROOT, f'runtime-source-build-linux-{normalized_machine()}.txt')
 
 def stream_cmd(cmd, cwd=None, timeout=None):
     log('$ ' + ' '.join(cmd))
@@ -752,20 +765,29 @@ def stream_cmd(cmd, cwd=None, timeout=None):
         raise RuntimeError(f'命令失败({rc}): ' + ' '.join(cmd))
 
 def build_runtime_from_source():
+    build_id = runtime_build_id()
+    marker_path = runtime_marker_path()
     binary_name = 'llama-funasr-sensevoice'
     binary_path = os.path.join(ROOT, binary_name)
-    if os.path.exists(RUNTIME_MARKER) and os.path.exists(binary_path) and os.path.getsize(binary_path) > 1024 * 1024:
-        log('✅ ARM 通用 runtime 已存在，跳过编译')
-        return
+    if os.path.exists(marker_path) and os.path.exists(binary_path) and os.path.getsize(binary_path) > 1024 * 1024:
+        with open(marker_path, 'r', encoding='utf-8') as f:
+            marker = f.read().strip()
+        if marker == build_id:
+            log(f'✅ Linux 本机编译 runtime 已存在，跳过编译 ({normalized_machine()})')
+            return
+        log(f'⚠️ runtime 架构标记不匹配，将重新编译: {marker or "empty"}')
+
+    if os.path.exists(binary_path) and not os.path.exists(marker_path):
+        log('⚠️ 发现旧 runtime 但缺少本机编译标记，将重新编译以适配当前 CPU/GLIBC')
 
     missing = [tool for tool in ('git', 'cmake', 'c++') if not shutil.which(tool)]
     if missing:
-        raise RuntimeError('ARM 服务器需要本机编译 runtime，缺少工具: ' + ', '.join(missing))
+        raise RuntimeError('Linux 服务器需要本机编译 runtime，缺少工具: ' + ', '.join(missing))
 
-    log('🛠️ ARM64 Linux 检测到预编译包可能不兼容，开始本机编译 GGML_NATIVE=OFF')
+    log(f'🛠️ Linux {normalized_machine()} 开始本机编译 GGML_NATIVE=OFF')
     with tempfile.TemporaryDirectory(prefix='sensevoice_runtime_build_') as tmpdir:
         repo = os.path.join(tmpdir, 'SenseVoice')
-        stream_cmd(['git', 'clone', '--depth', '1', '--branch', 'runtime-llamacpp-v0.1.2',
+        stream_cmd(['git', 'clone', '--depth', '1', '--branch', RUNTIME_VERSION,
                     'https://github.com/FunAudioLLM/SenseVoice.git', repo], timeout=300)
         runtime_dir = os.path.join(repo, 'runtime', 'llama.cpp')
         stream_cmd(['cmake', '-B', 'build', '-DCMAKE_BUILD_TYPE=Release', '-DGGML_NATIVE=OFF', '-DLLAMA_CURL=OFF'],
@@ -777,9 +799,9 @@ def build_runtime_from_source():
             raise RuntimeError('编译完成但未找到 llama-funasr-sensevoice')
         shutil.copy2(built, binary_path)
         os.chmod(binary_path, os.stat(binary_path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        with open(RUNTIME_MARKER, 'w', encoding='utf-8') as f:
-            f.write('runtime-llamacpp-v0.1.2 GGML_NATIVE=OFF arm64\\n')
-        log('✅ ARM 通用 runtime 编译完成')
+        with open(marker_path, 'w', encoding='utf-8') as f:
+            f.write(build_id + '\\n')
+        log(f'✅ Linux 本机编译 runtime 编译完成 ({normalized_machine()})')
 
 def latest_runtime_url(asset_name):
     try:
@@ -791,7 +813,7 @@ def latest_runtime_url(asset_name):
                 return asset.get('browser_download_url')
     except Exception as e:
         log(f"⚠️ 获取最新 release 失败，使用固定版本: {str(e).splitlines()[0]}")
-    return f'https://github.com/FunAudioLLM/SenseVoice/releases/download/runtime-llamacpp-v0.1.2/{asset_name}'
+    return f'https://github.com/FunAudioLLM/SenseVoice/releases/download/{RUNTIME_VERSION}/{asset_name}'
 
 def extract_runtime(archive_path):
     log('📦 解压 llama.cpp runtime...')
@@ -826,7 +848,7 @@ def extract_runtime(archive_path):
                     os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         log('✅ runtime 已就绪')
 
-if is_arm64_linux():
+if is_linux():
     build_runtime_from_source()
 else:
     asset = runtime_asset_name()

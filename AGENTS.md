@@ -216,14 +216,15 @@ Local GGUF concurrency behavior:
 - On netcup, recent logs before this setting showed the old single lock worked correctly: multiple tasks waited, but only one task held GGUF inference at a time. After deployment with default `1`, logs showed Task 7127 held `(1/1)` while Task 7128/7129 waited.
 - Raising this above `1` can improve throughput only if CPU and memory headroom exist. Watch `systemctl status scanner` memory and CPU before increasing further.
 
-Important ARM64 server behavior:
+Important Linux runtime behavior:
 
-- On `hd东京绕`, the official prebuilt Linux ARM64 runtime started with `--help` but crashed during inference with `code=-4` / `SIGILL`.
-- The cause was CPU instruction incompatibility on `aarch64` `Neoverse-N1`.
-- The downloader now builds runtime from source on ARM64 Linux with `GGML_NATIVE=OFF` and writes `models/sensevoice-gguf/runtime-generic-arm64.txt`.
-- If local GGUF inference fails with `code=-4`, rebuild the runtime on that server instead of redownloading the prebuilt binary.
+- On `hd东京绕`, the official prebuilt Linux ARM64 runtime started with `--help` but crashed during inference with `code=-4` / `SIGILL`; the cause was CPU instruction incompatibility on `aarch64` `Neoverse-N1`.
+- On `hd东京绕` x64/Debian 12, the official prebuilt Linux x64 runtime failed with `GLIBC_2.38 not found` because the server has glibc 2.36.
+- The downloader now builds runtime from source on Linux x64 and ARM64 with `GGML_NATIVE=OFF` and writes an architecture-specific marker such as `models/sensevoice-gguf/runtime-source-build-linux-x64.txt` or `runtime-source-build-linux-arm64.txt`.
+- Non-Linux platforms still use the matching prebuilt runtime package when available.
+- If local GGUF inference fails with `code=-4`, `SIGILL`, or `GLIBC_*. not found`, rebuild the runtime on that server instead of redownloading the prebuilt binary.
 
-Manual rebuild on ARM64 Linux:
+Manual rebuild on Linux x64 or ARM64:
 
 ```bash
 build="/tmp/opencode_sensevoice_runtime_build_$(date +%s)"
