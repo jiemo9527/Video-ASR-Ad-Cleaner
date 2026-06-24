@@ -149,6 +149,7 @@
                                 <h6 class="border-bottom pb-2 mb-3 text-muted small fw-bold">🏠 本地模型资源</h6>
                                 <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" v-model="settings.enable_local_model" id="sw_local" :disabled="!modelReady"><label class="form-check-label fw-bold" for="sw_local">启用本地模型 (Fallback)</label></div>
                                 <div v-if="!modelReady" class="text-danger small mb-2" style="font-size: 11px; margin-left: 2em;"><i class="bi bi-x-circle me-1"></i> 检测到 GGUF 本地模型资源缺失，无法启用。请先下载。</div>
+                                <div class="mb-3"><label class="form-label fw-bold small">本地模型并发数</label><div class="input-group input-group-sm"><button class="btn btn-outline-secondary" @click="settings.local_model_concurrency > 1 && settings.local_model_concurrency--"><i class="bi bi-dash"></i></button><input type="number" class="form-control text-center font-monospace" v-model="settings.local_model_concurrency" min="1" max="8"><button class="btn btn-outline-secondary" @click="settings.local_model_concurrency++"><i class="bi bi-plus"></i></button></div><div class="form-text" style="font-size: 11px">限制同时运行的 GGUF 本地推理进程数。默认 1；调高会增加 CPU 和内存压力。</div></div>
                                 <div class="mb-3"><label class="form-label fw-bold small">下载代理 (Proxy)</label><input type="text" class="form-control form-control-sm font-monospace" v-model="settings.download_proxy" placeholder="http://127.0.0.1:7890"></div>
                                 <div class="card bg-light border-0 p-3 mb-3">
                                     <div class="d-flex justify-content-between align-items-center mb-2"><span class="fw-bold small">SenseVoice GGUF / llama.cpp</span><span class="badge" :class="modelReady ? 'bg-success' : 'bg-secondary'">[[ modelReady ? '已就绪' : '未检测/缺失' ]]</span></div>
@@ -270,7 +271,7 @@ Vue.createApp({
                 api_url: '', api_key: '', api_model: '',
                 scan_path: '', rclone_remote: '', api_token: '',
                 notify_upload_success: false, notify_errors: true,
-                concurrency_detect: 2, concurrency_upload: 9, detect_retry_limit: 3,
+                concurrency_detect: 2, concurrency_upload: 9, detect_retry_limit: 3, local_model_concurrency: 1,
                 download_proxy: ''
             },
             account: { username: '', old_pass: '', new_pass: '', confirm_pass: '' },
@@ -307,7 +308,7 @@ Vue.createApp({
                 ['check_audio','check_subtitles','sanitize_metadata', 'enable_cloud_asr', 'enable_local_model', 'detailed_mode', 'asr_use_flac', 'audio_double_sample', 'notify_upload_success', 'notify_errors'].forEach(k => this.settings[k] = (d[k]===true || d[k]==='true'));
                 this.settings.tg_bot_token = d.tg_bot_token||'';
                 this.settings.tg_chat_id = d.tg_chat_id||'';
-                const numKeys = ['audio_threshold_multi', 'audio_threshold_long', 'audio_len_head', 'audio_len_mid', 'audio_len_tail', 'audio_len_tail_long', 'concurrency_detect', 'concurrency_upload', 'detect_retry_limit'];
+                const numKeys = ['audio_threshold_multi', 'audio_threshold_long', 'audio_len_head', 'audio_len_mid', 'audio_len_tail', 'audio_len_tail_long', 'concurrency_detect', 'concurrency_upload', 'detect_retry_limit', 'local_model_concurrency'];
                 numKeys.forEach(k => { if(d[k] !== undefined) this.settings[k] = d[k]; });
                 this.settings.api_url = d.api_url || '';
                 this.settings.api_key = d.api_key || '';

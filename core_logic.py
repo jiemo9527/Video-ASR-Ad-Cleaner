@@ -31,7 +31,8 @@ except ImportError:
     syslog = _SyslogFallback()
 
 # ================= ⚙️ 核心配置区域 =================
-inference_lock = threading.Lock()
+local_inference_condition = threading.Condition()
+local_inference_active = 0
 
 BASE_DIR = os.getcwd()
 MODELS_ROOT = os.path.join(BASE_DIR, "models")
@@ -518,6 +519,29 @@ class ScannerCore:
         total = max(1, retry_limit + 1, current)
         return current, total
 
+    def get_local_model_concurrency(self, config):
+        try:
+            return max(1, min(8, int(config.get('local_model_concurrency', 1))))
+        except:
+            return 1
+
+    def acquire_local_inference_slot(self, limit):
+        global local_inference_active
+        with local_inference_condition:
+            while local_inference_active >= limit:
+                if self._stopped:
+                    return 0
+                local_inference_condition.wait(timeout=1)
+            local_inference_active += 1
+            return local_inference_active
+
+    def release_local_inference_slot(self):
+        global local_inference_active
+        with local_inference_condition:
+            local_inference_active = max(0, local_inference_active - 1)
+            local_inference_condition.notify_all()
+            return local_inference_active
+
     def sanitize_metadata(self, source, meta_keywords):
         if source.lower().endswith('.rmvb'): return
         self.log("🧹 [检测] 检查元数据标签...")
@@ -768,11 +792,15 @@ class ScannerCore:
                         self.remove_audio_cache(temp_audio, temp_meta, cloud_audio)
                     raise RuntimeError(f"云端失败且策略限制本地模型 -> 请求重排队")
 
-                self.log("⏳ 等待本地模型资源锁...")
-                with inference_lock:
+                local_limit = self.get_local_model_concurrency(config)
+                self.log(f"⏳ 等待本地模型资源槽... (并发上限 {local_limit})")
+                active_slots = self.acquire_local_inference_slot(local_limit)
+                if not active_slots:
+                    return False, None
+                try:
                     if self._stopped: return False, None
 
-                    self.log("🔒 获得锁，本地 GGUF 推理中...")
+                    self.log(f"🔒 获得本地模型资源槽 ({active_slots}/{local_limit})，本地 GGUF 推理中...")
                     self.drop_caches()
 
                     try:
@@ -795,9 +823,10 @@ class ScannerCore:
                         self.log(f"❌ 本地模型崩溃: {e}")
                         self.remove_audio_cache(temp_audio, temp_meta, cloud_audio)
                         raise RuntimeError(f"本地模型失败: {e}")
-                    finally:
-                        self.drop_caches()
-                        self.log("🧹 [系统] 本地 GGUF 推理资源已释放")
+                finally:
+                    self.drop_caches()
+                    remaining_slots = self.release_local_inference_slot()
+                    self.log(f"🧹 [系统] 本地 GGUF 推理资源已释放 (运行中 {remaining_slots}/{local_limit})")
 
             self.remove_audio_cache(temp_audio, temp_meta, cloud_audio)
             if checkpoint_cb: checkpoint_cb(task['name'])

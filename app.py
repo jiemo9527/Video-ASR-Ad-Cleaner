@@ -150,7 +150,8 @@ def get_final_config(overrides_json=None):
         "api_model": "FunAudioLLM/SenseVoiceSmall",
         "scan_path": "/root/downloads", "rclone_remote": "s25", "api_token": "8pUoqOTHhEAhRnacl3c19",
         "notify_upload_success": False, "notify_errors": True,
-        "concurrency_detect": 2, "concurrency_upload": 9, "detect_retry_limit": 3, "download_proxy": ""
+        "concurrency_detect": 2, "concurrency_upload": 9, "detect_retry_limit": 3,
+        "local_model_concurrency": 1, "download_proxy": ""
     }
     db_configs = {c.key: c.value for c in Config.query.all()}
     for k, v in db_configs.items():
@@ -158,7 +159,8 @@ def get_final_config(overrides_json=None):
                  "notify_upload_success", "notify_errors"]:
             final_conf[k] = (str(v).lower() == 'true')
         elif k in ["audio_threshold_multi", "audio_threshold_long", "audio_len_head", "audio_len_mid", "audio_len_tail",
-                   "audio_len_tail_long", "concurrency_detect", "concurrency_upload", "detect_retry_limit"]:
+                   "audio_len_tail_long", "concurrency_detect", "concurrency_upload", "detect_retry_limit",
+                   "local_model_concurrency"]:
             try:
                 final_conf[k] = int(v)
             except:
@@ -776,7 +778,7 @@ def build_runtime_from_source():
         shutil.copy2(built, binary_path)
         os.chmod(binary_path, os.stat(binary_path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         with open(RUNTIME_MARKER, 'w', encoding='utf-8') as f:
-            f.write('runtime-llamacpp-v0.1.2 GGML_NATIVE=OFF arm64\n')
+            f.write('runtime-llamacpp-v0.1.2 GGML_NATIVE=OFF arm64\\n')
         log('✅ ARM 通用 runtime 编译完成')
 
 def latest_runtime_url(asset_name):
