@@ -145,6 +145,7 @@ def get_final_config(overrides_json=None):
         "tg_bot_token": "", "tg_chat_id": "",
         "audio_threshold_multi": 600, "audio_threshold_long": 3600,
         "audio_len_head": 240, "audio_len_mid": 240, "audio_len_tail": 300, "audio_len_tail_long": 600,
+        "audio_segment_len": 360, "audio_max_segments": 8,
         "api_url": "https://api.siliconflow.cn/v1/audio/transcriptions",
         "api_key": "", "cloud_asr_api_keys": "",
         "api_model": "FunAudioLLM/SenseVoiceSmall", "cloud_asr_max_duration": 60, "cloud_asr_concurrency": 3,
@@ -159,7 +160,7 @@ def get_final_config(overrides_json=None):
                  "notify_upload_success", "notify_errors"]:
             final_conf[k] = (str(v).lower() == 'true')
         elif k in ["audio_threshold_multi", "audio_threshold_long", "audio_len_head", "audio_len_mid", "audio_len_tail",
-                   "audio_len_tail_long", "cloud_asr_max_duration", "cloud_asr_concurrency", "concurrency_detect", "concurrency_upload", "detect_retry_limit",
+                   "audio_len_tail_long", "audio_segment_len", "audio_max_segments", "cloud_asr_max_duration", "cloud_asr_concurrency", "concurrency_detect", "concurrency_upload", "detect_retry_limit",
                    "local_model_concurrency"]:
             try:
                 final_conf[k] = int(v)
@@ -1129,7 +1130,7 @@ def double_sample_task(tid):
         remove_keys=['_passed', '_passed_file']
     )
     t.status = 'pending'
-    t.log += "\n=== 单任务双倍抽样 ===\n"
+    t.log += "\n=== 单任务动态抽样 ===\n"
     t.finished_at = None
     t.retry_count = 0
     db.session.commit()

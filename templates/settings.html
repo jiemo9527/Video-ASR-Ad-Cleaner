@@ -106,24 +106,14 @@
                         <div v-show="settingTab === 'audio'" class="animate-fade">
                             <div class="form-check form-switch mb-4 p-3 bg-light rounded border">
                                 <input class="form-check-input" type="checkbox" v-model="settings.audio_double_sample" id="sw_audio_double">
-                                <label class="form-check-label fw-bold" for="sw_audio_double">双倍抽样</label>
-                                <div class="small text-muted mt-1" style="font-size: 11px">开启后音频检测按全片均匀抽取 6 段；短到单段可覆盖的视频仍只识别一段，避免重复上传。</div>
+                                <label class="form-check-label fw-bold" for="sw_audio_double">动态抽样</label>
+                                <div class="small text-muted mt-1" style="font-size: 11px">开启后按片段长度动态规划抽样：短视频全片扫描，中长视频优先片头/片尾并均匀补充抽样段。</div>
                             </div>
-                            <div class="mb-4">
-                                <label class="form-label fw-bold small text-muted">触发阈值设置</label>
-                                <div class="row g-2">
-                                    <div class="col-12"><div class="input-group input-group-sm"><span class="input-group-text bg-white" style="width: 100px">多段检测</span><input type="number" class="form-control" v-model="settings.audio_threshold_multi"><span class="input-group-text">秒</span></div></div>
-                                    <div class="col-12"><div class="input-group input-group-sm"><span class="input-group-text bg-white" style="width: 100px">超长定义</span><input type="number" class="form-control" v-model="settings.audio_threshold_long"><span class="input-group-text">秒</span></div></div>
-                                </div>
-                            </div>
-                            <hr class="text-muted opacity-25">
                             <div class="mb-3">
-                                <label class="form-label fw-bold small text-muted">采样长度控制</label>
+                                <label class="form-label fw-bold small text-muted">采样控制</label>
                                 <div class="row g-2">
-                                    <div class="col-6"><label class="small text-muted mb-1">片头长度</label><input type="number" class="form-control form-control-sm" v-model="settings.audio_len_head"></div>
-                                    <div class="col-6"><label class="small text-muted mb-1">中间长度</label><input type="number" class="form-control form-control-sm" v-model="settings.audio_len_mid"></div>
-                                    <div class="col-6"><label class="small text-muted mb-1">标准片尾</label><input type="number" class="form-control form-control-sm" v-model="settings.audio_len_tail"></div>
-                                    <div class="col-6"><label class="small text-muted mb-1">超长片尾</label><input type="number" class="form-control form-control-sm" v-model="settings.audio_len_tail_long"></div>
+                                    <div class="col-12"><div class="input-group input-group-sm"><span class="input-group-text bg-white" style="width: 110px">片段长度</span><input type="number" class="form-control" v-model="settings.audio_segment_len" min="1"><span class="input-group-text">秒</span></div><div class="form-text" style="font-size: 11px">默认 360。未开启动态抽样时用于片尾/中间/片头；开启后用于计算每个抽样段长度。</div></div>
+                                    <div class="col-12"><div class="input-group input-group-sm"><span class="input-group-text bg-white" style="width: 110px">最大抽样段数</span><input type="number" class="form-control" v-model="settings.audio_max_segments" min="1" max="24"><span class="input-group-text">段</span></div><div class="form-text" style="font-size: 11px">默认 8。动态抽样会按视频时长自动减少或增加抽样段数，但不会超过该值。</div></div>
                                 </div>
                             </div>
                         </div>
@@ -138,7 +128,7 @@
                                 </div>
                                 <div class="mb-3"><label class="form-label fw-bold small">API Endpoint (URL)</label><input type="text" class="form-control form-control-sm font-monospace" v-model="settings.api_url"></div>
                                 <div class="mb-3"><label class="form-label fw-bold small">Model Name</label><input type="text" class="form-control form-control-sm" v-model="settings.api_model"></div>
-                                <div class="mb-3"><label class="form-label fw-bold small">云端分块时长</label><div class="input-group input-group-sm"><input type="number" class="form-control" v-model="settings.cloud_asr_max_duration" min="0"><span class="input-group-text">秒</span></div><div class="form-text" style="font-size: 11px">默认 60。超过该长度的抽样音频会拆成多段逐个上传云端，避免长音频 500。设为 0 可禁用分块。</div></div>
+                                <div class="mb-3"><label class="form-label fw-bold small">云端切块时长</label><div class="input-group input-group-sm"><input type="number" class="form-control" v-model="settings.cloud_asr_max_duration" min="0"><span class="input-group-text">秒</span></div><div class="form-text" style="font-size: 11px">默认 60。超过该长度的抽样音频会拆成多块逐个上传云端，避免长音频 500。设为 0 可禁用切块。</div></div>
                                 <div class="mb-3"><label class="form-label fw-bold small">云端模型并发数</label><div class="input-group input-group-sm"><button class="btn btn-outline-secondary" @click="settings.cloud_asr_concurrency > 1 && settings.cloud_asr_concurrency--"><i class="bi bi-dash"></i></button><input type="number" class="form-control text-center font-monospace" v-model="settings.cloud_asr_concurrency" min="1" max="16"><button class="btn btn-outline-secondary" @click="settings.cloud_asr_concurrency++"><i class="bi bi-plus"></i></button></div><div class="form-text" style="font-size: 11px">限制同时运行的云端 ASR 请求数，默认 3。单个 API Key 并发上限固定为 2。</div></div>
                                 <div class="mb-3"><label class="form-label fw-bold small">API Keys</label><div class="d-flex flex-column gap-2"><div class="input-group input-group-sm" v-for="(key, idx) in apiKeyRows" :key="idx"><span class="input-group-text">Key [[ idx + 1 ]]</span><input type="password" class="form-control font-monospace" v-model="apiKeyRows[idx]" autocomplete="off"><button class="btn btn-outline-danger" type="button" @click="removeApiKeyRow(idx)" :disabled="apiKeyRows.length <= 1"><i class="bi bi-trash"></i></button></div></div><button class="btn btn-outline-primary btn-sm mt-2" type="button" @click="addApiKeyRow"><i class="bi bi-plus-lg me-1"></i>新增 API Key</button><div class="form-text" style="font-size: 11px">每行一个 Key。请求会在 Key 池中轮询，单 Key 最多同时 2 个云端请求。</div></div>
                                 <div class="form-check form-switch mb-3 p-3 bg-light rounded border">
@@ -268,8 +258,7 @@ Vue.createApp({
                 check_audio: true, check_subtitles: true, sanitize_metadata: true, enable_cloud_asr: true,
                 enable_local_model: false, detailed_mode: false, asr_use_flac: false, audio_double_sample: false,
                 tg_bot_token: '', tg_chat_id: '',
-                audio_threshold_multi: 600, audio_threshold_long: 3600,
-                audio_len_head: 240, audio_len_mid: 240, audio_len_tail: 300, audio_len_tail_long: 600,
+                audio_segment_len: 360, audio_max_segments: 8,
                 cloud_asr_max_duration: 60, cloud_asr_concurrency: 3,
                 api_url: '', api_key: '', cloud_asr_api_keys: '', api_model: '',
                 scan_path: '', rclone_remote: '', api_token: '',
@@ -311,7 +300,7 @@ Vue.createApp({
                 ['check_audio','check_subtitles','sanitize_metadata', 'enable_cloud_asr', 'enable_local_model', 'detailed_mode', 'asr_use_flac', 'audio_double_sample', 'notify_upload_success', 'notify_errors'].forEach(k => this.settings[k] = (d[k]===true || d[k]==='true'));
                 this.settings.tg_bot_token = d.tg_bot_token||'';
                 this.settings.tg_chat_id = d.tg_chat_id||'';
-                const numKeys = ['audio_threshold_multi', 'audio_threshold_long', 'audio_len_head', 'audio_len_mid', 'audio_len_tail', 'audio_len_tail_long', 'cloud_asr_max_duration', 'cloud_asr_concurrency', 'concurrency_detect', 'concurrency_upload', 'detect_retry_limit', 'local_model_concurrency'];
+                const numKeys = ['audio_segment_len', 'audio_max_segments', 'cloud_asr_max_duration', 'cloud_asr_concurrency', 'concurrency_detect', 'concurrency_upload', 'detect_retry_limit', 'local_model_concurrency'];
                 numKeys.forEach(k => { if(d[k] !== undefined) this.settings[k] = d[k]; });
                 this.settings.api_url = d.api_url || '';
                 this.settings.api_key = d.api_key || '';

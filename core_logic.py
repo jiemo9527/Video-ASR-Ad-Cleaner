@@ -6,6 +6,7 @@ import signal
 import json
 import shutil
 import gc
+import math
 import re
 import threading
 import ctypes  # 🔥 [关键修改1] 必须引入这个库才能操作底层内存
@@ -510,6 +511,8 @@ class ScannerCore:
         elif '抽样' in label:
             m = re.search(r'(\d+)', label)
             safe_segment = f"{prefix}_sample" if prefix else (f"sample_{m.group(1)}" if m else None)
+        elif '全片' in label:
+            safe_segment = f"{prefix}_full" if prefix else 'full'
         else:
             safe_segment = None
         safe_segment = safe_segment or re.sub(r'[^a-zA-Z0-9_-]+', '_', label).strip('_')
@@ -607,6 +610,80 @@ class ScannerCore:
             retry_limit = 3
         total = max(1, retry_limit + 1, current)
         return current, total
+
+    def get_audio_segment_len(self, config):
+        try:
+            fallback = int(float(config.get('audio_len_mid', 360)))
+        except:
+            fallback = 360
+        try:
+            return max(1, int(float(config.get('audio_segment_len', fallback))))
+        except:
+            return max(1, fallback)
+
+    def get_audio_max_segments(self, config):
+        try:
+            return max(1, min(24, int(float(config.get('audio_max_segments', 8)))))
+        except:
+            return 8
+
+    def build_audio_scan_tasks(self, duration, config):
+        segment_len = self.get_audio_segment_len(config)
+        max_segments = self.get_audio_max_segments(config)
+        try:
+            duration = max(0.0, float(duration or 0))
+        except:
+            duration = 0.0
+
+        if duration <= 0:
+            return [{"start": 0, "duration": segment_len, "name": "片尾"}]
+
+        sample_len = min(float(segment_len), duration)
+        dynamic_sample = config.get('audio_double_sample') is True or str(config.get('audio_double_sample')).lower() == 'true'
+        if not dynamic_sample:
+            tasks = [{"start": max(0.0, duration - sample_len), "duration": sample_len, "name": "片尾"}]
+            if duration > segment_len * 3:
+                tasks.append({"start": max(0.0, (duration / 2) - (sample_len / 2)), "duration": sample_len, "name": "中间"})
+                tasks.append({"start": 0, "duration": sample_len, "name": "片头"})
+            return tasks
+
+        if duration <= segment_len * 3:
+            return [{"start": 0, "duration": duration, "name": "01全片"}]
+
+        duration_ratio = duration / float(segment_len)
+        if duration_ratio <= 4:
+            sample_count = 4
+        elif duration_ratio <= 5:
+            sample_count = 5
+        elif duration_ratio <= 7:
+            sample_count = 6
+        else:
+            sample_count = max(7, math.ceil(duration_ratio * 0.8))
+        sample_count = max(1, min(max_segments, sample_count))
+
+        max_start = max(0.0, duration - sample_len)
+        if sample_count == 1:
+            sample_points = [(0, 0.0)]
+        else:
+            sample_points = [
+                (idx, (max_start * idx) / (sample_count - 1))
+                for idx in range(sample_count)
+            ]
+        ordered_points = [sample_points[0]]
+        if len(sample_points) > 1:
+            ordered_points.append(sample_points[-1])
+            ordered_points.extend(sample_points[1:-1])
+
+        tasks = []
+        for order_idx, (_, start) in enumerate(ordered_points, 1):
+            if order_idx == 1:
+                name = "01片头"
+            elif order_idx == 2:
+                name = "02片尾"
+            else:
+                name = f"{order_idx:02d}抽样"
+            tasks.append({"start": start, "duration": sample_len, "name": name})
+        return tasks
 
     def get_local_model_concurrency(self, config):
         try:
@@ -730,42 +807,21 @@ class ScannerCore:
 
     def scan_audio_cloud_fallback_local(self, file_path, duration, task_id, audio_map, audio_keywords, enable_local,
                                         config, passed_segments=None, checkpoint_cb=None):
-        tasks = []
-        TH_MULTI = config.get('audio_threshold_multi', 600)
-        TH_LONG = config.get('audio_threshold_long', 3600)
-        LEN_HEAD = config.get('audio_len_head', 240);
-        LEN_MID = config.get('audio_len_mid', 240)
-        LEN_TAIL = config.get('audio_len_tail', 300);
-        LEN_TAIL_LONG = config.get('audio_len_tail_long', 600)
+        tasks = self.build_audio_scan_tasks(duration, config)
+        segment_len = self.get_audio_segment_len(config)
+        max_segments = self.get_audio_max_segments(config)
         try:
             CLOUD_MAX_DURATION = max(0, int(config.get('cloud_asr_max_duration', 60)))
         except:
             CLOUD_MAX_DURATION = 60
 
-        if config.get('audio_double_sample') and duration > max(1, LEN_MID):
-            sample_count = 6
-            sample_len = max(1, LEN_MID)
-            max_start = max(0, duration - sample_len)
-            sample_points = [
-                (idx, (max_start * idx) / (sample_count - 1) if sample_count > 1 else max_start)
-                for idx in range(sample_count)
-            ]
-            ordered_points = [sample_points[0], sample_points[-1]] + sample_points[1:-1]
-            for order_idx, (_, start) in enumerate(ordered_points, 1):
-                if order_idx == 1:
-                    name = "01片头"
-                elif order_idx == 2:
-                    name = "02片尾"
-                else:
-                    name = f"{order_idx:02d}抽样"
-                tasks.append({"start": start, "duration": sample_len, "name": name})
-            self.log(f"🎚️ 双倍抽样开启: {sample_count}段 x {sample_len}s，顺序 01片头 -> 02片尾 -> 03-06抽样")
-        else:
-            tail_dur = LEN_TAIL_LONG if duration >= TH_LONG else LEN_TAIL
-            tasks.append({"start": max(0, duration - tail_dur), "duration": tail_dur, "name": "片尾"})
-            if duration > TH_MULTI:
-                tasks.append({"start": max(0, (duration / 2) - (LEN_MID / 2)), "duration": LEN_MID, "name": "中间"})
-                tasks.append({"start": 0, "duration": LEN_HEAD, "name": "片头"})
+        dynamic_sample = config.get('audio_double_sample') is True or str(config.get('audio_double_sample')).lower() == 'true'
+        if dynamic_sample:
+            names = " -> ".join(task['name'] for task in tasks)
+            if len(tasks) == 1 and '全片' in tasks[0]['name']:
+                self.log(f"🎚️ 动态抽样开启: 全片 {tasks[0]['duration']:.0f}s，片段长度 {segment_len}s")
+            else:
+                self.log(f"🎚️ 动态抽样开启: {len(tasks)}段 x {segment_len}s，最大{max_segments}段，顺序 {names}")
 
         audio_progress_base = 50
         audio_progress_span = 45
@@ -882,7 +938,7 @@ class ScannerCore:
                             chunks.append((chunk_start, chunk_duration))
                             chunk_start += chunk_step
 
-                        self.log(f"☁️ 云端分块识别: {actual_audio_duration:.1f}s -> {len(chunks)}段，每段≤{CLOUD_MAX_DURATION}s，重叠{chunk_overlap:.0f}s")
+                        self.log(f"☁️ 云端切块识别: {actual_audio_duration:.1f}s -> {len(chunks)}块，每块≤{CLOUD_MAX_DURATION}s，重叠{chunk_overlap:.0f}s")
                         cloud_success = True
                         chunk_statuses = []
                         chunk_base, _ = os.path.splitext(temp_audio)
@@ -893,13 +949,13 @@ class ScannerCore:
                             self.remove_audio_cache(chunk_audio, chunk_flac)
                             if not self.extract_cloud_audio_chunk(temp_audio, chunk_start, chunk_duration, chunk_audio):
                                 chunk_statuses.append(f"{chunk_idx}/{len(chunks)}提取失败")
-                                self.log(f"⚠️ 云端分块失败: {' '.join(chunk_statuses)}")
-                                raise RuntimeError(f"云端分块音频提取失败: {chunk_idx}/{len(chunks)}")
+                                self.log(f"⚠️ 云端切块失败: {' '.join(chunk_statuses)}")
+                                raise RuntimeError(f"云端切块音频提取失败: {chunk_idx}/{len(chunks)}")
                             resp = submit_cloud_audio(chunk_audio, f"{chunk_idx}/{len(chunks)}", log_request=False)
                             if resp.status_code != 200:
                                 c, m = self.get_retry_attempt_label(config)
                                 chunk_statuses.append(f"{chunk_idx}/{len(chunks)}×{resp.status_code}")
-                                self.log(f"⚠️ 云端分块失败 (第{c}/{m}次): {' '.join(chunk_statuses)}")
+                                self.log(f"⚠️ 云端切块失败 (第{c}/{m}次): {' '.join(chunk_statuses)}")
                                 cloud_success = False
                                 break
 
@@ -908,8 +964,8 @@ class ScannerCore:
                             if hit:
                                 hit_text = text or '<空>'
                                 chunk_statuses.append(f"{chunk_idx}/{len(chunks)} 命中 {hit_text}")
-                                self.log(f"☁️ 云端分块命中: {' '.join(chunk_statuses)}")
-                                self.log(f"☁️ [违规] 分块 {chunk_idx}/{len(chunks)} 内容: {text}")
+                                self.log(f"☁️ 云端切块命中: {' '.join(chunk_statuses)}")
+                                self.log(f"☁️ [违规] 块 {chunk_idx}/{len(chunks)} 内容: {text}")
                                 self.remove_audio_cache(temp_audio, temp_meta, cloud_audio, *cloud_artifacts)
                                 return True, reason
                             if config.get('detailed_mode'):
@@ -918,7 +974,7 @@ class ScannerCore:
                             else:
                                 chunk_statuses.append(f"{chunk_idx}/{len(chunks)}✓")
                         if cloud_success:
-                            self.log(f"✅ 云端分块识别通过: {' '.join(chunk_statuses)}")
+                            self.log(f"✅ 云端切块识别通过: {' '.join(chunk_statuses)}")
                     else:
                         resp = submit_cloud_audio(temp_audio)
                         if resp.status_code == 200:
