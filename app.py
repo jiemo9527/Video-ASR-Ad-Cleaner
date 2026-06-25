@@ -42,7 +42,7 @@ app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///tasks.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
 
-APP_VERSION = os.environ.get('APP_VERSION', 'v2026.05.18')
+APP_VERSION = os.environ.get('APP_VERSION', 'v20260625')
 
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
@@ -185,6 +185,22 @@ def get_final_config(overrides_json=None):
         except:
             pass
     return final_conf
+
+
+def normalize_cloud_api_key_config(data):
+    if 'cloud_asr_api_keys' not in data and 'api_key' not in data:
+        return data
+    raw_keys = str(data.get('cloud_asr_api_keys') or data.get('api_key') or '')
+    keys = []
+    seen = set()
+    for key in raw_keys.splitlines():
+        key = key.strip()
+        if key and key not in seen:
+            keys.append(key)
+            seen.add(key)
+    data['cloud_asr_api_keys'] = "\n".join(keys)
+    data['api_key'] = keys[0] if keys else ""
+    return data
 
 
 def get_task_overrides(task):
@@ -1211,17 +1227,7 @@ def cancel(tid):
 def settings():
     if request.method == 'POST':
         data = dict(request.json or {})
-        if 'cloud_asr_api_keys' in data or 'api_key' in data:
-            raw_keys = str(data.get('cloud_asr_api_keys') or data.get('api_key') or '')
-            keys = []
-            seen = set()
-            for key in raw_keys.splitlines():
-                key = key.strip()
-                if key and key not in seen:
-                    keys.append(key)
-                    seen.add(key)
-            data['cloud_asr_api_keys'] = "\n".join(keys)
-            data['api_key'] = keys[0] if keys else ""
+        normalize_cloud_api_key_config(data)
         for k, v in data.items():
             if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample",
                      "notify_upload_success", "notify_errors"]:
@@ -1277,6 +1283,8 @@ def restore_settings_backup():
 
     if not isinstance(configs, dict):
         return jsonify({'code': 400, 'msg': '配置备份格式无效'}), 400
+
+    configs = normalize_cloud_api_key_config(dict(configs))
 
     for k, v in configs.items():
         key = str(k).strip()

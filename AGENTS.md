@@ -415,10 +415,10 @@ systemctl status scanner --no-pager -l | sed -n '1,10p'
 
 ## Versioning
 
-Version naming currently uses dates:
+Version naming currently uses compact dates:
 
 ```text
-vYYYY.MM.DD
+vYYYYMMDD
 ```
 
 Update `APP_VERSION` in `app.py` when the user asks to bump the visible web version.
