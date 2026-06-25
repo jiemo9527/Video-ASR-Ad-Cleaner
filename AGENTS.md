@@ -76,6 +76,9 @@ Common settings:
 - `audio_threshold_long`: long-video threshold for using longer tail sample.
 - `audio_len_head`, `audio_len_mid`, `audio_len_tail`, `audio_len_tail_long`: ASR segment lengths.
 - `api_url`, `api_key`, `api_model`: cloud ASR config.
+- `cloud_asr_api_keys`: newline-separated cloud ASR API key pool. The settings page edits it as one key per row and keeps `api_key` as the first key for compatibility.
+- `cloud_asr_concurrency`: maximum simultaneous cloud ASR requests in the current Flask process. Default is `3`.
+- `cloud_asr_max_duration`: maximum chunk duration to send to cloud ASR. Default is `60`; longer ASR samples are split into multiple cloud uploads. Set to `0` to disable cloud chunking.
 - `scan_path`, `rclone_remote`: local download root and default remote.
 
 Sensitive values include `api_key`, `tg_bot_token`, `tg_chat_id`, and `api_token`. Do not print or commit real secrets.
@@ -143,9 +146,8 @@ Implemented in `ScannerCore.scan_audio_cloud_fallback_local()`.
 
 Segment order:
 
-1. Tail.
-2. Middle, if duration exceeds `audio_threshold_multi`.
-3. Head, if duration exceeds `audio_threshold_multi`.
+- Double-sample mode scans 6 evenly spaced samples in this order: `01片头`, `02片尾`, then `03抽样` through `06抽样`.
+- Non-double mode scans tail, then middle and head if duration exceeds `audio_threshold_multi`.
 
 Cloud timeout policy:
 
@@ -161,6 +163,9 @@ The log includes the timeout value:
 
 Cloud failure policy:
 
+- Cloud ASR requests are gated by a process-local limiter. `cloud_asr_concurrency` defaults to `3`; each API key is hard-limited to `2` simultaneous requests. Requests choose keys from `cloud_asr_api_keys` round-robin, falling back to legacy `api_key` when the key pool is empty.
+- Recent SiliconFlow behavior on netcup: real speech FLAC segments up to `60s` returned `200`, while `61s+` returned empty-body `500`; synthetic short silent/tone tests still returned `200`.
+- `cloud_asr_max_duration` defaults to `60`. Longer ASR samples are split into overlapping cloud requests of at most this duration; the current overlap is `2s`, implemented by moving the next chunk start earlier, not by exceeding the max chunk duration. The sample passes cloud detection only after every chunk succeeds and no chunk hits an audio keyword.
 - `detect_retry_limit` is the number of automatic retries after the first attempt, not total attempts. For example, `detect_retry_limit = 1` means two total attempts and logs should show `第1/2次` then `第2/2次`.
 - For retry attempts before the retry limit, local model fallback is forced off.
 - After cloud retries are exhausted, local fallback follows the user's `enable_local_model` setting.

@@ -2,8 +2,4 @@ flask
 flask-sqlalchemy
 flask-login
 requests
-funasr
-modelscope
-torch
-thefuzz
-pypinyin
+SQLAlchemy

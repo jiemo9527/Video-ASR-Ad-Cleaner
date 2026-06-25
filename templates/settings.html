@@ -137,8 +137,10 @@
                                     <div class="small text-muted mt-1" style="font-size: 11px">关闭后不请求云端 ASR，音频检测直接使用本地 GGUF 模型；请同时启用本地模型。</div>
                                 </div>
                                 <div class="mb-3"><label class="form-label fw-bold small">API Endpoint (URL)</label><input type="text" class="form-control form-control-sm font-monospace" v-model="settings.api_url"></div>
-                                <div class="mb-3"><label class="form-label fw-bold small">API Key</label><div class="input-group input-group-sm"><input type="password" class="form-control font-monospace" v-model="settings.api_key" id="apiKeyInput"><button class="btn btn-outline-secondary" type="button" onclick="const i=document.getElementById('apiKeyInput');i.type=i.type==='password'?'text':'password'"><i class="bi bi-eye"></i></button></div></div>
                                 <div class="mb-3"><label class="form-label fw-bold small">Model Name</label><input type="text" class="form-control form-control-sm" v-model="settings.api_model"></div>
+                                <div class="mb-3"><label class="form-label fw-bold small">云端分块时长</label><div class="input-group input-group-sm"><input type="number" class="form-control" v-model="settings.cloud_asr_max_duration" min="0"><span class="input-group-text">秒</span></div><div class="form-text" style="font-size: 11px">默认 60。超过该长度的抽样音频会拆成多段逐个上传云端，避免长音频 500。设为 0 可禁用分块。</div></div>
+                                <div class="mb-3"><label class="form-label fw-bold small">云端模型并发数</label><div class="input-group input-group-sm"><button class="btn btn-outline-secondary" @click="settings.cloud_asr_concurrency > 1 && settings.cloud_asr_concurrency--"><i class="bi bi-dash"></i></button><input type="number" class="form-control text-center font-monospace" v-model="settings.cloud_asr_concurrency" min="1" max="16"><button class="btn btn-outline-secondary" @click="settings.cloud_asr_concurrency++"><i class="bi bi-plus"></i></button></div><div class="form-text" style="font-size: 11px">限制同时运行的云端 ASR 请求数，默认 3。单个 API Key 并发上限固定为 2。</div></div>
+                                <div class="mb-3"><label class="form-label fw-bold small">API Keys</label><div class="d-flex flex-column gap-2"><div class="input-group input-group-sm" v-for="(key, idx) in apiKeyRows" :key="idx"><span class="input-group-text">Key [[ idx + 1 ]]</span><input type="password" class="form-control font-monospace" v-model="apiKeyRows[idx]" autocomplete="off"><button class="btn btn-outline-danger" type="button" @click="removeApiKeyRow(idx)" :disabled="apiKeyRows.length <= 1"><i class="bi bi-trash"></i></button></div></div><button class="btn btn-outline-primary btn-sm mt-2" type="button" @click="addApiKeyRow"><i class="bi bi-plus-lg me-1"></i>新增 API Key</button><div class="form-text" style="font-size: 11px">每行一个 Key。请求会在 Key 池中轮询，单 Key 最多同时 2 个云端请求。</div></div>
                                 <div class="form-check form-switch mb-3 p-3 bg-light rounded border">
                                     <input class="form-check-input" type="checkbox" v-model="settings.asr_use_flac" id="sw_asr_flac">
                                     <label class="form-check-label fw-bold" for="sw_asr_flac">ASR 上传使用 FLAC 无损压缩</label>
@@ -171,9 +173,9 @@
                         <div v-show="settingTab === 'queue'" class="animate-fade">
                             <div class="alert alert-warning border-0 py-2 small mb-4"><i class="bi bi-exclamation-triangle-fill me-1"></i> <strong>注意：</strong> 修改并发数需要重启服务才能生效。</div>
                             <div class="row g-3">
-                                <div class="col-12"><label class="form-label fw-bold small">🕵️ 检测并发数</label><div class="input-group input-group-sm"><button class="btn btn-outline-secondary" @click="settings.concurrency_detect > 1 && settings.concurrency_detect--"><i class="bi bi-dash"></i></button><input type="number" class="form-control text-center font-monospace" v-model="settings.concurrency_detect" min="1" max="10"><button class="btn btn-outline-secondary" @click="settings.concurrency_detect++"><i class="bi bi-plus"></i></button></div></div>
+                                <div class="col-12"><label class="form-label fw-bold small">🕵️ 视频检测并发数</label><div class="input-group input-group-sm"><button class="btn btn-outline-secondary" @click="settings.concurrency_detect > 1 && settings.concurrency_detect--"><i class="bi bi-dash"></i></button><input type="number" class="form-control text-center font-monospace" v-model="settings.concurrency_detect" min="1" max="10"><button class="btn btn-outline-secondary" @click="settings.concurrency_detect++"><i class="bi bi-plus"></i></button></div></div>
                                 <div class="col-12"><label class="form-label fw-bold small">☁️ 上传并发数</label><div class="input-group input-group-sm"><button class="btn btn-outline-secondary" @click="settings.concurrency_upload > 1 && settings.concurrency_upload--"><i class="bi bi-dash"></i></button><input type="number" class="form-control text-center font-monospace" v-model="settings.concurrency_upload" min="1" max="20"><button class="btn btn-outline-secondary" @click="settings.concurrency_upload++"><i class="bi bi-plus"></i></button></div></div>
-                                <div class="col-12"><label class="form-label fw-bold small">🔁 检测失败自动重试次数</label><div class="input-group input-group-sm"><button class="btn btn-outline-secondary" @click="settings.detect_retry_limit > 0 && settings.detect_retry_limit--"><i class="bi bi-dash"></i></button><input type="number" class="form-control text-center font-monospace" v-model="settings.detect_retry_limit" min="0" max="10"><button class="btn btn-outline-secondary" @click="settings.detect_retry_limit++"><i class="bi bi-plus"></i></button></div><div class="form-text" style="font-size: 11px">默认 3 次。云端异常、提取异常等检测失败会按此次数重新排队。</div></div>
+                                <div class="col-12"><label class="form-label fw-bold small">🔁 视频检测异常重试次数</label><div class="input-group input-group-sm"><button class="btn btn-outline-secondary" @click="settings.detect_retry_limit > 0 && settings.detect_retry_limit--"><i class="bi bi-dash"></i></button><input type="number" class="form-control text-center font-monospace" v-model="settings.detect_retry_limit" min="0" max="10"><button class="btn btn-outline-secondary" @click="settings.detect_retry_limit++"><i class="bi bi-plus"></i></button></div><div class="form-text" style="font-size: 11px">默认 3 次。云端识别、音频提取、媒体处理等检测异常时，会按此次数自动重新排队。</div></div>
                             </div>
                             <hr class="my-4 text-muted opacity-25">
                             <div class="d-grid"><button class="btn btn-danger py-2 shadow-sm rounded-3" @click="saveAndRestart"><i class="bi bi-bootstrap-reboot me-2"></i>保存并重启服务</button></div>
@@ -268,14 +270,15 @@ Vue.createApp({
                 tg_bot_token: '', tg_chat_id: '',
                 audio_threshold_multi: 600, audio_threshold_long: 3600,
                 audio_len_head: 240, audio_len_mid: 240, audio_len_tail: 300, audio_len_tail_long: 600,
-                api_url: '', api_key: '', api_model: '',
+                cloud_asr_max_duration: 60, cloud_asr_concurrency: 3,
+                api_url: '', api_key: '', cloud_asr_api_keys: '', api_model: '',
                 scan_path: '', rclone_remote: '', api_token: '',
                 notify_upload_success: false, notify_errors: true,
                 concurrency_detect: 2, concurrency_upload: 9, detect_retry_limit: 3, local_model_concurrency: 1,
                 download_proxy: ''
             },
             account: { username: '', old_pass: '', new_pass: '', confirm_pass: '' },
-            keywords: [], tab: 'audio', newKw: '', saving: false,
+            apiKeyRows: [''], keywords: [], tab: 'audio', newKw: '', saving: false,
             toastMsg: '', toastClass: 'bg-primary', toastIcon: 'bi-info-circle',
             confirmMsg: '', confirmCallback: null,
             downloadLogs: '等待启动...', downloading: false, timer: null, modelReady: false
@@ -308,10 +311,15 @@ Vue.createApp({
                 ['check_audio','check_subtitles','sanitize_metadata', 'enable_cloud_asr', 'enable_local_model', 'detailed_mode', 'asr_use_flac', 'audio_double_sample', 'notify_upload_success', 'notify_errors'].forEach(k => this.settings[k] = (d[k]===true || d[k]==='true'));
                 this.settings.tg_bot_token = d.tg_bot_token||'';
                 this.settings.tg_chat_id = d.tg_chat_id||'';
-                const numKeys = ['audio_threshold_multi', 'audio_threshold_long', 'audio_len_head', 'audio_len_mid', 'audio_len_tail', 'audio_len_tail_long', 'concurrency_detect', 'concurrency_upload', 'detect_retry_limit', 'local_model_concurrency'];
+                const numKeys = ['audio_threshold_multi', 'audio_threshold_long', 'audio_len_head', 'audio_len_mid', 'audio_len_tail', 'audio_len_tail_long', 'cloud_asr_max_duration', 'cloud_asr_concurrency', 'concurrency_detect', 'concurrency_upload', 'detect_retry_limit', 'local_model_concurrency'];
                 numKeys.forEach(k => { if(d[k] !== undefined) this.settings[k] = d[k]; });
                 this.settings.api_url = d.api_url || '';
                 this.settings.api_key = d.api_key || '';
+                this.settings.cloud_asr_api_keys = d.cloud_asr_api_keys || '';
+                const keyText = this.settings.cloud_asr_api_keys || this.settings.api_key || '';
+                const keys = keyText.split(/\r?\n/).map(k => k.trim()).filter(Boolean);
+                this.apiKeyRows = keys.length ? keys : [''];
+                this.normalizeApiKeyRows(false);
                 this.settings.api_model = d.api_model || '';
                 this.settings.scan_path = d.scan_path || '/root/downloads';
                 this.settings.rclone_remote = d.rclone_remote || 's25';
@@ -322,15 +330,39 @@ Vue.createApp({
                 if(d.username) this.account.username = d.username;
             })
         },
+        addApiKeyRow(){ this.apiKeyRows.push(''); },
+        removeApiKeyRow(idx){ this.apiKeyRows.splice(idx, 1); if(this.apiKeyRows.length === 0) this.apiKeyRows.push(''); },
+        normalizeApiKeyRows(notify=false){
+            const seen = new Set();
+            const keys = [];
+            let duplicateCount = 0;
+            this.apiKeyRows.forEach(row => {
+                const key = String(row || '').trim();
+                if(!key) return;
+                if(seen.has(key)) { duplicateCount++; return; }
+                seen.add(key);
+                keys.push(key);
+            });
+            this.apiKeyRows = keys.length ? keys : [''];
+            if(notify && duplicateCount > 0) this.showToast(`已自动去重 ${duplicateCount} 个重复 API Key`);
+            return keys;
+        },
+        buildSettingsPayload(){
+            const payload = {...this.settings};
+            const keys = this.normalizeApiKeyRows(true);
+            payload.cloud_asr_api_keys = keys.join('\n');
+            payload.api_key = keys[0] || '';
+            return payload;
+        },
         saveSettings(){
             this.saving = true;
-            axios.post('/api/settings', this.settings).then(()=>{
+            axios.post('/api/settings', this.buildSettingsPayload()).then(()=>{
                 setTimeout(()=>{ this.saving=false; this.showToast('配置已保存'); }, 500);
             }).catch(() => { this.saving = false; this.showToast('保存失败', 'error'); });
         },
         saveAndRestart(){
             this.saving = true;
-            axios.post('/api/settings', this.settings).then(()=>{
+            axios.post('/api/settings', this.buildSettingsPayload()).then(()=>{
                 this.showToast('配置已保存，正在重启...');
                 axios.post('/api/restart').then(res => { setTimeout(() => { location.reload(); }, 3000); }).catch(()=>{ this.showToast('重启命令发送失败', 'error'); this.saving = false; });
             });

@@ -41,7 +41,15 @@ function install_app() {
     # 3. 系统依赖
     echo -e "${GREEN}>>> [1/5] 安装/检查系统依赖...${NC}"
     apt-get update -qq
-    apt-get install -y ffmpeg python3 python3-pip unzip libsndfile1 net-tools > /dev/null
+    apt-get install -y \
+        ffmpeg python3 python3-pip unzip ca-certificates libsndfile1 net-tools \
+        git cmake build-essential rclone aria2 > /dev/null
+
+    for REQUIRED_CMD in ffmpeg ffprobe python3 pip3 git cmake rclone; do
+        if ! command -v "$REQUIRED_CMD" >/dev/null 2>&1; then
+            echo -e "${YELLOW}⚠️  未检测到 $REQUIRED_CMD，请确认系统依赖安装是否成功。${NC}"
+        fi
+    done
 
     # 4. 解压与铺平
     echo -e "${GREEN}>>> [2/5] 解压并部署文件...${NC}"
@@ -83,7 +91,7 @@ function install_app() {
         echo -e "${YELLOW}🌍 已设置为开放外网访问。${NC}"
     fi
 
-    # 6. Python 依赖 (修复版: 仅强制修复 blinker，不重新下载 Torch)
+    # 6. Python 依赖 (当前版本使用 GGUF/llama.cpp，本地 ASR 不再依赖 Torch/FunASR)
     echo -e "${GREEN}>>> [3/5] 安装 Python 依赖...${NC}"
     if [ -f "$PROJECT_ROOT/requirements.txt" ]; then
 
@@ -99,9 +107,8 @@ function install_app() {
         echo -e "${CYAN}正在修复系统包冲突 (blinker)...${NC}"
         pip3 install blinker --ignore-installed $PIP_XARGS > /dev/null 2>&1
 
-        # 2. 正常安装其他包 (保留系统中已有的 Torch/ModelScope，不重新下载)
+        # 2. 正常安装轻量 Web/API 依赖
         echo -e "${CYAN}正在安装/检查其余依赖...${NC}"
-        # 去掉了 --ignore-installed，这样会跳过已安装的包
         pip3 install -r "$PROJECT_ROOT/requirements.txt" $PIP_XARGS
         # === 关键修复步骤 End ===
 
@@ -159,6 +166,8 @@ EOF
     echo -e "${GREEN}🎉 安装成功！${NC}"
     echo -e "默认账号: admin / admin123"
     echo -e "📂 安装路径: $PROJECT_ROOT"
+    echo -e "🤖 本地 GGUF 模型: 登录设置页后在「模型」中一键下载/更新"
+    echo -e "☁️ Rclone Remote: 请确保 rclone 已配置，并在设置页填写远程名称"
     if [[ "$NET_CHOICE" =~ ^[Yy]$ ]]; then
         echo -e "📡 访问地址: http://127.0.0.1:5000 (仅限本机)"
     else

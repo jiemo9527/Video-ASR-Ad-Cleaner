@@ -77,6 +77,13 @@ def sensevoice_gguf_ready(base_dir=None):
     return True
 
 class ScannerCore:
+    CLOUD_ASR_KEY_CONCURRENCY = 2
+    CLOUD_ASR_CHUNK_OVERLAP = 2.0
+    _cloud_asr_cond = threading.Condition()
+    _cloud_asr_active_total = 0
+    _cloud_asr_active_by_key = {}
+    _cloud_asr_next_key = 0
+
     def __init__(self, logger_callback=None, progress_callback=None, task_id=None, root_dir_name="downloads",
                  rclone_remote="s25"):
         self.log_cb = logger_callback if logger_callback else print
@@ -124,6 +131,66 @@ class ScannerCore:
                 proc.kill()
         except:
             pass
+
+    def get_cloud_asr_concurrency(self, config):
+        try:
+            return max(1, int(config.get('cloud_asr_concurrency', 3)))
+        except:
+            return 3
+
+    def get_cloud_api_keys(self, config):
+        raw_keys = config.get('cloud_asr_api_keys') or ''
+        if isinstance(raw_keys, (list, tuple)):
+            candidates = raw_keys
+        else:
+            candidates = str(raw_keys).splitlines()
+        keys = []
+        seen = set()
+        for key in candidates:
+            key = str(key or '').strip()
+            if key and key not in seen:
+                keys.append(key)
+                seen.add(key)
+        legacy_key = str(config.get('api_key') or '').strip()
+        if not keys and legacy_key:
+            keys.append(legacy_key)
+        return keys
+
+    def acquire_cloud_asr_slot(self, api_keys, global_limit):
+        if not api_keys:
+            raise RuntimeError("云端 API Key 未配置")
+        cls = type(self)
+        per_key_limit = cls.CLOUD_ASR_KEY_CONCURRENCY
+        waited = False
+        with cls._cloud_asr_cond:
+            while not self._stopped:
+                if cls._cloud_asr_active_total < global_limit:
+                    for offset in range(len(api_keys)):
+                        idx = (cls._cloud_asr_next_key + offset) % len(api_keys)
+                        key = api_keys[idx]
+                        if cls._cloud_asr_active_by_key.get(key, 0) < per_key_limit:
+                            cls._cloud_asr_next_key = (idx + 1) % len(api_keys)
+                            cls._cloud_asr_active_total += 1
+                            cls._cloud_asr_active_by_key[key] = cls._cloud_asr_active_by_key.get(key, 0) + 1
+                            return key
+                if not waited:
+                    self.log(f"⏳ 等待云端模型并发槽... (全局上限 {global_limit}, Key数 {len(api_keys)}, 单Key上限 {per_key_limit})")
+                    waited = True
+                cls._cloud_asr_cond.wait(timeout=1)
+        return None
+
+    def release_cloud_asr_slot(self, api_key):
+        if not api_key:
+            return
+        cls = type(self)
+        with cls._cloud_asr_cond:
+            cls._cloud_asr_active_total = max(0, cls._cloud_asr_active_total - 1)
+            current = cls._cloud_asr_active_by_key.get(api_key, 0) - 1
+            if current > 0:
+                cls._cloud_asr_active_by_key[api_key] = current
+            else:
+                cls._cloud_asr_active_by_key.pop(api_key, None)
+            cls._cloud_asr_cond.notify_all()
 
     def run_cmd(self, cmd, timeout=300, capture=True):
         if self._stopped: return None
@@ -377,9 +444,10 @@ class ScannerCore:
         base, _ = os.path.splitext(audio_path)
         return f"{base}_cloud.flac"
 
-    def prepare_cloud_audio(self, audio_path, use_flac=False):
+    def prepare_cloud_audio(self, audio_path, use_flac=False, quiet=False):
         if not self.verify_audio_segment(audio_path):
-            self.log("⚠️ ASR 音频无有效时长，跳过云端上传")
+            if not quiet:
+                self.log("⚠️ ASR 音频无有效时长，跳过云端上传")
             return None, None
 
         if not use_flac:
@@ -395,7 +463,8 @@ class ScannerCore:
         try:
             if (os.path.exists(cloud_path) and self.verify_audio_segment(cloud_path)
                     and os.path.getmtime(cloud_path) >= src_mtime):
-                self.log(f"♻️ 复用 FLAC 音频: {os.path.basename(cloud_path)} ({os.path.getsize(cloud_path) / 1048576:.1f}MB)")
+                if not quiet:
+                    self.log(f"♻️ 复用 FLAC 音频: {os.path.basename(cloud_path)} ({os.path.getsize(cloud_path) / 1048576:.1f}MB)")
                 return cloud_path, 'audio/flac'
         except:
             pass
@@ -409,21 +478,41 @@ class ScannerCore:
             cloud_size = 0
 
         if res and res.returncode == 0 and self.verify_audio_segment(cloud_path):
-            self.log(f"☁️ ASR 音频源: FLAC 无损 ({src_size / 1048576:.1f}MB -> {cloud_size / 1048576:.1f}MB)")
+            if not quiet:
+                self.log(f"☁️ ASR 音频源: FLAC 无损 ({src_size / 1048576:.1f}MB -> {cloud_size / 1048576:.1f}MB)")
             return cloud_path, 'audio/flac'
 
         self.remove_audio_cache(cloud_path)
-        self.log("⚠️ FLAC 生成失败，回退使用 WAV 音频源")
+        if not quiet:
+            self.log("⚠️ FLAC 生成失败，回退使用 WAV 音频源")
         return audio_path, None
 
+    def extract_cloud_audio_chunk(self, audio_path, start, duration, output):
+        cmd = ['ffmpeg', '-ss', str(start), '-t', str(duration), '-i', audio_path,
+               '-vn', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', '-y', output]
+        res = self.run_cmd(cmd, timeout=120)
+        min_duration = min(1.0, max(0.2, float(duration) * 0.5))
+        if res and res.returncode == 0 and self.verify_audio_segment(output, min_duration=min_duration):
+            return True
+        self.remove_audio_cache(output, self.get_cloud_flac_path(output))
+        return False
+
     def get_audio_cache_paths(self, task_id, segment_name):
-        name_map = {'片尾': 'tail', '中间': 'middle', '片头': 'head'}
-        if str(segment_name).startswith('抽样'):
-            m = re.search(r'(\d+)', str(segment_name))
-            safe_segment = f"sample_{m.group(1)}" if m else None
+        label = str(segment_name)
+        prefix_match = re.match(r'(\d+)', label)
+        prefix = prefix_match.group(1) if prefix_match else ''
+        if '片头' in label:
+            safe_segment = f"{prefix}_head" if prefix else 'head'
+        elif '片尾' in label:
+            safe_segment = f"{prefix}_tail" if prefix else 'tail'
+        elif '中间' in label:
+            safe_segment = f"{prefix}_middle" if prefix else 'middle'
+        elif '抽样' in label:
+            m = re.search(r'(\d+)', label)
+            safe_segment = f"{prefix}_sample" if prefix else (f"sample_{m.group(1)}" if m else None)
         else:
-            safe_segment = name_map.get(segment_name)
-        safe_segment = safe_segment or re.sub(r'[^a-zA-Z0-9_-]+', '_', str(segment_name)).strip('_')
+            safe_segment = None
+        safe_segment = safe_segment or re.sub(r'[^a-zA-Z0-9_-]+', '_', label).strip('_')
         if not safe_segment:
             safe_segment = 'segment'
         task_part = str(task_id) if task_id is not None else 'manual'
@@ -648,21 +737,29 @@ class ScannerCore:
         LEN_MID = config.get('audio_len_mid', 240)
         LEN_TAIL = config.get('audio_len_tail', 300);
         LEN_TAIL_LONG = config.get('audio_len_tail_long', 600)
+        try:
+            CLOUD_MAX_DURATION = max(0, int(config.get('cloud_asr_max_duration', 60)))
+        except:
+            CLOUD_MAX_DURATION = 60
 
         if config.get('audio_double_sample') and duration > max(1, LEN_MID):
             sample_count = 6
             sample_len = max(1, LEN_MID)
             max_start = max(0, duration - sample_len)
-            for idx in range(sample_count):
-                start = (max_start * idx) / (sample_count - 1) if sample_count > 1 else max_start
-                if idx == 0:
-                    name = "片头"
-                elif idx == sample_count - 1:
-                    name = "片尾"
+            sample_points = [
+                (idx, (max_start * idx) / (sample_count - 1) if sample_count > 1 else max_start)
+                for idx in range(sample_count)
+            ]
+            ordered_points = [sample_points[0], sample_points[-1]] + sample_points[1:-1]
+            for order_idx, (_, start) in enumerate(ordered_points, 1):
+                if order_idx == 1:
+                    name = "01片头"
+                elif order_idx == 2:
+                    name = "02片尾"
                 else:
-                    name = f"抽样{idx + 1:02d}"
+                    name = f"{order_idx:02d}抽样"
                 tasks.append({"start": start, "duration": sample_len, "name": name})
-            self.log(f"🎚️ 双倍抽样开启: {sample_count}段 x {sample_len}s")
+            self.log(f"🎚️ 双倍抽样开启: {sample_count}段 x {sample_len}s，顺序 01片头 -> 02片尾 -> 03-06抽样")
         else:
             tail_dur = LEN_TAIL_LONG if duration >= TH_LONG else LEN_TAIL
             tasks.append({"start": max(0, duration - tail_dur), "duration": tail_dur, "name": "片尾"})
@@ -687,7 +784,7 @@ class ScannerCore:
             temp_audio, temp_meta = self.get_audio_cache_paths(task_id, task['name'])
             min_audio_duration = min(5.0, max(1.0, float(task['duration']) * 0.05))
             extract_tasks = [task]
-            if task['name'] == '片尾' and task['start'] > 0:
+            if '片尾' in str(task['name']) and task['start'] > 0:
                 fallback_start = max(0, task['start'] - task['duration'])
                 if fallback_start < task['start']:
                     fallback_task = dict(task)
@@ -733,43 +830,113 @@ class ScannerCore:
 
             cloud_success = False
             cloud_audio = None
+            cloud_artifacts = []
+            cloud_chunked = False
             try:
                 if not config.get('enable_cloud_asr', True):
                     self.log("☁️ 云端 API 已停用，跳过云端识别")
                 else:
                     read_timeout = 180 if task['duration'] >= 450 else 120
-                    cloud_audio, cloud_mime = self.prepare_cloud_audio(temp_audio, config.get('asr_use_flac'))
-                    if not cloud_audio:
-                        raise RuntimeError("ASR 音频无有效时长")
-                    cloud_size = os.path.getsize(cloud_audio) if os.path.exists(cloud_audio) else 0
-                    source_type = 'FLAC' if cloud_mime else 'WAV'
-                    self.log(f"☁️ 云端识别中... (source={source_type}, timeout={read_timeout}s, size={cloud_size / 1048576:.1f}MB)")
                     data = {"model": config.get('api_model'), "language": "zh", "response_format": "json"}
-                    headers = {"Authorization": f"Bearer {config.get('api_key')}"}
-                    with open(cloud_audio, "rb") as f:
-                        if cloud_mime:
-                            files = {"file": (os.path.basename(cloud_audio), f, cloud_mime)}
-                        else:
-                            files = {"file": f}
-                        resp = requests.post(config.get('api_url'), headers=headers, files=files, data=data,
-                                             timeout=(10, read_timeout))
+                    api_keys = self.get_cloud_api_keys(config)
+                    cloud_global_limit = self.get_cloud_asr_concurrency(config)
 
-                    if resp.status_code == 200:
-                        text = self.clean_transcription(resp.json().get('text', ''))
-                        hit, reason = self.check_keywords(text, audio_keywords)
-                        if hit:
-                            self.log(f"☁️ [违规] 内容: {text}")
-                            self.remove_audio_cache(temp_audio, temp_meta, cloud_audio)
-                            return True, reason
+                    def submit_cloud_audio(source_audio, label=None, log_request=True):
+                        nonlocal cloud_audio
+                        cloud_audio, cloud_mime = self.prepare_cloud_audio(source_audio, config.get('asr_use_flac'), quiet=not log_request)
+                        if not cloud_audio:
+                            raise RuntimeError("ASR 音频无有效时长")
+                        if cloud_audio != source_audio:
+                            cloud_artifacts.append(cloud_audio)
+                        cloud_size = os.path.getsize(cloud_audio) if os.path.exists(cloud_audio) else 0
+                        source_type = 'FLAC' if cloud_mime else 'WAV'
+                        label_text = f" [{label}]" if label else ""
+                        if log_request:
+                            self.log(f"☁️ 云端识别中{label_text}... (source={source_type}, timeout={read_timeout}s, size={cloud_size / 1048576:.1f}MB)")
+                        api_key = self.acquire_cloud_asr_slot(api_keys, cloud_global_limit)
+                        if not api_key:
+                            raise RuntimeError("云端识别已停止")
+                        try:
+                            headers = {"Authorization": f"Bearer {api_key}"}
+                            with open(cloud_audio, "rb") as f:
+                                if cloud_mime:
+                                    files = {"file": (os.path.basename(cloud_audio), f, cloud_mime)}
+                                else:
+                                    files = {"file": f}
+                                return requests.post(config.get('api_url'), headers=headers, files=files, data=data,
+                                                     timeout=(10, read_timeout))
+                        finally:
+                            self.release_cloud_asr_slot(api_key)
 
-                        if config.get('detailed_mode'):
-                            self.log(f"✅ [通过] 内容: {text}")
-                        else:
-                            self.log("✅ 云端识别通过")
+                    actual_audio_duration = self.get_media_duration(temp_audio) or float(task['duration'])
+                    if CLOUD_MAX_DURATION and actual_audio_duration > CLOUD_MAX_DURATION:
+                        cloud_chunked = True
+                        chunks = []
+                        chunk_start = 0.0
+                        chunk_overlap = min(type(self).CLOUD_ASR_CHUNK_OVERLAP, max(0.0, float(CLOUD_MAX_DURATION) - 1.0))
+                        chunk_step = max(1.0, float(CLOUD_MAX_DURATION) - chunk_overlap)
+                        while chunk_start < actual_audio_duration - 0.5:
+                            chunk_duration = min(float(CLOUD_MAX_DURATION), actual_audio_duration - chunk_start)
+                            if chunk_duration < 1.0 and chunks:
+                                break
+                            chunks.append((chunk_start, chunk_duration))
+                            chunk_start += chunk_step
+
+                        self.log(f"☁️ 云端分块识别: {actual_audio_duration:.1f}s -> {len(chunks)}段，每段≤{CLOUD_MAX_DURATION}s，重叠{chunk_overlap:.0f}s")
                         cloud_success = True
+                        chunk_statuses = []
+                        chunk_base, _ = os.path.splitext(temp_audio)
+                        for chunk_idx, (chunk_start, chunk_duration) in enumerate(chunks, 1):
+                            chunk_audio = f"{chunk_base}_cloud_part{chunk_idx:02d}.wav"
+                            chunk_flac = self.get_cloud_flac_path(chunk_audio)
+                            cloud_artifacts.extend([chunk_audio, chunk_flac])
+                            self.remove_audio_cache(chunk_audio, chunk_flac)
+                            if not self.extract_cloud_audio_chunk(temp_audio, chunk_start, chunk_duration, chunk_audio):
+                                chunk_statuses.append(f"{chunk_idx}/{len(chunks)}提取失败")
+                                self.log(f"⚠️ 云端分块失败: {' '.join(chunk_statuses)}")
+                                raise RuntimeError(f"云端分块音频提取失败: {chunk_idx}/{len(chunks)}")
+                            resp = submit_cloud_audio(chunk_audio, f"{chunk_idx}/{len(chunks)}", log_request=False)
+                            if resp.status_code != 200:
+                                c, m = self.get_retry_attempt_label(config)
+                                chunk_statuses.append(f"{chunk_idx}/{len(chunks)}×{resp.status_code}")
+                                self.log(f"⚠️ 云端分块失败 (第{c}/{m}次): {' '.join(chunk_statuses)}")
+                                cloud_success = False
+                                break
+
+                            text = self.clean_transcription(resp.json().get('text', ''))
+                            hit, reason = self.check_keywords(text, audio_keywords)
+                            if hit:
+                                hit_text = text or '<空>'
+                                chunk_statuses.append(f"{chunk_idx}/{len(chunks)} 命中 {hit_text}")
+                                self.log(f"☁️ 云端分块命中: {' '.join(chunk_statuses)}")
+                                self.log(f"☁️ [违规] 分块 {chunk_idx}/{len(chunks)} 内容: {text}")
+                                self.remove_audio_cache(temp_audio, temp_meta, cloud_audio, *cloud_artifacts)
+                                return True, reason
+                            if config.get('detailed_mode'):
+                                chunk_text = text or '<空>'
+                                chunk_statuses.append(f"{chunk_idx}/{len(chunks)} {chunk_text}")
+                            else:
+                                chunk_statuses.append(f"{chunk_idx}/{len(chunks)}✓")
+                        if cloud_success:
+                            self.log(f"✅ 云端分块识别通过: {' '.join(chunk_statuses)}")
                     else:
-                        c, m = self.get_retry_attempt_label(config)
-                        self.log(f"⚠️ 云端 API 报错 (第{c}/{m}次): {resp.status_code}")
+                        resp = submit_cloud_audio(temp_audio)
+                        if resp.status_code == 200:
+                            text = self.clean_transcription(resp.json().get('text', ''))
+                            hit, reason = self.check_keywords(text, audio_keywords)
+                            if hit:
+                                self.log(f"☁️ [违规] 内容: {text}")
+                                self.remove_audio_cache(temp_audio, temp_meta, cloud_audio, *cloud_artifacts)
+                                return True, reason
+
+                            if config.get('detailed_mode'):
+                                self.log(f"✅ [通过] 内容: {text}")
+                            else:
+                                self.log("✅ 云端识别通过")
+                            cloud_success = True
+                        else:
+                            c, m = self.get_retry_attempt_label(config)
+                            self.log(f"⚠️ 云端 API 报错 (第{c}/{m}次): {resp.status_code}")
 
             except Exception as e:
                 c, m = self.get_retry_attempt_label(config)
@@ -777,10 +944,12 @@ class ScannerCore:
 
             if not cloud_success:
                 if self._stopped: return False, None
+                if cloud_chunked:
+                    self.remove_audio_cache(cloud_audio, *cloud_artifacts)
 
                 if not enable_local:
                     if not config.get('enable_cloud_asr', True):
-                        self.remove_audio_cache(temp_audio, temp_meta, cloud_audio)
+                        self.remove_audio_cache(temp_audio, temp_meta, cloud_audio, *cloud_artifacts)
                         raise RuntimeError("云端 API 已停用且本地模型未启用")
                     try:
                         has_retry = int(config.get('current_retry', 1)) <= int(config.get('retry_limit', 3))
@@ -789,7 +958,7 @@ class ScannerCore:
                     if has_retry:
                         self.log(f"♻️ 保留音频供重试复用: {task['name']}")
                     else:
-                        self.remove_audio_cache(temp_audio, temp_meta, cloud_audio)
+                        self.remove_audio_cache(temp_audio, temp_meta, cloud_audio, *cloud_artifacts)
                     raise RuntimeError(f"云端失败且策略限制本地模型 -> 请求重排队")
 
                 local_limit = self.get_local_model_concurrency(config)
@@ -811,7 +980,7 @@ class ScannerCore:
                         hit, reason = self.check_keywords(text, audio_keywords)
                         if hit:
                             self.log(f"🏠 [违规] 本地内容: {text}")
-                            self.remove_audio_cache(temp_audio, temp_meta, cloud_audio)
+                            self.remove_audio_cache(temp_audio, temp_meta, cloud_audio, *cloud_artifacts)
                             return True, f"本地拦截: {reason}"
 
                         if config.get('detailed_mode'):
@@ -821,14 +990,14 @@ class ScannerCore:
 
                     except Exception as e:
                         self.log(f"❌ 本地模型崩溃: {e}")
-                        self.remove_audio_cache(temp_audio, temp_meta, cloud_audio)
+                        self.remove_audio_cache(temp_audio, temp_meta, cloud_audio, *cloud_artifacts)
                         raise RuntimeError(f"本地模型失败: {e}")
                 finally:
                     self.drop_caches()
                     remaining_slots = self.release_local_inference_slot()
                     self.log(f"🧹 [系统] 本地 GGUF 推理资源已释放 (运行中 {remaining_slots}/{local_limit})")
 
-            self.remove_audio_cache(temp_audio, temp_meta, cloud_audio)
+            self.remove_audio_cache(temp_audio, temp_meta, cloud_audio, *cloud_artifacts)
             if checkpoint_cb: checkpoint_cb(task['name'])
             self.prog_cb(audio_progress_pct(i), "检测进行中", "")
 

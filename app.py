@@ -146,8 +146,8 @@ def get_final_config(overrides_json=None):
         "audio_threshold_multi": 600, "audio_threshold_long": 3600,
         "audio_len_head": 240, "audio_len_mid": 240, "audio_len_tail": 300, "audio_len_tail_long": 600,
         "api_url": "https://api.siliconflow.cn/v1/audio/transcriptions",
-        "api_key": "",
-        "api_model": "FunAudioLLM/SenseVoiceSmall",
+        "api_key": "", "cloud_asr_api_keys": "",
+        "api_model": "FunAudioLLM/SenseVoiceSmall", "cloud_asr_max_duration": 60, "cloud_asr_concurrency": 3,
         "scan_path": "/root/downloads", "rclone_remote": "s25", "api_token": "8pUoqOTHhEAhRnacl3c19",
         "notify_upload_success": False, "notify_errors": True,
         "concurrency_detect": 2, "concurrency_upload": 9, "detect_retry_limit": 3,
@@ -159,7 +159,7 @@ def get_final_config(overrides_json=None):
                  "notify_upload_success", "notify_errors"]:
             final_conf[k] = (str(v).lower() == 'true')
         elif k in ["audio_threshold_multi", "audio_threshold_long", "audio_len_head", "audio_len_mid", "audio_len_tail",
-                   "audio_len_tail_long", "concurrency_detect", "concurrency_upload", "detect_retry_limit",
+                   "audio_len_tail_long", "cloud_asr_max_duration", "cloud_asr_concurrency", "concurrency_detect", "concurrency_upload", "detect_retry_limit",
                    "local_model_concurrency"]:
             try:
                 final_conf[k] = int(v)
@@ -1209,7 +1209,19 @@ def cancel(tid):
 @login_required
 def settings():
     if request.method == 'POST':
-        for k, v in request.json.items():
+        data = dict(request.json or {})
+        if 'cloud_asr_api_keys' in data or 'api_key' in data:
+            raw_keys = str(data.get('cloud_asr_api_keys') or data.get('api_key') or '')
+            keys = []
+            seen = set()
+            for key in raw_keys.splitlines():
+                key = key.strip()
+                if key and key not in seen:
+                    keys.append(key)
+                    seen.add(key)
+            data['cloud_asr_api_keys'] = "\n".join(keys)
+            data['api_key'] = keys[0] if keys else ""
+        for k, v in data.items():
             if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample",
                      "notify_upload_success", "notify_errors"]:
                 val = "true" if (v is True or str(v).lower() == 'true') else "false"
@@ -1219,8 +1231,8 @@ def settings():
             c.value = val;
             db.session.add(c)
         db.session.commit()
-        if 'api_token' in request.json:
-            tk = str(request.json['api_token']).strip()
+        if 'api_token' in data:
+            tk = str(data['api_token']).strip()
             if re.match(r'^[a-zA-Z0-9_\-]+$', tk):
                 try:
                     open(os.path.join(os.path.dirname(__file__), '.token_secret'), 'w').write(tk)
