@@ -81,6 +81,28 @@ def clear_running_task(task_id, core):
             del running_tasks[task_id]
 
 
+def get_active_task_ids():
+    with task_state_lock:
+        return set(running_tasks.keys()) | set(active_detect_tasks) | set(active_upload_tasks)
+
+
+def safe_db_rollback(context="db"):
+    try:
+        db.session.rollback()
+    except Exception as e:
+        print(f"⚠️ DB回滚失败[{context}]: {e}")
+
+
+def safe_db_commit(context="db"):
+    try:
+        db.session.commit()
+        return True
+    except Exception as e:
+        safe_db_rollback(context)
+        print(f"⚠️ DB提交失败[{context}]: {e}")
+        return False
+
+
 def check_ip_ban(ip):
     now = datetime.now()
     if ip in LOGIN_ATTEMPTS:
@@ -328,6 +350,7 @@ def detection_worker():
     with app.app_context():
         seed_default_keywords()
         while True:
+            task_id = None
             try:
                 task_id = detect_queue.get()
                 if not claim_task_stage(task_id, 'detect'):
@@ -340,7 +363,11 @@ def detection_worker():
                     continue
                 task.status = 'processing';
                 task.progress = 0;
-                db.session.commit()
+                if not safe_db_commit(f"detect start {task_id}"):
+                    release_task_stage(task_id, 'detect')
+                    detect_queue.task_done()
+                    time.sleep(1)
+                    continue
 
                 final_settings = get_final_config(task.overrides)
 
@@ -371,8 +398,14 @@ def detection_worker():
                 keywords_config = {'audio': audio_kws, 'subtitle': sub_kws, 'meta': meta_kws}
 
                 def db_logger(msg):
-                    t = Task.query.get(task_id);
-                    if t: t.log = (t.log or "") + f"{msg}\n"; db.session.commit()
+                    try:
+                        t = Task.query.get(task_id)
+                        if t:
+                            t.log = (t.log or "") + f"{msg}\n"
+                            safe_db_commit(f"detect log {task_id}")
+                    except Exception as e:
+                        safe_db_rollback(f"detect log {task_id}")
+                        print(f"⚠️ 写入检测日志失败[{task_id}]: {e}")
 
                 task_overrides = get_task_overrides(task)
                 dir_task = is_directory_task(task, task_overrides)
@@ -389,6 +422,7 @@ def detection_worker():
                         task.upload_eta = "完成" if task.status == 'uploaded' else "-"
                         task.finished_at = datetime.now()
                         db_logger("✅ 目录任务已完成" if task.status == 'uploaded' else "❌ 目录任务中未找到可处理文件")
+                        release_task_stage(task_id, 'detect')
                         detect_queue.task_done()
                         continue
 
@@ -399,28 +433,34 @@ def detection_worker():
                             {'_current_item': current_process_path, '_dir_stage': 'detect'},
                             remove_keys=['_passed', '_passed_file']
                         )
-                        db.session.commit()
+                        safe_db_commit(f"detect dir current {task_id}")
                     if task_overrides.get('_passed_file') == current_process_path:
                         passed_segments = task_overrides.get('_passed', [])
                 else:
                     passed_segments = task_overrides.get('_passed', [])
 
                 def detect_prog(pct, msg, _):
-                    t = Task.query.get(task_id);
-                    if not t:
-                        return
-                    if dir_task:
-                        ov = get_task_overrides(t)
-                        total_files = max(1, int(ov.get('_dir_total_files', 1) or 1))
-                        uploaded_count = int(ov.get('_dir_uploaded_count', 0) or 0)
-                        t.progress = int(min(99, ((uploaded_count + (pct / 100.0) * 0.5) / total_files) * 100))
-                    else:
-                        t.progress = pct
-                    db.session.commit()
+                    try:
+                        t = Task.query.get(task_id)
+                        if not t:
+                            return
+                        if dir_task:
+                            ov = get_task_overrides(t)
+                            total_files = max(1, int(ov.get('_dir_total_files', 1) or 1))
+                            uploaded_count = int(ov.get('_dir_uploaded_count', 0) or 0)
+                            t.progress = int(min(99, ((uploaded_count + (pct / 100.0) * 0.5) / total_files) * 100))
+                        else:
+                            t.progress = pct
+                        safe_db_commit(f"detect progress {task_id}")
+                    except Exception as e:
+                        safe_db_rollback(f"detect progress {task_id}")
+                        print(f"⚠️ 更新检测进度失败[{task_id}]: {e}")
 
                 def save_checkpoint(seg_name):
                     try:
                         t = Task.query.get(task_id)
+                        if not t:
+                            return
                         ov = get_task_overrides(t)
                         current_item = ov.get('_current_item') if dir_task else current_process_path
                         passed = ov.get('_passed', [])
@@ -429,9 +469,10 @@ def detection_worker():
                             ov['_passed'] = passed
                             ov['_passed_file'] = current_item
                             set_task_overrides(t, ov)
-                            db.session.commit()
-                    except:
-                        pass
+                            safe_db_commit(f"detect checkpoint {task_id}")
+                    except Exception as e:
+                        safe_db_rollback(f"detect checkpoint {task_id}")
+                        print(f"⚠️ 保存检测断点失败[{task_id}]: {e}")
 
                 def update_filepath(new_path):
                     try:
@@ -448,9 +489,10 @@ def detection_worker():
                             t.filepath = new_path
                             t.filename = os.path.basename(new_path)
                             t.log = (t.log or "") + f"🔄 文件已更新为: {t.filename}\n"
-                        db.session.commit()
-                    except:
-                        pass
+                        safe_db_commit(f"detect filepath {task_id}")
+                    except Exception as e:
+                        safe_db_rollback(f"detect filepath {task_id}")
+                        print(f"⚠️ 更新检测文件路径失败[{task_id}]: {e}")
 
                 core = ScannerCore(logger_callback=db_logger, task_id=task_id, root_dir_name=current_root_name,
                                    rclone_remote=rclone_remote)
@@ -497,16 +539,16 @@ def detection_worker():
                         else:
                             task.progress = 0
                             db_logger("✅ 检测通过，加入上传队列")
-                        db.session.commit();
-                        upload_queue.put(task_id)
+                        if safe_db_commit(f"detect ready upload {task_id}"):
+                            upload_queue.put(task_id)
                     else:
                         err_msg = str(res.get('msg', ''))
                         if task.retry_count < RETRY_LIMIT and '云端 API 已停用且本地模型未启用' not in err_msg:
                             task.retry_count += 1
                             task.status = 'pending'
                             db_logger(f"⚠️ 云端异常/超时 -> 重新排队 (尝试 {task.retry_count}/{RETRY_LIMIT})")
-                            db.session.commit()
-                            detect_queue.put(task_id)
+                            if safe_db_commit(f"detect retry {task_id}"):
+                                detect_queue.put(task_id)
                         else:
                             task.status = 'error';
                             task.finished_at = datetime.now();
@@ -515,12 +557,16 @@ def detection_worker():
                                                                                            f"❌ 任务出错: {task.filename}\n原因: {res.get('msg')}")
 
                 except Exception as e:
+                    safe_db_rollback(f"detect exception {task_id}")
+                    task = Task.query.get(task_id)
+                    if not task:
+                        continue
                     if task.retry_count < RETRY_LIMIT:
                         task.retry_count += 1
                         task.status = 'pending'
                         db_logger(f"⚠️ 异常 -> 重新排队 (尝试 {task.retry_count}/{RETRY_LIMIT})\nErr: {str(e)}")
-                        db.session.commit()
-                        detect_queue.put(task_id)
+                        if safe_db_commit(f"detect exception retry {task_id}"):
+                            detect_queue.put(task_id)
                     else:
                         task.status = 'error';
                         task.finished_at = datetime.now();
@@ -530,15 +576,23 @@ def detection_worker():
                 finally:
                     clear_running_task(task_id, core)
                     release_task_stage(task_id, 'detect')
-                    db.session.commit();
+                    safe_db_commit(f"detect finally {task_id}");
                     detect_queue.task_done()
             except Exception as e:
+                safe_db_rollback("detect worker")
+                if task_id is not None:
+                    release_task_stage(task_id, 'detect')
+                    try:
+                        detect_queue.task_done()
+                    except Exception:
+                        pass
                 print(e)
 
 
 def upload_worker():
     with app.app_context():
         while True:
+            task_id = None
             try:
                 task_id = upload_queue.get()
                 if not claim_task_stage(task_id, 'upload'):
@@ -550,7 +604,11 @@ def upload_worker():
                     upload_queue.task_done()
                     continue
                 task.status = 'uploading';
-                db.session.commit()
+                if not safe_db_commit(f"upload start {task_id}"):
+                    release_task_stage(task_id, 'upload')
+                    upload_queue.task_done()
+                    time.sleep(1)
+                    continue
 
                 final_settings = get_final_config(task.overrides)
                 scan_path = final_settings.get('scan_path', '/root/downloads')
@@ -565,13 +623,14 @@ def upload_worker():
                     if remaining_files:
                         current_upload_path = remaining_files[0]
                         update_task_overrides(task, {'_current_item': current_upload_path, '_dir_stage': 'upload'}, remove_keys=['_passed', '_passed_file'])
-                        db.session.commit()
+                        safe_db_commit(f"upload dir current {task_id}")
 
                 if dir_task and not current_upload_path:
                     task.status = 'error'
                     task.finished_at = datetime.now()
                     task.log = (task.log or "") + "❌ 上传失败：目录任务未找到待上传文件\n"
-                    db.session.commit()
+                    safe_db_commit(f"upload missing file {task_id}")
+                    release_task_stage(task_id, 'upload')
                     upload_queue.task_done()
                     continue
 
@@ -585,14 +644,17 @@ def upload_worker():
 
                 def db_logger(msg):
                     try:
-                        t = Task.query.get(task_id);
-                        if t: t.log = (t.log or "") + f"{msg}\n"; db.session.commit()
-                    except:
-                        pass
+                        t = Task.query.get(task_id)
+                        if t:
+                            t.log = (t.log or "") + f"{msg}\n"
+                            safe_db_commit(f"upload log {task_id}")
+                    except Exception as e:
+                        safe_db_rollback(f"upload log {task_id}")
+                        print(f"⚠️ 写入上传日志失败[{task_id}]: {e}")
 
                 def upload_prog(pct, speed, eta):
                     try:
-                        t = Task.query.get(task_id);
+                        t = Task.query.get(task_id)
                         if not t:
                             return
                         if dir_task:
@@ -602,9 +664,10 @@ def upload_worker():
                             t.progress = int(min(99, ((uploaded_count + 0.5 + (pct / 100.0) * 0.5) / total_files) * 100))
                         else:
                             t.progress = pct
-                        t.upload_speed = speed; t.upload_eta = eta; db.session.commit()
-                    except:
-                        pass
+                        t.upload_speed = speed; t.upload_eta = eta; safe_db_commit(f"upload progress {task_id}")
+                    except Exception as e:
+                        safe_db_rollback(f"upload progress {task_id}")
+                        print(f"⚠️ 更新上传进度失败[{task_id}]: {e}")
 
                 core = ScannerCore(logger_callback=db_logger, task_id=task_id, root_dir_name=current_root_name,
                                    rclone_remote=rclone_remote)
@@ -645,8 +708,8 @@ def upload_worker():
                                 task.upload_eta = "-"
                                 task.finished_at = None
                                 db_logger(f"✅ 文件上传成功 ({uploaded_count}/{total_files})，继续处理下一文件")
-                                db.session.commit()
-                                detect_queue.put(task_id)
+                                if safe_db_commit(f"upload continue dir {task_id}"):
+                                    detect_queue.put(task_id)
                         else:
                             task.status = 'uploaded';
                             task.progress = 100;
@@ -668,6 +731,10 @@ def upload_worker():
                             if final_settings.get('notify_errors', True): core.send_tg_msg(final_settings,
                                                                                            f"❌ 上传失败: {task.filename}")
                 except Exception as e:
+                    safe_db_rollback(f"upload exception {task_id}")
+                    task = Task.query.get(task_id)
+                    if not task:
+                        continue
                     if core._stopped:
                         db_logger(f"⏹ 上传中断: {e}")
                     else:
@@ -678,12 +745,16 @@ def upload_worker():
                 finally:
                     clear_running_task(task_id, core)
                     release_task_stage(task_id, 'upload')
-                    try:
-                        db.session.commit()
-                    except:
-                        pass
+                    safe_db_commit(f"upload finally {task_id}")
                     upload_queue.task_done()
             except Exception as e:
+                safe_db_rollback("upload worker")
+                if task_id is not None:
+                    release_task_stage(task_id, 'upload')
+                    try:
+                        upload_queue.task_done()
+                    except Exception:
+                        pass
                 print(e)
 
 
@@ -1170,10 +1241,14 @@ def save_and_retry(tid):
 def delete_task_file(tid):
     t = Task.query.get(tid);
     if not t: return jsonify({"code": 404})
-    if tid in running_tasks:
-        running_tasks[tid].stop()
-        del running_tasks[tid]
-        time.sleep(0.1)
+    if tid in get_active_task_ids():
+        core = running_tasks.get(tid)
+        if core:
+            core.stop()
+        t.status = 'cancelled'
+        t.finished_at = datetime.now()
+        safe_db_commit(f"defer delete active task {tid}")
+        return jsonify({"code": 409, "msg": "任务仍在运行，已发送停止指令；请稍后再删除记录"})
 
     files_to_remove = set()
     if t.filepath:
@@ -1388,9 +1463,17 @@ def update_keyword(kid):
 @app.route('/api/tasks/clear', methods=['POST'])
 @login_required
 def clear_tasks():
-    Task.query.filter(Task.status.in_(['uploaded', 'dirty', 'error', 'cancelled'])).delete(synchronize_session=False);
+    protected_ids = get_active_task_ids()
+    q = Task.query.filter(Task.status.in_(['uploaded', 'dirty', 'error', 'cancelled']))
+    if protected_ids:
+        q = q.filter(~Task.id.in_(protected_ids))
+    deleted = q.delete(synchronize_session=False)
     db.session.commit()
-    return jsonify({"code": 200, "msg": "已清理"})
+    skipped = len(protected_ids)
+    msg = f"已清理 {deleted} 条记录"
+    if skipped:
+        msg += f"，已跳过 {skipped} 个运行中任务"
+    return jsonify({"code": 200, "msg": msg})
 
 
 @app.route('/api/update_task_config/<int:tid>', methods=['POST'])
