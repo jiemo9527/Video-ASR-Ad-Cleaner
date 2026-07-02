@@ -939,7 +939,6 @@ class ScannerCore:
                             chunk_start += chunk_step
 
                         self.log(f"☁️ 云端切块识别: {actual_audio_duration:.1f}s -> {len(chunks)}块，每块≤{CLOUD_MAX_DURATION}s，重叠{chunk_overlap:.0f}s")
-                        cloud_success = True
                         chunk_statuses = []
                         chunk_base, _ = os.path.splitext(temp_audio)
                         for chunk_idx, (chunk_start, chunk_duration) in enumerate(chunks, 1):
@@ -973,6 +972,8 @@ class ScannerCore:
                                 chunk_statuses.append(f"{chunk_idx}/{len(chunks)} {chunk_text}")
                             else:
                                 chunk_statuses.append(f"{chunk_idx}/{len(chunks)}✓")
+                        else:
+                            cloud_success = True
                         if cloud_success:
                             self.log(f"✅ 云端切块识别通过: {' '.join(chunk_statuses)}")
                     else:
@@ -995,6 +996,7 @@ class ScannerCore:
                             self.log(f"⚠️ 云端 API 报错 (第{c}/{m}次): {resp.status_code}")
 
             except Exception as e:
+                cloud_success = False
                 c, m = self.get_retry_attempt_label(config)
                 self.log(f"⚠️ 云端连接异常 (第{c}/{m}次): {str(e)}")
 
