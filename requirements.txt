@@ -2,4 +2,5 @@ flask
 flask-sqlalchemy
 flask-login
 requests
+PySocks
 SQLAlchemy

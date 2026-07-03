@@ -157,6 +157,12 @@ class ScannerCore:
             keys.append(legacy_key)
         return keys
 
+    def get_cloud_asr_proxies(self, config):
+        proxy_url = str(config.get('cloud_asr_proxy') or '').strip()
+        if not proxy_url:
+            return None
+        return {'http': proxy_url, 'https': proxy_url}
+
     def acquire_cloud_asr_slot(self, api_keys, global_limit):
         if not api_keys:
             raise RuntimeError("云端 API Key 未配置")
@@ -892,10 +898,14 @@ class ScannerCore:
                 if not config.get('enable_cloud_asr', True):
                     self.log("☁️ 云端 API 已停用，跳过云端识别")
                 else:
+                    upload_timeout = 60
                     read_timeout = 180 if task['duration'] >= 450 else 120
                     data = {"model": config.get('api_model'), "language": "zh", "response_format": "json"}
                     api_keys = self.get_cloud_api_keys(config)
                     cloud_global_limit = self.get_cloud_asr_concurrency(config)
+                    cloud_proxies = self.get_cloud_asr_proxies(config)
+                    if cloud_proxies:
+                        self.log("☁️ 云端音频上传代理已启用")
 
                     def submit_cloud_audio(source_audio, label=None, log_request=True):
                         nonlocal cloud_audio
@@ -908,7 +918,7 @@ class ScannerCore:
                         source_type = 'FLAC' if cloud_mime else 'WAV'
                         label_text = f" [{label}]" if label else ""
                         if log_request:
-                            self.log(f"☁️ 云端识别中{label_text}... (source={source_type}, timeout={read_timeout}s, size={cloud_size / 1048576:.1f}MB)")
+                            self.log(f"☁️ 云端识别中{label_text}... (source={source_type}, timeout=上传{upload_timeout}s/识别{read_timeout}s, size={cloud_size / 1048576:.1f}MB)")
                         api_key = self.acquire_cloud_asr_slot(api_keys, cloud_global_limit)
                         if not api_key:
                             raise RuntimeError("云端识别已停止")
@@ -920,7 +930,7 @@ class ScannerCore:
                                 else:
                                     files = {"file": f}
                                 return requests.post(config.get('api_url'), headers=headers, files=files, data=data,
-                                                     timeout=(10, read_timeout))
+                                                     timeout=(upload_timeout, read_timeout), proxies=cloud_proxies)
                         finally:
                             self.release_cloud_asr_slot(api_key)
 

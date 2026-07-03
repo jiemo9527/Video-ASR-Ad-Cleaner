@@ -79,9 +79,10 @@ Common settings:
 - `cloud_asr_api_keys`: newline-separated cloud ASR API key pool. The settings page edits it as one key per row and keeps `api_key` as the first key for compatibility.
 - `cloud_asr_concurrency`: maximum simultaneous cloud ASR requests in the current Flask process. Default is `3`.
 - `cloud_asr_max_duration`: maximum cloud chunk duration to send to cloud ASR. Default is `60`; longer ASR samples are split into multiple cloud chunks. Set to `0` to disable cloud chunking.
+- `cloud_asr_proxy`: optional proxy URL used only for cloud ASR audio upload requests. Supports `http://user:pass@host:port` and `socks5h://user:pass@host:port` formats when SOCKS support is installed.
 - `scan_path`, `rclone_remote`: local download root and default remote.
 
-Sensitive values include `api_key`, `tg_bot_token`, `tg_chat_id`, and `api_token`. Do not print or commit real secrets.
+Sensitive values include `api_key`, `cloud_asr_proxy`, `tg_bot_token`, `tg_chat_id`, and `api_token`. Do not print or commit real secrets.
 
 ## Media Processing Details
 
@@ -156,14 +157,14 @@ Segment planning:
 
 Cloud timeout policy:
 
-- Connection timeout: `10s`.
+- Upload/connect timeout: `60s`.
 - Read timeout: `120s` by default.
 - Read timeout: `180s` when the current audio segment duration is `>= 450s`.
 
 The log includes the timeout value:
 
 ```text
-☁️ 云端识别中... (timeout=120s)
+☁️ 云端识别中... (timeout=上传60s/识别120s)
 ```
 
 Cloud failure policy:

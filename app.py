@@ -169,15 +169,17 @@ def get_final_config(overrides_json=None):
         "audio_len_head": 240, "audio_len_mid": 240, "audio_len_tail": 300, "audio_len_tail_long": 600,
         "audio_segment_len": 360, "audio_max_segments": 8,
         "api_url": "https://api.siliconflow.cn/v1/audio/transcriptions",
-        "api_key": "", "cloud_asr_api_keys": "",
+        "api_key": "", "cloud_asr_api_keys": "", "cloud_asr_proxy": "",
         "api_model": "FunAudioLLM/SenseVoiceSmall", "cloud_asr_max_duration": 60, "cloud_asr_concurrency": 3,
         "scan_path": "/root/downloads", "rclone_remote": "s25", "api_token": "8pUoqOTHhEAhRnacl3c19",
         "notify_upload_success": False, "notify_errors": True,
         "concurrency_detect": 2, "concurrency_upload": 9, "detect_retry_limit": 3,
-        "local_model_concurrency": 1, "download_proxy": ""
+        "local_model_concurrency": 1
     }
     db_configs = {c.key: c.value for c in Config.query.all()}
     for k, v in db_configs.items():
+        if k == "download_proxy":
+            continue
         if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample",
                  "notify_upload_success", "notify_errors"]:
             final_conf[k] = (str(v).lower() == 'true')
@@ -767,13 +769,10 @@ def check_local_models_exist():
 @login_required
 def download_model():
     global download_proc, download_logs
-    sys_conf = get_final_config(None);
-    proxy_url = sys_conf.get('download_proxy', '')
     with download_lock:
         if download_proc and download_proc.poll() is None: return jsonify({"code": 409, "msg": "下载任务正在进行"})
         download_logs = ["=== 🚀 初始化 GGUF 本地模型资源下载 ==="]
         env = os.environ.copy()
-        if proxy_url: env['HTTP_PROXY'] = proxy_url; env['HTTPS_PROXY'] = proxy_url
         script = """
 import json, os, platform, shutil, stat, subprocess, sys, tarfile, tempfile, time, urllib.request, zipfile
 

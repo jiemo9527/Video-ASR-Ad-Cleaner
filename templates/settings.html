@@ -128,6 +128,7 @@
                                 </div>
                                 <div class="mb-3"><label class="form-label fw-bold small">API Endpoint (URL)</label><input type="text" class="form-control form-control-sm font-monospace" v-model="settings.api_url"></div>
                                 <div class="mb-3"><label class="form-label fw-bold small">Model Name</label><input type="text" class="form-control form-control-sm" v-model="settings.api_model"></div>
+                                <div class="mb-3"><label class="form-label fw-bold small">云端音频上传代理</label><input type="text" class="form-control form-control-sm font-monospace" v-model="settings.cloud_asr_proxy" placeholder="http://user:pass@127.0.0.1:7890"><div class="form-text" style="font-size: 11px">仅用于云端 ASR 音频上传请求。支持 http/https/socks4/socks5/socks5h，例如 http://user:pass@host:port 或 socks5h://user:pass@host:port。</div></div>
                                 <div class="mb-3"><label class="form-label fw-bold small">云端切块时长</label><div class="input-group input-group-sm"><input type="number" class="form-control" v-model="settings.cloud_asr_max_duration" min="0"><span class="input-group-text">秒</span></div><div class="form-text" style="font-size: 11px">默认 60。超过该长度的抽样音频会拆成多块逐个上传云端，避免长音频 500。设为 0 可禁用切块。</div></div>
                                 <div class="mb-3"><label class="form-label fw-bold small">云端模型并发数</label><div class="input-group input-group-sm"><button class="btn btn-outline-secondary" @click="settings.cloud_asr_concurrency > 1 && settings.cloud_asr_concurrency--"><i class="bi bi-dash"></i></button><input type="number" class="form-control text-center font-monospace" v-model="settings.cloud_asr_concurrency" min="1" max="16"><button class="btn btn-outline-secondary" @click="settings.cloud_asr_concurrency++"><i class="bi bi-plus"></i></button></div><div class="form-text" style="font-size: 11px">限制同时运行的云端 ASR 请求数，默认 3。单个 API Key 并发上限固定为 2。</div></div>
                                 <div class="mb-3"><label class="form-label fw-bold small">API Keys</label><div class="d-flex flex-column gap-2"><div class="input-group input-group-sm" v-for="(key, idx) in apiKeyRows" :key="idx"><span class="input-group-text">Key [[ idx + 1 ]]</span><input type="password" class="form-control font-monospace" v-model="apiKeyRows[idx]" autocomplete="off"><button class="btn btn-outline-danger" type="button" @click="removeApiKeyRow(idx)" :disabled="apiKeyRows.length <= 1"><i class="bi bi-trash"></i></button></div></div><button class="btn btn-outline-primary btn-sm mt-2" type="button" @click="addApiKeyRow"><i class="bi bi-plus-lg me-1"></i>新增 API Key</button><div class="form-text" style="font-size: 11px">每行一个 Key。请求会在 Key 池中轮询，单 Key 最多同时 2 个云端请求。</div></div>
@@ -142,7 +143,6 @@
                                 <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" v-model="settings.enable_local_model" id="sw_local" :disabled="!modelReady"><label class="form-check-label fw-bold" for="sw_local">启用本地模型 (Fallback)</label></div>
                                 <div v-if="!modelReady" class="text-danger small mb-2" style="font-size: 11px; margin-left: 2em;"><i class="bi bi-x-circle me-1"></i> 检测到 GGUF 本地模型资源缺失，无法启用。请先下载。</div>
                                 <div class="mb-3"><label class="form-label fw-bold small">本地模型并发数</label><div class="input-group input-group-sm"><button class="btn btn-outline-secondary" @click="settings.local_model_concurrency > 1 && settings.local_model_concurrency--"><i class="bi bi-dash"></i></button><input type="number" class="form-control text-center font-monospace" v-model="settings.local_model_concurrency" min="1" max="8"><button class="btn btn-outline-secondary" @click="settings.local_model_concurrency++"><i class="bi bi-plus"></i></button></div><div class="form-text" style="font-size: 11px">限制同时运行的 GGUF 本地推理进程数。默认 1；调高会增加 CPU 和内存压力。</div></div>
-                                <div class="mb-3"><label class="form-label fw-bold small">下载代理 (Proxy)</label><input type="text" class="form-control form-control-sm font-monospace" v-model="settings.download_proxy" placeholder="http://127.0.0.1:7890"></div>
                                 <div class="card bg-light border-0 p-3 mb-3">
                                     <div class="d-flex justify-content-between align-items-center mb-2"><span class="fw-bold small">SenseVoice GGUF / llama.cpp</span><span class="badge" :class="modelReady ? 'bg-success' : 'bg-secondary'">[[ modelReady ? '已就绪' : '未检测/缺失' ]]</span></div>
                                     <div class="small text-muted mb-2" style="font-size: 11px;">CPU 本地推理，无需 Python 模型环境；下载 q8 模型和 FSMN-VAD。</div>
@@ -260,11 +260,10 @@ Vue.createApp({
                 tg_bot_token: '', tg_chat_id: '',
                 audio_segment_len: 360, audio_max_segments: 8,
                 cloud_asr_max_duration: 60, cloud_asr_concurrency: 3,
-                api_url: '', api_key: '', cloud_asr_api_keys: '', api_model: '',
+                api_url: '', api_key: '', cloud_asr_api_keys: '', cloud_asr_proxy: '', api_model: '',
                 scan_path: '', rclone_remote: '', api_token: '',
                 notify_upload_success: false, notify_errors: true,
-                concurrency_detect: 2, concurrency_upload: 9, detect_retry_limit: 3, local_model_concurrency: 1,
-                download_proxy: ''
+                concurrency_detect: 2, concurrency_upload: 9, detect_retry_limit: 3, local_model_concurrency: 1
             },
             account: { username: '', old_pass: '', new_pass: '', confirm_pass: '' },
             apiKeyRows: [''], keywords: [], tab: 'audio', newKw: '', saving: false,
@@ -305,6 +304,7 @@ Vue.createApp({
                 this.settings.api_url = d.api_url || '';
                 this.settings.api_key = d.api_key || '';
                 this.settings.cloud_asr_api_keys = d.cloud_asr_api_keys || '';
+                this.settings.cloud_asr_proxy = d.cloud_asr_proxy || '';
                 const keyText = this.settings.cloud_asr_api_keys || this.settings.api_key || '';
                 const keys = keyText.split(/\r?\n/).map(k => k.trim()).filter(Boolean);
                 this.apiKeyRows = keys.length ? keys : [''];
@@ -313,7 +313,6 @@ Vue.createApp({
                 this.settings.scan_path = d.scan_path || '/root/downloads';
                 this.settings.rclone_remote = d.rclone_remote || 's25';
                 this.settings.api_token = d.api_token || '8pUoqOTHhEAhRnacl3c19';
-                this.settings.download_proxy = d.download_proxy || '';
                 this.modelReady = d.model_exists === true;
                 if(!this.modelReady && this.settings.enable_local_model) this.settings.enable_local_model = false;
                 if(d.username) this.account.username = d.username;
