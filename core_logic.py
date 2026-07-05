@@ -158,10 +158,18 @@ class ScannerCore:
         return keys
 
     def get_cloud_asr_proxies(self, config):
+        if not config.get('cloud_asr_proxy_enabled', False):
+            return None
         proxy_url = str(config.get('cloud_asr_proxy') or '').strip()
         if not proxy_url:
             return None
         return {'http': proxy_url, 'https': proxy_url}
+
+    def get_positive_int_config(self, config, key, default):
+        try:
+            return max(1, int(config.get(key, default)))
+        except:
+            return default
 
     def acquire_cloud_asr_slot(self, api_keys, global_limit):
         if not api_keys:
@@ -898,8 +906,10 @@ class ScannerCore:
                 if not config.get('enable_cloud_asr', True):
                     self.log("☁️ 云端 API 已停用，跳过云端识别")
                 else:
-                    upload_timeout = 60
-                    read_timeout = 180 if task['duration'] >= 450 else 120
+                    upload_timeout = self.get_positive_int_config(config, 'cloud_asr_upload_timeout', 20)
+                    read_timeout_key = 'cloud_asr_long_read_timeout' if task['duration'] >= 450 else 'cloud_asr_read_timeout'
+                    read_timeout_default = 180 if task['duration'] >= 450 else 120
+                    read_timeout = self.get_positive_int_config(config, read_timeout_key, read_timeout_default)
                     data = {"model": config.get('api_model'), "language": "zh", "response_format": "json"}
                     api_keys = self.get_cloud_api_keys(config)
                     cloud_global_limit = self.get_cloud_asr_concurrency(config)

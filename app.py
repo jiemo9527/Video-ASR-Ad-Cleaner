@@ -42,7 +42,7 @@ app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///tasks.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
 
-APP_VERSION = os.environ.get('APP_VERSION', 'v20260625')
+APP_VERSION = os.environ.get('APP_VERSION', 'v20260705')
 
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
@@ -163,6 +163,7 @@ def seed_default_keywords():
 def get_final_config(overrides_json=None):
     final_conf = {
         "check_audio": True, "check_subtitles": True, "sanitize_metadata": True, "enable_cloud_asr": True,
+        "cloud_asr_proxy_enabled": False,
         "enable_local_model": False, "detailed_mode": False, "asr_use_flac": False, "audio_double_sample": False,
         "tg_bot_token": "", "tg_chat_id": "",
         "audio_threshold_multi": 600, "audio_threshold_long": 3600,
@@ -171,6 +172,7 @@ def get_final_config(overrides_json=None):
         "api_url": "https://api.siliconflow.cn/v1/audio/transcriptions",
         "api_key": "", "cloud_asr_api_keys": "", "cloud_asr_proxy": "",
         "api_model": "FunAudioLLM/SenseVoiceSmall", "cloud_asr_max_duration": 60, "cloud_asr_concurrency": 3,
+        "cloud_asr_upload_timeout": 20, "cloud_asr_read_timeout": 120, "cloud_asr_long_read_timeout": 180,
         "scan_path": "/root/downloads", "rclone_remote": "s25", "api_token": "8pUoqOTHhEAhRnacl3c19",
         "notify_upload_success": False, "notify_errors": True,
         "concurrency_detect": 2, "concurrency_upload": 9, "detect_retry_limit": 3,
@@ -180,11 +182,11 @@ def get_final_config(overrides_json=None):
     for k, v in db_configs.items():
         if k == "download_proxy":
             continue
-        if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample",
+        if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "cloud_asr_proxy_enabled", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample",
                  "notify_upload_success", "notify_errors"]:
             final_conf[k] = (str(v).lower() == 'true')
         elif k in ["audio_threshold_multi", "audio_threshold_long", "audio_len_head", "audio_len_mid", "audio_len_tail",
-                   "audio_len_tail_long", "audio_segment_len", "audio_max_segments", "cloud_asr_max_duration", "cloud_asr_concurrency", "concurrency_detect", "concurrency_upload", "detect_retry_limit",
+                   "audio_len_tail_long", "audio_segment_len", "audio_max_segments", "cloud_asr_max_duration", "cloud_asr_concurrency", "cloud_asr_upload_timeout", "cloud_asr_read_timeout", "cloud_asr_long_read_timeout", "concurrency_detect", "concurrency_upload", "detect_retry_limit",
                    "local_model_concurrency"]:
             try:
                 final_conf[k] = int(v)
@@ -1303,7 +1305,7 @@ def settings():
         data = dict(request.json or {})
         normalize_cloud_api_key_config(data)
         for k, v in data.items():
-            if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample",
+            if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "cloud_asr_proxy_enabled", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample",
                      "notify_upload_success", "notify_errors"]:
                 val = "true" if (v is True or str(v).lower() == 'true') else "false"
             else:

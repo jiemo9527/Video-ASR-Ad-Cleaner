@@ -29,7 +29,20 @@ The current app version is defined in `app.py` as `APP_VERSION` and displayed on
 - `install/install.sh`: Existing install/uninstall helper.
 - `requirements.txt`: Python dependencies.
 
-No Docker packaging is tracked in this repository. Do not add Docker packaging unless explicitly requested.
+Docker packaging is now tracked because the user requested DockerHub image publishing.
+
+Docker image:
+
+```text
+wanxve0000/video-asr-ad-cleaner
+```
+
+Typical DockerHub tags:
+
+- `YYYYMMDD`, for example `20260705`.
+- `latest` for the newest published build.
+
+Build and push should run on a host with Docker and DockerHub login, currently netcup is available for this.
 
 ## Runtime Architecture
 
@@ -79,7 +92,11 @@ Common settings:
 - `cloud_asr_api_keys`: newline-separated cloud ASR API key pool. The settings page edits it as one key per row and keeps `api_key` as the first key for compatibility.
 - `cloud_asr_concurrency`: maximum simultaneous cloud ASR requests in the current Flask process. Default is `3`.
 - `cloud_asr_max_duration`: maximum cloud chunk duration to send to cloud ASR. Default is `60`; longer ASR samples are split into multiple cloud chunks. Set to `0` to disable cloud chunking.
-- `cloud_asr_proxy`: optional proxy URL used only for cloud ASR audio upload requests. Supports `http://user:pass@host:port` and `socks5h://user:pass@host:port` formats when SOCKS support is installed.
+- `cloud_asr_upload_timeout`: cloud ASR audio upload/connect timeout. Default is `20`.
+- `cloud_asr_read_timeout`: cloud ASR normal recognition read timeout. Default is `120`.
+- `cloud_asr_long_read_timeout`: cloud ASR recognition read timeout for samples with duration `>= 450s`. Default is `180`.
+- `cloud_asr_proxy_enabled`: enable the optional proxy for cloud ASR audio upload requests.
+- `cloud_asr_proxy`: optional proxy URL used only for cloud ASR audio upload requests when `cloud_asr_proxy_enabled` is true. Supports `http://user:pass@host:port` and `socks5h://user:pass@host:port` formats when SOCKS support is installed.
 - `scan_path`, `rclone_remote`: local download root and default remote.
 
 Sensitive values include `api_key`, `cloud_asr_proxy`, `tg_bot_token`, `tg_chat_id`, and `api_token`. Do not print or commit real secrets.
@@ -157,14 +174,14 @@ Segment planning:
 
 Cloud timeout policy:
 
-- Upload/connect timeout: `60s`.
-- Read timeout: `120s` by default.
-- Read timeout: `180s` when the current audio segment duration is `>= 450s`.
+- Upload/connect timeout: `cloud_asr_upload_timeout`, default `20s`.
+- Read timeout: `cloud_asr_read_timeout`, default `120s`.
+- Long-sample read timeout: `cloud_asr_long_read_timeout`, default `180s`, used when the current audio segment duration is `>= 450s`.
 
 The log includes the timeout value:
 
 ```text
-☁️ 云端识别中... (timeout=上传60s/识别120s)
+☁️ 云端识别中... (timeout=上传20s/识别120s)
 ```
 
 Cloud failure policy:
@@ -380,6 +397,14 @@ git push origin main
 ```
 
 ## Deployment Notes
+
+DockerHub release build on netcup:
+
+```powershell
+ssh netcup 'rm -rf /tmp/video-asr-docker-build && git clone --depth 1 https://github.com/jiemo9527/Video-ASR-Ad-Cleaner.git /tmp/video-asr-docker-build && cd /tmp/video-asr-docker-build && docker build -t wanxve0000/video-asr-ad-cleaner:YYYYMMDD -t wanxve0000/video-asr-ad-cleaner:latest . && docker push wanxve0000/video-asr-ad-cleaner:YYYYMMDD && docker push wanxve0000/video-asr-ad-cleaner:latest'
+```
+
+Do not print DockerHub credentials. Verify DockerHub login by checking only configured registry host names, not auth values.
 
 Known SSH hosts used for this project:
 
