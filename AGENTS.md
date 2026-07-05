@@ -29,21 +29,6 @@ The current app version is defined in `app.py` as `APP_VERSION` and displayed on
 - `install/install.sh`: Existing install/uninstall helper.
 - `requirements.txt`: Python dependencies.
 
-Docker packaging is now tracked because the user requested DockerHub image publishing.
-
-Docker image:
-
-```text
-wanxve0000/video-asr-ad-cleaner
-```
-
-Typical DockerHub tags:
-
-- `YYYYMMDD`, for example `20260705`.
-- `latest` for the newest published build.
-
-Build and push should run on a host with Docker and DockerHub login, currently netcup is available for this.
-
 ## Runtime Architecture
 
 The app starts from `app.py` and launches two worker pools:
@@ -397,14 +382,6 @@ git push origin main
 ```
 
 ## Deployment Notes
-
-DockerHub release build on netcup:
-
-```powershell
-ssh netcup 'rm -rf /tmp/video-asr-docker-build && git clone --depth 1 https://github.com/jiemo9527/Video-ASR-Ad-Cleaner.git /tmp/video-asr-docker-build && cd /tmp/video-asr-docker-build && docker build -t wanxve0000/video-asr-ad-cleaner:YYYYMMDD -t wanxve0000/video-asr-ad-cleaner:latest . && docker push wanxve0000/video-asr-ad-cleaner:YYYYMMDD && docker push wanxve0000/video-asr-ad-cleaner:latest'
-```
-
-Do not print DockerHub credentials. Verify DockerHub login by checking only configured registry host names, not auth values.
 
 Known SSH hosts used for this project:
 
