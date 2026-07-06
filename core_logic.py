@@ -85,6 +85,7 @@ def sensevoice_gguf_ready(base_dir=None):
 
 class ScannerCore:
     CLOUD_ASR_CHUNK_OVERLAP = 2.0
+    RUNTIME_CLOUD_ASR_CONFIG_KEYS = ('cloud_asr_proxy_enabled', 'cloud_asr_proxy')
     _cloud_asr_cond = threading.Condition()
     _cloud_asr_active_total = 0
     _cloud_asr_active_by_key = {}
@@ -95,12 +96,13 @@ class ScannerCore:
     _cloud_asr_session_active = {}
 
     def __init__(self, logger_callback=None, progress_callback=None, task_id=None, root_dir_name="downloads",
-                 rclone_remote="s25"):
+                 rclone_remote="s25", config_refresh_callback=None):
         self.log_cb = logger_callback if logger_callback else print
         self.prog_cb = progress_callback if progress_callback else lambda p, s, e: None
         self.task_id = task_id
         self.root_dir_name = root_dir_name
         self.rclone_remote = rclone_remote
+        self.config_refresh_callback = config_refresh_callback
         self.current_proc = None
         self._stopped = False
         self.cloud_asr_session_token = None
@@ -189,6 +191,19 @@ class ScannerCore:
         if not proxy_url:
             return None
         return {'http': proxy_url, 'https': proxy_url}
+
+    def get_runtime_cloud_asr_config(self, config):
+        runtime_config = dict(config or {})
+        if not self.config_refresh_callback:
+            return runtime_config
+        try:
+            updates = self.config_refresh_callback() or {}
+            for key in type(self).RUNTIME_CLOUD_ASR_CONFIG_KEYS:
+                if key in updates:
+                    runtime_config[key] = updates[key]
+        except Exception as e:
+            self.log(f"⚠️ 刷新云端代理设置失败，沿用任务启动时配置: {e}")
+        return runtime_config
 
     def get_positive_int_config(self, config, key, default):
         try:
@@ -1006,12 +1021,11 @@ class ScannerCore:
                 data = {"model": config.get('api_model'), "language": "zh", "response_format": "json"}
                 api_keys = self.get_cloud_api_keys(config)
                 cloud_global_limit = self.get_cloud_asr_concurrency(config)
-                cloud_proxies = self.get_cloud_asr_proxies(config)
-                if cloud_proxies:
-                    self.log("☁️ 云端音频上传代理已启用")
 
                 def submit_cloud_audio(source_audio, label=None, log_request=True):
                     nonlocal cloud_audio
+                    runtime_config = self.get_runtime_cloud_asr_config(config)
+                    cloud_proxies = self.get_cloud_asr_proxies(runtime_config)
                     cloud_audio, cloud_mime = self.prepare_cloud_audio(source_audio, config.get('asr_use_flac'), quiet=not log_request)
                     if not cloud_audio:
                         raise RuntimeError("ASR 音频无有效时长")
@@ -1021,6 +1035,8 @@ class ScannerCore:
                     source_type = 'FLAC' if cloud_mime else 'WAV'
                     label_text = f" [{label}]" if label else ""
                     if log_request:
+                        if cloud_proxies:
+                            self.log("☁️ 云端音频上传代理已启用")
                         self.log(f"☁️ 云端识别中{label_text}... (source={source_type}, timeout=上传{upload_timeout}s/识别{read_timeout}s, size={cloud_size / 1048576:.1f}MB)")
                     api_key = self.acquire_cloud_asr_slot(api_keys, cloud_global_limit)
                     if not api_key:
@@ -1226,7 +1242,8 @@ class ScannerCore:
 
         def run_child(task):
             child = ScannerCore(logger_callback=lambda msg: log_queue.put(msg), task_id=self.task_id,
-                                root_dir_name=self.root_dir_name, rclone_remote=self.rclone_remote)
+                                root_dir_name=self.root_dir_name, rclone_remote=self.rclone_remote,
+                                config_refresh_callback=self.config_refresh_callback)
             child.prog_cb = lambda p, s, e: None
             child.cloud_asr_session_token = self.cloud_asr_session_token
             child.local_inference_session_token = self.local_inference_session_token

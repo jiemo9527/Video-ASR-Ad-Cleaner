@@ -245,6 +245,14 @@ def get_final_config(overrides_json=None):
     return final_conf
 
 
+def get_runtime_cloud_asr_config(overrides_json=None):
+    conf = get_final_config(overrides_json)
+    return {
+        'cloud_asr_proxy_enabled': conf.get('cloud_asr_proxy_enabled', False),
+        'cloud_asr_proxy': conf.get('cloud_asr_proxy', '')
+    }
+
+
 def normalize_cloud_api_key_config(data):
     if 'cloud_asr_api_keys' not in data and 'api_key' not in data:
         return data
@@ -463,6 +471,11 @@ def detection_worker():
                 scan_path = final_settings.get('scan_path', '/root/downloads')
                 rclone_remote = final_settings.get('rclone_remote', 's25')
                 current_root_name = os.path.basename(scan_path.rstrip('/'))
+                runtime_overrides_json = task.overrides
+
+                def refresh_cloud_config():
+                    with app.app_context():
+                        return get_runtime_cloud_asr_config(runtime_overrides_json)
 
                 audio_kws = [k.content for k in Keyword.query.filter_by(type='audio', enabled=True).all()]
                 sub_kws = [k.content for k in Keyword.query.filter_by(type='subtitle', enabled=True).all()]
@@ -603,7 +616,7 @@ def detection_worker():
                         print(f"⚠️ 更新检测文件路径失败[{task_id}]: {e}")
 
                 core = ScannerCore(logger_callback=db_logger, task_id=task_id, root_dir_name=current_root_name,
-                                   rclone_remote=rclone_remote)
+                                   rclone_remote=rclone_remote, config_refresh_callback=refresh_cloud_config)
                 core.prog_cb = detect_prog
                 with task_state_lock:
                     running_tasks[task_id] = core

@@ -83,6 +83,7 @@ Common settings:
 - `cloud_asr_long_read_timeout`: cloud ASR recognition read timeout for samples with duration `>= 450s`. Default is `180`.
 - `cloud_asr_proxy_enabled`: enable the optional proxy for cloud ASR audio upload requests.
 - `cloud_asr_proxy`: optional proxy URL used only for cloud ASR audio upload requests when `cloud_asr_proxy_enabled` is true. Supports `http://user:pass@host:port` and `socks5h://user:pass@host:port` formats when SOCKS support is installed.
+- Cloud ASR proxy changes do not require a service restart. New tasks use the saved setting immediately, and running audio tasks refresh only the proxy fields before each cloud upload request. A request that is already in flight keeps the proxy it started with.
 - `scan_path`, `rclone_remote`: local download root and default remote.
 
 Sensitive values include `api_key`, `cloud_asr_proxy`, `tg_bot_token`, `tg_chat_id`, and `api_token`. Do not print or commit real secrets.
