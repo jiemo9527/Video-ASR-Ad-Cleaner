@@ -80,7 +80,6 @@ def sensevoice_gguf_ready(base_dir=None):
     return True
 
 class ScannerCore:
-    CLOUD_ASR_KEY_CONCURRENCY = 2
     CLOUD_ASR_CHUNK_OVERLAP = 2.0
     _cloud_asr_cond = threading.Condition()
     _cloud_asr_active_total = 0
@@ -227,7 +226,6 @@ class ScannerCore:
         if not api_keys:
             raise RuntimeError("云端 API Key 未配置")
         cls = type(self)
-        per_key_limit = cls.CLOUD_ASR_KEY_CONCURRENCY
         session_token = getattr(self, 'cloud_asr_session_token', None)
         waited = False
         counted_wait = False
@@ -239,23 +237,21 @@ class ScannerCore:
                 while not self._stopped:
                     has_priority = cls._cloud_asr_session_has_priority(session_token)
                     if has_priority and cls._cloud_asr_active_total < global_limit:
-                        for offset in range(len(api_keys)):
-                            idx = (cls._cloud_asr_next_key + offset) % len(api_keys)
-                            key = api_keys[idx]
-                            if cls._cloud_asr_active_by_key.get(key, 0) < per_key_limit:
-                                cls._cloud_asr_next_key = (idx + 1) % len(api_keys)
-                                cls._cloud_asr_active_total += 1
-                                cls._cloud_asr_active_by_key[key] = cls._cloud_asr_active_by_key.get(key, 0) + 1
-                                if counted_wait:
-                                    cls._cloud_asr_session_waiting[session_token] = max(0, cls._cloud_asr_session_waiting.get(session_token, 0) - 1)
-                                    cls._cloud_asr_session_active[session_token] = cls._cloud_asr_session_active.get(session_token, 0) + 1
-                                    counted_wait = False
-                                return key
+                        idx = cls._cloud_asr_next_key % len(api_keys)
+                        key = api_keys[idx]
+                        cls._cloud_asr_next_key = (idx + 1) % len(api_keys)
+                        cls._cloud_asr_active_total += 1
+                        cls._cloud_asr_active_by_key[key] = cls._cloud_asr_active_by_key.get(key, 0) + 1
+                        if counted_wait:
+                            cls._cloud_asr_session_waiting[session_token] = max(0, cls._cloud_asr_session_waiting.get(session_token, 0) - 1)
+                            cls._cloud_asr_session_active[session_token] = cls._cloud_asr_session_active.get(session_token, 0) + 1
+                            counted_wait = False
+                        return key
                     if not waited:
                         if has_priority:
-                            self.log(f"⏳ 等待云端模型并发槽... (全局上限 {global_limit}, Key数 {len(api_keys)}, 单Key上限 {per_key_limit})")
+                            self.log(f"⏳ 等待云端模型并发槽... (全局上限 {global_limit}, Key数 {len(api_keys)})")
                         else:
-                            self.log(f"⏳ 等待前序音频任务释放云端槽... (全局上限 {global_limit}, Key数 {len(api_keys)}, 单Key上限 {per_key_limit})")
+                            self.log(f"⏳ 等待前序音频任务释放云端槽... (全局上限 {global_limit}, Key数 {len(api_keys)})")
                         waited = True
                     cls._cloud_asr_cond.wait(timeout=1)
             finally:

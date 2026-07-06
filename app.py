@@ -47,7 +47,32 @@ APP_VERSION = os.environ.get('APP_VERSION', 'v20260705')
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 
-detect_queue = queue.Queue()
+
+class FrontQueue(queue.Queue):
+    def put_front(self, item, block=True, timeout=None):
+        with self.not_full:
+            if self.maxsize > 0:
+                if not block:
+                    if self._qsize() >= self.maxsize:
+                        raise queue.Full
+                elif timeout is None:
+                    while self._qsize() >= self.maxsize:
+                        self.not_full.wait()
+                elif timeout < 0:
+                    raise ValueError("'timeout' must be a non-negative number")
+                else:
+                    endtime = time.time() + timeout
+                    while self._qsize() >= self.maxsize:
+                        remaining = endtime - time.time()
+                        if remaining <= 0.0:
+                            raise queue.Full
+                        self.not_full.wait(remaining)
+            self.queue.appendleft(item)
+            self.unfinished_tasks += 1
+            self.not_empty.notify()
+
+
+detect_queue = FrontQueue()
 upload_queue = queue.Queue()
 running_tasks = {}
 active_detect_tasks = set()
@@ -57,6 +82,13 @@ download_proc = None;
 download_logs = [];
 download_lock = threading.Lock()
 LOGIN_ATTEMPTS = {}
+
+
+def enqueue_detect_task(task_id, priority=False):
+    if priority:
+        detect_queue.put_front(task_id)
+    else:
+        detect_queue.put(task_id)
 
 
 def claim_task_stage(task_id, stage):
@@ -405,7 +437,7 @@ def detection_worker():
                     release_task_stage(task_id, 'detect')
                     detect_queue.task_done()
                     time.sleep(1)
-                    detect_queue.put(task_id)
+                    enqueue_detect_task(task_id, priority=True)
                     print(f"⚠️ 检测启动状态保存失败，已重新入队: {task_id}")
                     continue
 
@@ -588,7 +620,7 @@ def detection_worker():
                             task.status = 'pending'
                             db_logger(f"⚠️ 云端异常/超时 -> 重新排队 (尝试 {task.retry_count}/{RETRY_LIMIT})")
                             if safe_db_commit(f"detect retry {task_id}"):
-                                detect_queue.put(task_id)
+                                enqueue_detect_task(task_id, priority=True)
                         else:
                             task.status = 'error';
                             task.finished_at = datetime.now();
@@ -606,7 +638,7 @@ def detection_worker():
                         task.status = 'pending'
                         db_logger(f"⚠️ 异常 -> 重新排队 (尝试 {task.retry_count}/{RETRY_LIMIT})\nErr: {str(e)}")
                         if safe_db_commit(f"detect exception retry {task_id}"):
-                            detect_queue.put(task_id)
+                            enqueue_detect_task(task_id, priority=True)
                     else:
                         task.status = 'error';
                         task.finished_at = datetime.now();
@@ -1170,7 +1202,7 @@ def batch_tasks():
                 count += 1
 
     db.session.commit()
-    for i in detect_ids: detect_queue.put(i)
+    for i in reversed(detect_ids): enqueue_detect_task(i, priority=True)
     for i in upload_ids: upload_queue.put(i)
 
     return jsonify({"code": 200, "msg": f"操作了 {count} 个任务"})
@@ -1214,7 +1246,7 @@ def retry(tid):
     else:
         t.status = 'pending';
         db.session.commit();
-        detect_queue.put(t.id)
+        enqueue_detect_task(t.id, priority=True)
     return jsonify({"code": 200})
 
 
@@ -1248,7 +1280,7 @@ def double_sample_task(tid):
     t.finished_at = None
     t.retry_count = 0
     db.session.commit()
-    detect_queue.put(t.id)
+    enqueue_detect_task(t.id, priority=True)
     return jsonify({"code": 200})
 
 
@@ -1258,8 +1290,8 @@ def save_and_retry(tid):
     t = Task.query.get(tid);
     if t:
         replace_public_task_overrides(t, request.json or {})
-        t.status = 'pending'; t.log += "\n=== 调整重试 ===\n"; t.finished_at = None; t.retry_count = 0; db.session.commit(); detect_queue.put(
-            t.id)
+        t.status = 'pending'; t.log += "\n=== 调整重试 ===\n"; t.finished_at = None; t.retry_count = 0; db.session.commit(); enqueue_detect_task(
+            t.id, priority=True)
     return jsonify({"code": 200})
 
 

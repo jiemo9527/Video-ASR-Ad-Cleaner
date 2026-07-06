@@ -35,6 +35,7 @@ The app starts from `app.py` and launches two worker pools:
 
 - Detection workers consume `detect_queue`.
 - Upload workers consume `upload_queue`.
+- Detection retries are priority requeues: automatic detection retry, manual detect retry, dynamic-sample retry, and save-and-retry go to the front of `detect_queue`. New `/api/trigger` tasks still go to the back. This ensures a task that already started detection gets retried before never-started tasks.
 
 Task lifecycle:
 
@@ -180,7 +181,7 @@ The log includes the timeout value:
 
 Cloud failure policy:
 
-- Cloud ASR requests are gated by a process-local limiter. `cloud_asr_concurrency` defaults to `3`; each API key is hard-limited to `2` simultaneous requests. Requests choose keys from `cloud_asr_api_keys` round-robin, falling back to legacy `api_key` when the key pool is empty.
+- Cloud ASR requests are gated by a process-local global limiter. `cloud_asr_concurrency` defaults to `3`. There is no per-key concurrency cap; requests choose keys from `cloud_asr_api_keys` round-robin, falling back to legacy `api_key` when the key pool is empty.
 - Historical SiliconFlow behavior on netcup: real speech FLAC segments above `60s` once returned empty-body `500`, while `60s` returned `200`. A later direct endpoint test on 2026-07-06 showed `61s`, `90s`, `120s`, and `180s` real samples all returned `200`; keep chunking as a stability fallback unless deliberately retuning.
 - `cloud_asr_max_duration` defaults to `60`. Longer ASR samples are split into overlapping cloud chunks of at most this duration; the current overlap is `2s`, implemented by moving the next chunk start earlier, not by exceeding the max chunk duration. Chinese logs should use `云端切块识别`, `块`, and `每块≤60s`. The sample passes cloud detection only after every chunk succeeds and no chunk hits an audio keyword.
 - `detect_retry_limit` is the number of automatic retries after the first attempt, not total attempts. For example, `detect_retry_limit = 1` means two total attempts and logs should show `第1/2次` then `第2/2次`.
