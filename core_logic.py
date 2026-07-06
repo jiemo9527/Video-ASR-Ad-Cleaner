@@ -36,6 +36,10 @@ except ImportError:
 # ================= ⚙️ 核心配置区域 =================
 local_inference_condition = threading.Condition()
 local_inference_active = 0
+local_inference_session_seq = 0
+local_inference_session_order = {}
+local_inference_session_waiting = {}
+local_inference_session_active = {}
 
 BASE_DIR = os.getcwd()
 MODELS_ROOT = os.path.join(BASE_DIR, "models")
@@ -100,6 +104,7 @@ class ScannerCore:
         self.current_proc = None
         self._stopped = False
         self.cloud_asr_session_token = None
+        self.local_inference_session_token = None
         self._child_lock = threading.Lock()
         self._child_cores = set()
         try:
@@ -766,24 +771,69 @@ class ScannerCore:
 
     def get_local_model_concurrency(self, config):
         try:
-            return max(1, min(8, int(config.get('local_model_concurrency', 1))))
+            return max(1, min(8, int(config.get('local_model_concurrency', 2))))
         except:
-            return 1
+            return 2
+
+    def begin_local_inference_session(self):
+        global local_inference_session_seq
+        token = f"{self.task_id or 'task'}-{id(self)}-{time.time()}"
+        with local_inference_condition:
+            local_inference_session_seq += 1
+            local_inference_session_order[token] = local_inference_session_seq
+            local_inference_session_waiting[token] = 0
+            local_inference_session_active[token] = 0
+            local_inference_condition.notify_all()
+        return token
+
+    def end_local_inference_session(self, token):
+        if not token:
+            return
+        with local_inference_condition:
+            local_inference_session_order.pop(token, None)
+            local_inference_session_waiting.pop(token, None)
+            local_inference_session_active.pop(token, None)
+            local_inference_condition.notify_all()
+
+    def local_inference_session_has_priority(self, token):
+        if not token or token not in local_inference_session_order:
+            return True
+        own_order = local_inference_session_order[token]
+        for other_token, order in local_inference_session_order.items():
+            if other_token != token and order < own_order and local_inference_session_waiting.get(other_token, 0) > 0:
+                return False
+        return True
 
     def acquire_local_inference_slot(self, limit):
         global local_inference_active
+        session_token = getattr(self, 'local_inference_session_token', None)
+        counted_wait = False
         with local_inference_condition:
-            while local_inference_active >= limit:
-                if self._stopped:
-                    return 0
-                local_inference_condition.wait(timeout=1)
-            local_inference_active += 1
-            return local_inference_active
+            if session_token in local_inference_session_order:
+                local_inference_session_waiting[session_token] = local_inference_session_waiting.get(session_token, 0) + 1
+                counted_wait = True
+            try:
+                while local_inference_active >= limit or not self.local_inference_session_has_priority(session_token):
+                    if self._stopped:
+                        return 0
+                    local_inference_condition.wait(timeout=1)
+                local_inference_active += 1
+                if counted_wait:
+                    local_inference_session_waiting[session_token] = max(0, local_inference_session_waiting.get(session_token, 0) - 1)
+                    local_inference_session_active[session_token] = local_inference_session_active.get(session_token, 0) + 1
+                    counted_wait = False
+                return local_inference_active
+            finally:
+                if counted_wait:
+                    local_inference_session_waiting[session_token] = max(0, local_inference_session_waiting.get(session_token, 0) - 1)
 
     def release_local_inference_slot(self):
         global local_inference_active
+        session_token = getattr(self, 'local_inference_session_token', None)
         with local_inference_condition:
             local_inference_active = max(0, local_inference_active - 1)
+            if session_token in local_inference_session_active:
+                local_inference_session_active[session_token] = max(0, local_inference_session_active.get(session_token, 0) - 1)
             local_inference_condition.notify_all()
             return local_inference_active
 
@@ -1138,16 +1188,25 @@ class ScannerCore:
         def mark_passed(seg_name):
             nonlocal completed
             if checkpoint_cb:
-                checkpoint_cb(seg_name)
+                checkpoint_cb(seg_name, 'passed')
             completed += 1
             self.log(f"🚦 音频段绿灯: {seg_name} ({completed}/{total_segments})")
             self.prog_cb(progress_pct(completed), "检测进行中", "")
+
+        def mark_failed(seg_name, reason):
+            if checkpoint_cb:
+                checkpoint_cb(seg_name, 'failed', reason)
+            self.log(f"🟥 音频段红灯: {seg_name} -> {reason}")
 
         if worker_limit <= 1:
             for _, task in pending:
                 if self._stopped:
                     return False, None
-                result = self.scan_one_audio_task(file_path, task_id, audio_map, audio_keywords, enable_local, config, task)
+                try:
+                    result = self.scan_one_audio_task(file_path, task_id, audio_map, audio_keywords, enable_local, config, task)
+                except Exception as e:
+                    mark_failed(task['name'], str(e))
+                    raise
                 if result.get('status') == 'cancelled':
                     return False, None
                 if result.get('status') == 'dirty':
@@ -1170,6 +1229,7 @@ class ScannerCore:
                                 root_dir_name=self.root_dir_name, rclone_remote=self.rclone_remote)
             child.prog_cb = lambda p, s, e: None
             child.cloud_asr_session_token = self.cloud_asr_session_token
+            child.local_inference_session_token = self.local_inference_session_token
             self._register_child_core(child)
             try:
                 if self._stopped:
@@ -1205,6 +1265,7 @@ class ScannerCore:
                         result = future.result()
                     except Exception as e:
                         first_error = first_error or e
+                        mark_failed(task['name'], str(e))
                         self.log(f"⚠️ 音频段失败: {task['name']} -> {e}")
                         continue
 
@@ -1270,11 +1331,17 @@ class ScannerCore:
             return False, None
 
         session_token = None
+        local_session_token = None
         previous_token = self.cloud_asr_session_token
+        previous_local_token = self.local_inference_session_token
         if config.get('enable_cloud_asr', True):
             session_token = self.begin_cloud_asr_session()
             self.cloud_asr_session_token = session_token
             self.log(f"🎧 云端音频优先会话已建立: {len(pending)}段待测；先进入音频检测的任务优先使用 API 槽")
+        if enable_local:
+            local_session_token = self.begin_local_inference_session()
+            self.local_inference_session_token = local_session_token
+            self.log(f"🎧 本地模型优先会话已建立: {len(pending)}段待测；先进入音频检测的任务优先使用本地槽")
         try:
             return self.run_audio_pending_tasks(
                 file_path, task_id, audio_map, audio_keywords, enable_local, config,
@@ -1283,7 +1350,10 @@ class ScannerCore:
         finally:
             if session_token:
                 self.end_cloud_asr_session(session_token)
+            if local_session_token:
+                self.end_local_inference_session(local_session_token)
             self.cloud_asr_session_token = previous_token
+            self.local_inference_session_token = previous_local_token
 
     def process_file(self, file_path, config, keywords_config, passed_segments=None, checkpoint_cb=None,
                      rename_cb=None):

@@ -208,7 +208,7 @@ def get_final_config(overrides_json=None):
         "scan_path": "/root/downloads", "rclone_remote": "s25", "api_token": "8pUoqOTHhEAhRnacl3c19",
         "notify_upload_success": False, "notify_errors": True,
         "concurrency_detect": 2, "concurrency_upload": 9, "detect_retry_limit": 3,
-        "local_model_concurrency": 1
+        "local_model_concurrency": 2
     }
     db_configs = {c.key: c.value for c in Config.query.all()}
     for k, v in db_configs.items():
@@ -503,13 +503,21 @@ def detection_worker():
                         task_overrides = update_task_overrides(
                             task,
                             {'_current_item': current_process_path, '_dir_stage': 'detect'},
-                            remove_keys=['_passed', '_passed_file']
+                            remove_keys=['_passed', '_passed_file', '_audio_segments', '_audio_segments_file']
                         )
                         safe_db_commit(f"detect dir current {task_id}")
                     if task_overrides.get('_passed_file') == current_process_path:
                         passed_segments = task_overrides.get('_passed', [])
+                    if task_overrides.get('_audio_segments_file') == current_process_path:
+                        states = task_overrides.get('_audio_segments', {})
+                        if isinstance(states, dict):
+                            passed_segments = sorted(set(passed_segments) | {name for name, state in states.items() if isinstance(state, dict) and state.get('status') == 'passed'})
                 else:
                     passed_segments = task_overrides.get('_passed', [])
+                    if task_overrides.get('_audio_segments_file') == current_process_path:
+                        states = task_overrides.get('_audio_segments', {})
+                        if isinstance(states, dict):
+                            passed_segments = sorted(set(passed_segments) | {name for name, state in states.items() if isinstance(state, dict) and state.get('status') == 'passed'})
 
                 def detect_prog(pct, msg, _):
                     try:
@@ -528,20 +536,40 @@ def detection_worker():
                         safe_db_rollback(f"detect progress {task_id}")
                         print(f"⚠️ 更新检测进度失败[{task_id}]: {e}")
 
-                def save_checkpoint(seg_name):
+                def save_checkpoint(seg_name, status='passed', reason=None):
                     try:
                         t = Task.query.get(task_id)
                         if not t:
                             return
                         ov = get_task_overrides(t)
                         current_item = ov.get('_current_item') if dir_task else current_process_path
+                        if ov.get('_audio_segments_file') != current_item:
+                            ov['_audio_segments'] = {}
+                        states = ov.get('_audio_segments', {})
+                        if not isinstance(states, dict):
+                            states = {}
+                        states[seg_name] = {
+                            'status': status,
+                            'reason': str(reason or ''),
+                            'updated_at': datetime.now().strftime('%m-%d %H:%M:%S')
+                        }
+                        ov['_audio_segments'] = states
+                        ov['_audio_segments_file'] = current_item
                         passed = ov.get('_passed', [])
-                        if seg_name not in passed:
+                        if not isinstance(passed, list):
+                            passed = []
+                        if status == 'passed' and seg_name not in passed:
                             passed.append(seg_name)
+                        elif status != 'passed' and seg_name in passed:
+                            passed.remove(seg_name)
+                        if passed:
                             ov['_passed'] = passed
                             ov['_passed_file'] = current_item
-                            set_task_overrides(t, ov)
-                            safe_db_commit(f"detect checkpoint {task_id}")
+                        else:
+                            ov.pop('_passed', None)
+                            ov['_passed_file'] = current_item
+                        set_task_overrides(t, ov)
+                        safe_db_commit(f"detect checkpoint {task_id}")
                     except Exception as e:
                         safe_db_rollback(f"detect checkpoint {task_id}")
                         print(f"⚠️ 保存检测断点失败[{task_id}]: {e}")
@@ -555,11 +583,19 @@ def detection_worker():
                             ov = update_task_overrides(t, {'_current_item': new_path})
                             if ov.get('_passed_file') and ov.get('_passed_file') != new_path:
                                 ov['_passed_file'] = new_path
-                                set_task_overrides(t, ov)
+                            if ov.get('_audio_segments_file') and ov.get('_audio_segments_file') != new_path:
+                                ov['_audio_segments_file'] = new_path
+                            set_task_overrides(t, ov)
                             t.log = (t.log or "") + f"🔄 当前文件已更新为: {os.path.basename(new_path)}\n"
                         elif t.filepath != new_path:
                             t.filepath = new_path
                             t.filename = os.path.basename(new_path)
+                            ov = get_task_overrides(t)
+                            if ov.get('_passed_file') and ov.get('_passed_file') != new_path:
+                                ov['_passed_file'] = new_path
+                            if ov.get('_audio_segments_file') and ov.get('_audio_segments_file') != new_path:
+                                ov['_audio_segments_file'] = new_path
+                            set_task_overrides(t, ov)
                             t.log = (t.log or "") + f"🔄 文件已更新为: {t.filename}\n"
                         safe_db_commit(f"detect filepath {task_id}")
                     except Exception as e:
@@ -588,7 +624,7 @@ def detection_worker():
                         task.status = 'dirty';
                         task.finished_at = datetime.now()
                         if dir_task:
-                            update_task_overrides(task, remove_keys=['_passed', '_passed_file'])
+                            update_task_overrides(task, remove_keys=['_passed', '_passed_file', '_audio_segments', '_audio_segments_file'])
                             db_logger(f"🚫 命中文件: {os.path.basename(current_process_path)}")
                         elif os.path.exists(task.filepath):
                             os.remove(task.filepath)
@@ -597,7 +633,7 @@ def detection_worker():
                     elif res['status'] == 'ready_to_upload':
                         if dir_task:
                             current_upload_path = res.get('new_filepath') or get_task_overrides(task).get('_current_item') or current_process_path
-                            update_task_overrides(task, {'_current_item': current_upload_path, '_dir_stage': 'upload'}, remove_keys=['_passed', '_passed_file'])
+                            update_task_overrides(task, {'_current_item': current_upload_path, '_dir_stage': 'upload'}, remove_keys=['_passed', '_passed_file', '_audio_segments', '_audio_segments_file'])
                         elif res.get('new_filepath'):
                             task.filepath = res['new_filepath'];
                             task.filename = os.path.basename(res['new_filepath'])
@@ -696,7 +732,7 @@ def upload_worker():
                     remaining_files = list_directory_task_files(task.filepath)
                     if remaining_files:
                         current_upload_path = remaining_files[0]
-                        update_task_overrides(task, {'_current_item': current_upload_path, '_dir_stage': 'upload'}, remove_keys=['_passed', '_passed_file'])
+                        update_task_overrides(task, {'_current_item': current_upload_path, '_dir_stage': 'upload'}, remove_keys=['_passed', '_passed_file', '_audio_segments', '_audio_segments_file'])
                         safe_db_commit(f"upload dir current {task_id}")
 
                 if dir_task and not current_upload_path:
@@ -758,7 +794,7 @@ def upload_worker():
                                     '_dir_uploaded_count': int(get_task_overrides(task).get('_dir_uploaded_count', 0) or 0) + 1,
                                     '_dir_stage': 'detect'
                                 },
-                                remove_keys=['_current_item', '_passed', '_passed_file']
+                                remove_keys=['_current_item', '_passed', '_passed_file', '_audio_segments', '_audio_segments_file']
                             )
                             total_files = max(1, int(ov.get('_dir_total_files', 1) or 1))
                             uploaded_count = int(ov.get('_dir_uploaded_count', 0) or 0)
@@ -1173,14 +1209,6 @@ def batch_tasks():
                 t.log += "\n=== 批量重试 (检测) ===\n";
                 detect_ids.append(t.id);
                 count += 1
-                if t.overrides:
-                    try:
-                        ov = get_task_overrides(t)
-                        ov.pop('_passed', None)
-                        ov.pop('_passed_file', None)
-                        set_task_overrides(t, ov)
-                    except:
-                        pass
 
             elif action == 'stop' and t.status in ['pending', 'processing']:
                 if t.id in running_tasks: running_tasks[t.id].stop()
@@ -1215,15 +1243,6 @@ def retry(tid):
     if not t: return jsonify({"code": 404})
     payload = request.get_json(silent=True) or {}
     target = payload.get('type')
-
-    if t.overrides:
-        try:
-            ov = get_task_overrides(t)
-            ov.pop('_passed', None)
-            ov.pop('_passed_file', None)
-            set_task_overrides(t, ov)
-        except:
-            pass
 
     ov = get_task_overrides(t)
     if target == 'detect':
@@ -1273,7 +1292,7 @@ def double_sample_task(tid):
     update_task_overrides(
         t,
         {'check_audio': True, 'audio_double_sample': True},
-        remove_keys=['_passed', '_passed_file']
+        remove_keys=['_passed', '_passed_file', '_audio_segments', '_audio_segments_file']
     )
     t.status = 'pending'
     t.log += "\n=== 单任务动态抽样 ===\n"
@@ -1470,6 +1489,44 @@ def update_account():
     return jsonify({"code": 200})
 
 
+SYSTEM_LOG_PREFIX_RE = re.compile(
+    r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:[\.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?\s+\S+\s+\S+(?:\[\d+\])?:\s+(.*)$'
+)
+
+SYSTEM_LOG_HIDE_MARKERS = (
+    '🎚️ 动态抽样开启',
+    '🚦 同任务音频并发',
+    '✂️ 提取音频',
+    '↩️ 音频片尾为空',
+    '☁️ ASR 音频源',
+    '⏳ 等待前序音频任务释放云端槽',
+    '⏳ 等待云端模型并发槽',
+    '♻️ 复用 FLAC 音频',
+)
+
+
+def format_system_log_line(line):
+    line = (line or '').rstrip('\n')
+    match = SYSTEM_LOG_PREFIX_RE.match(line)
+    if match:
+        return f"{match.group(1)} {match.group(2)}"
+    return line
+
+
+def should_hide_system_log_line(line):
+    return any(marker in line for marker in SYSTEM_LOG_HIDE_MARKERS)
+
+
+def format_system_logs(raw_text):
+    lines = []
+    for raw_line in (raw_text or '').splitlines():
+        line = format_system_log_line(raw_line)
+        if not line.strip() or should_hide_system_log_line(line):
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
 @app.route('/api/system_logs', methods=['GET'])
 @login_required
 def get_system_logs():
@@ -1477,7 +1534,8 @@ def get_system_logs():
         r = subprocess.run(
             ['journalctl', '-t', 'arup', '-n', str(request.args.get('lines', 9999)), '--no-pager', '--output',
              'short-iso'], capture_output=True, text=True)
-        return jsonify({"code": 200, "data": r.stdout})
+        raw = str(request.args.get('raw', '')).lower() in ['1', 'true', 'yes']
+        return jsonify({"code": 200, "data": r.stdout if raw else format_system_logs(r.stdout)})
     except Exception as e:
         return jsonify({"code": 500, "msg": str(e)})
 

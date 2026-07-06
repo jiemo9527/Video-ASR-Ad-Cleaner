@@ -67,7 +67,7 @@ Common settings:
 - `sanitize_metadata`: enable metadata cleanup.
 - `enable_cloud_asr`: enable cloud ASR requests. When disabled, audio checks skip cloud requests and go directly to local GGUF ASR if `enable_local_model` is enabled.
 - `enable_local_model`: allow local GGUF model fallback. When cloud ASR is enabled, fallback is only allowed after cloud retries are exhausted. When cloud ASR is disabled, fallback is allowed immediately.
-- `local_model_concurrency`: maximum number of simultaneous local GGUF inference subprocesses. Default is `1`; raising it increases CPU and memory pressure.
+- `local_model_concurrency`: maximum number of simultaneous local GGUF inference subprocesses. Default is `2`; raising it increases CPU and memory pressure.
 - `detailed_mode`: log full recognized text even for successful checks.
 - `concurrency_detect`: detection worker count. Requires restart to take effect.
 - `concurrency_upload`: upload worker count. Requires restart to take effect.
@@ -162,10 +162,11 @@ Segment scheduling:
 
 - Metadata and subtitle checks remain synchronous because they are fast and can rename/remux the file before audio starts.
 - Pending audio segments for the same task run concurrently up to available ASR capacity. With cloud ASR enabled, same-task segment workers are capped by `cloud_asr_concurrency`; with cloud disabled, they are capped by `local_model_concurrency`.
+- Local GGUF slots use the same task-priority semantics as cloud slots: earlier audio tasks with waiting local fallback requests get priority for newly freed local inference slots.
 - Cloud ASR slots are task-prioritized. A task that entered audio detection earlier gets priority for newly freed API slots while it has waiting segment requests; later video tasks only use slots that are not currently needed by earlier audio tasks.
 - Segment completion can be out of order. Each passed segment is checkpointed by name and logged as a green light; the task only succeeds after every planned segment is green.
 - A failed segment should not interrupt other already scheduled segments from the same task. Let siblings finish and checkpoint green segments, then retry the failed segment on the next task retry. Only dirty keyword hits should stop remaining segments immediately.
-- Child segment workers must not write DB logs or checkpoints directly. They queue logs in memory; the parent detection worker flushes logs, saves `_passed`, and updates progress from the Flask app context.
+- Child segment workers must not write DB logs or checkpoints directly. They queue logs in memory; the parent detection worker flushes logs, saves `_passed` and `_audio_segments`, and updates progress from the Flask app context.
 
 Cloud timeout policy:
 
@@ -192,9 +193,9 @@ Cloud failure policy:
 
 Checkpoint behavior:
 
-- Successful segments are stored in task overrides as `_passed`.
-- On retry, already successful segments are skipped.
-- The failing segment is retried.
+- Successful segments are stored in task overrides as `_passed` and `_audio_segments[name].status = passed`.
+- Failed segments are stored as `_audio_segments[name].status = failed` and shown as red audio dots in the dashboard.
+- On retry, already successful segments are skipped; failed or missing segments are retried.
 
 Failed-segment audio cache:
 
@@ -233,11 +234,11 @@ The settings page download button fetches:
 
 Local GGUF concurrency behavior:
 
-- `local_model_concurrency` defaults to `1` and is exposed on the settings page under `模型` -> `本地模型资源` -> `本地模型并发数`.
+- `local_model_concurrency` defaults to `2` and is exposed on the settings page under `模型` -> `本地模型资源` -> `本地模型并发数`.
 - The limiter is process-local. It gates simultaneous GGUF subprocesses inside the current Flask process, not across multiple independent service processes.
-- Logs should show slot accounting, for example `等待本地模型资源槽... (并发上限 1)`, `获得本地模型资源槽 (1/1)`, and `本地 GGUF 推理资源已释放 (运行中 0/1)`.
-- On netcup, recent logs before this setting showed the old single lock worked correctly: multiple tasks waited, but only one task held GGUF inference at a time. After deployment with default `1`, logs showed Task 7127 held `(1/1)` while Task 7128/7129 waited.
-- Raising this above `1` can improve throughput only if CPU and memory headroom exist. Watch `systemctl status scanner` memory and CPU before increasing further.
+- Logs should show slot accounting, for example `等待本地模型资源槽... (并发上限 2)`, `获得本地模型资源槽 (1/2)`, and `本地 GGUF 推理资源已释放 (运行中 0/2)`.
+- On netcup, old logs before this setting showed the old single lock worked correctly: multiple tasks waited, but only one task held GGUF inference at a time. After deployment with default `1`, logs showed Task 7127 held `(1/1)` while Task 7128/7129 waited. The current default is `2`.
+- Raising this above `2` can improve throughput only if CPU and memory headroom exist. Watch `systemctl status scanner` memory and CPU before increasing further.
 
 Important Linux runtime behavior:
 

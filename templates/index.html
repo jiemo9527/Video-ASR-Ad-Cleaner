@@ -205,15 +205,38 @@ Vue.createApp({
         bg(s){ return {'uploaded':'bg-success','dirty':'bg-danger','processing':'bg-primary','pending_upload':'bg-success text-white','uploading':'bg-info text-dark'}[s]||'bg-secondary' },
         fmt(l){ return l?l.replace(/\n/g,'<br>'):'' },
         audioDotCount(t) {
-            if(!t.config || !t.config.audio_double_sample) return 3;
-            const m = String(t.log || '').match(/动态抽样开启:\s*(?:全片|(\d+)段)/);
-            if(m) return m[1] ? Number(m[1]) : 1;
-            return Math.max(1, Math.min(24, Number(t.config.audio_max_segments || 8)));
+            const states = t.config && t.config._audio_segments;
+            let planned = 3;
+            if(!t.config || !t.config.audio_double_sample) planned = 3;
+            else {
+                const m = String(t.log || '').match(/动态抽样开启:\s*(?:全片|(\d+)段)/);
+                planned = m ? (m[1] ? Number(m[1]) : 1) : Math.max(1, Math.min(24, Number(t.config.audio_max_segments || 8)));
+            }
+            if(states && typeof states === 'object') return Math.max(planned, Object.keys(states).length);
+            return planned;
+        },
+        audioSegmentNames(t) {
+            const log = String(t.log || '');
+            const full = log.match(/动态抽样开启:\s*全片/);
+            if(full) return ['01全片'];
+            const ordered = log.match(/动态抽样开启:\s*\d+段[^，]*，顺序\s*([^\n]+)/);
+            if(ordered) return ordered[1].split(/\s*->\s*/).map(x => x.trim()).filter(Boolean);
+            const states = t.config && t.config._audio_segments;
+            return states && typeof states === 'object' ? Object.keys(states).sort() : [];
+        },
+        audioSegmentStatus(t, idx) {
+            const states = t.config && t.config._audio_segments;
+            if(!states || typeof states !== 'object') return null;
+            const names = this.audioSegmentNames(t);
+            const name = names[idx - 1] || Object.keys(states).sort()[idx - 1];
+            const state = name ? states[name] : null;
+            return state && state.status ? state.status : null;
         },
         canDoubleSample(t) { return this.canControl(t) && t.config && !t.config.audio_double_sample },
         getDotClass(type,t,idx) {
             let p=t.progress||0;
             if(type==='audio'&&!t.config.check_audio)return 'dot-off'; if(type==='subtitle'&&!t.config.check_subtitles)return 'dot-off'; if(type==='meta'&&!t.config.sanitize_metadata)return 'dot-off';
+            if(type==='audio'){ const status=this.audioSegmentStatus(t, idx); if(status==='passed')return 'dot-on'; if(status==='failed')return 'dot-dirty'; }
             if(['pending_upload','uploading','uploaded'].includes(t.status))return 'dot-on'; if(t.status==='dirty')return 'dot-dirty';
             if(t.status==='processing'){ if(type==='meta')return p>=10?'dot-on':'dot-processing'; if(type==='subtitle')return p>=30?'dot-on':(p>=10?'dot-processing':'dot-off'); if(type==='audio'){ const count=this.audioDotCount(t); const step=45/count; const start=Math.floor(50+(idx-1)*step); const done=Math.floor(50+idx*step); if(p>=done)return 'dot-on'; if(p>=start)return 'dot-processing'; return 'dot-off' } } return 'dot-off';
         },
