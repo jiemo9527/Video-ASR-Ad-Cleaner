@@ -1053,8 +1053,8 @@ def trigger():
 def get_tasks():
     # UI 需要同时展示“检测队列/上传队列”，并且两边都最多展示 N 条。
     # 这里用与 batch 操作、前端同样的规则来判断任务属于上传还是检测。
-    LIMIT_EACH = 200
-    SCAN_LIMIT = 2000
+    LIMIT_EACH = 9999
+    SCAN_LIMIT = LIMIT_EACH * 2
 
     def _is_upload_task(t: Task) -> bool:
         ov = get_task_overrides(t)
