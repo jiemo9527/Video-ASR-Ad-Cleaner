@@ -267,6 +267,40 @@ def is_directory_task(task, overrides=None):
     return bool(ov.get('_dir_task'))
 
 
+UPLOAD_LOG_MARKERS = (
+    '☁️ 上传:',
+    '=== 批量重传 ===',
+    '=== 直传 ===',
+    '❌ 上传失败',
+    '上传异常',
+    '上传中断',
+    '上传已停止/删除',
+    '✅ 上传成功',
+    '🎉 上传成功',
+    '目录任务上传完成',
+    '文件上传成功',
+)
+
+
+def is_upload_task(task, overrides=None):
+    ov = overrides if overrides is not None else get_task_overrides(task)
+    if task.status in ['pending_upload', 'uploading', 'uploaded']:
+        return True
+    if ov.get('_dir_stage') == 'upload':
+        return True
+    if task.status in ['error', 'cancelled', 'dirty']:
+        if ov.get('direct_upload') is True:
+            return True
+        if task.upload_speed:
+            return True
+        if task.upload_eta and task.upload_eta != '-':
+            return True
+        log = task.log or ''
+        if any(marker in log for marker in UPLOAD_LOG_MARKERS):
+            return True
+    return False
+
+
 def list_directory_task_files(root_path):
     files = []
     if not root_path or not os.path.isdir(root_path):
@@ -371,6 +405,8 @@ def detection_worker():
                     release_task_stage(task_id, 'detect')
                     detect_queue.task_done()
                     time.sleep(1)
+                    detect_queue.put(task_id)
+                    print(f"⚠️ 检测启动状态保存失败，已重新入队: {task_id}")
                     continue
 
                 final_settings = get_final_config(task.overrides)
@@ -612,6 +648,8 @@ def upload_worker():
                     release_task_stage(task_id, 'upload')
                     upload_queue.task_done()
                     time.sleep(1)
+                    upload_queue.put(task_id)
+                    print(f"⚠️ 上传启动状态保存失败，已重新入队: {task_id}")
                     continue
 
                 final_settings = get_final_config(task.overrides)
@@ -1056,33 +1094,12 @@ def get_tasks():
     LIMIT_EACH = 9999
     SCAN_LIMIT = LIMIT_EACH * 2
 
-    def _is_upload_task(t: Task) -> bool:
-        ov = get_task_overrides(t)
-        if t.status in ['pending_upload', 'uploading', 'uploaded']:
-            return True
-        if ov.get('_dir_task'):
-            return ov.get('_dir_stage') == 'upload'
-        if t.status in ['error', 'cancelled', 'dirty']:
-            try:
-                if ov.get('direct_upload') is True:
-                    return True
-            except:
-                pass
-            if t.upload_speed:
-                return True
-            if t.upload_eta and t.upload_eta != '-':
-                return True
-            log = t.log or ''
-            if '☁️ 上传' in log or '=== 批量重传 ===' in log or '=== 直传 ===' in log:
-                return True
-        return False
-
     scan = Task.query.order_by(Task.id.desc()).limit(SCAN_LIMIT).all()
     detect_sel = []
     upload_sel = []
 
     for t in scan:
-        if _is_upload_task(t):
+        if is_upload_task(t):
             if len(upload_sel) < LIMIT_EACH:
                 upload_sel.append(t)
         else:
@@ -1115,9 +1132,7 @@ def batch_tasks():
 
     for t in Task.query.all():
         ov = get_task_overrides(t)
-        is_up = t.status in ['uploading', 'pending_upload', 'uploaded'] or ov.get('_dir_stage') == 'upload' or (
-            not ov.get('_dir_task') and '上传' in (t.log or "")
-        )
+        is_up = is_upload_task(t, ov)
 
         if target == 'detect':
             if action == 'retry' and t.status in ['error', 'cancelled', 'dirty'] and not is_up:
@@ -1166,6 +1181,8 @@ def batch_tasks():
 def retry(tid):
     t = Task.query.get(tid);
     if not t: return jsonify({"code": 404})
+    payload = request.get_json(silent=True) or {}
+    target = payload.get('type')
 
     if t.overrides:
         try:
@@ -1177,7 +1194,16 @@ def retry(tid):
             pass
 
     ov = get_task_overrides(t)
-    is_up = t.status in ['uploading', 'pending_upload'] or ov.get('_dir_stage') == 'upload' or (t.log and '上传' in t.log and not is_directory_task(t, ov))
+    if target == 'detect':
+        is_up = False
+        ov.pop('direct_upload', None)
+        set_task_overrides(t, ov)
+        t.upload_speed = ''
+        t.upload_eta = '-'
+    elif target == 'upload':
+        is_up = True
+    else:
+        is_up = is_upload_task(t, ov)
     t.log += "\n=== 人工重试 ===\n";
     t.finished_at = None;
     t.retry_count = 0

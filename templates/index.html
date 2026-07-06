@@ -177,7 +177,8 @@ Vue.createApp({
                 if(t.config && t.config.direct_upload) return true;
                 if(t.upload_speed || (t.upload_eta && t.upload_eta !== '-')) return true;
                 const log = t.log || '';
-                if(log.includes('☁️ 上传') || log.includes('=== 批量重传 ===') || log.includes('=== 直传 ===')) return true;
+                const markers = ['☁️ 上传:', '=== 批量重传 ===', '=== 直传 ===', '❌ 上传失败', '上传异常', '上传中断', '上传已停止/删除', '✅ 上传成功', '🎉 上传成功', '目录任务上传完成', '文件上传成功'];
+                if(markers.some(m => log.includes(m))) return true;
             }
             return false;
         },
@@ -224,7 +225,7 @@ Vue.createApp({
         showFullLog(t){ this.currentLogTitle=t.filename; this.currentLogContent=t.log; modalLog.show() },
         isRunning(t){ return ['processing','uploading'].includes(t.status) }, isError(t){ return ['error','cancelled','dirty'].includes(t.status) }, canControl(t){ return ['pending','dirty','error','cancelled'].includes(t.status) },
         cancel(id){ axios.post('/api/cancel/'+id).then(()=>{ this.load(); this.showToast('任务已停止','error') }) },
-        retry(id){ axios.post('/api/retry/'+id).then(()=>{ this.load(); this.showToast('重试任务') }) },
+        retry(id){ axios.post('/api/retry/'+id, {type:this.view}).then(()=>{ this.load(); this.showToast('重试任务') }) },
         doubleSample(id){ axios.post(`/api/task/${id}/double_sample`).then(()=>{ this.load(); this.showToast('已切换动态抽样') }).catch(e=>this.showToast(e.response?.data?.msg || '切换失败','error')) },
         directUpload(id){ axios.post(`/api/task/${id}/direct_upload`).then(()=>{ this.load(); this.showToast('切换直传') }) },
         deleteTask(id){ axios.post(`/api/task/${id}/delete`).then(r=>{ this.showToast(r.data.msg); this.load() }) },

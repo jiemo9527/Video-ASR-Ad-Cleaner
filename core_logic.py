@@ -610,10 +610,7 @@ class ScannerCore:
         if not res or res.returncode != 0:
             raise RuntimeError("GGUF 推理命令失败")
         text = self.extract_local_asr_text((res.stdout or '') + "\n" + (res.stderr or ''))
-        text = self.clean_transcription(text)
-        if not text:
-            raise RuntimeError("GGUF 推理无识别文本")
-        return text
+        return self.clean_transcription(text)
 
     def get_retry_attempt_label(self, config):
         try:
@@ -1062,7 +1059,9 @@ class ScannerCore:
                             return True, f"本地拦截: {reason}"
 
                         if config.get('detailed_mode'):
-                            self.log(f"✅ [通过] 本地内容: {text}")
+                            self.log(f"✅ [通过] 本地内容: {text or '<空>'}")
+                        elif not text:
+                            self.log(f"✅ 本地识别无文本，按无关键词通过 ({dur:.1f}s)")
                         else:
                             self.log(f"✅ 本地识别通过 ({dur:.1f}s)")
 
