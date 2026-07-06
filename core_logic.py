@@ -9,6 +9,8 @@ import gc
 import math
 import re
 import threading
+import queue
+import concurrent.futures
 import ctypes  # 🔥 [关键修改1] 必须引入这个库才能操作底层内存
 import tempfile
 from datetime import datetime
@@ -94,6 +96,8 @@ class ScannerCore:
         self.rclone_remote = rclone_remote
         self.current_proc = None
         self._stopped = False
+        self._child_lock = threading.Lock()
+        self._child_cores = set()
         try:
             syslog.openlog("arup", syslog.LOG_PID, syslog.LOG_USER)
         except:
@@ -112,6 +116,18 @@ class ScannerCore:
         self.log("🛑 收到停止指令...")
 
         self._kill_current_proc()
+        with self._child_lock:
+            children = list(self._child_cores)
+        for child in children:
+            child.stop()
+
+    def _register_child_core(self, child):
+        with self._child_lock:
+            self._child_cores.add(child)
+
+    def _unregister_child_core(self, child):
+        with self._child_lock:
+            self._child_cores.discard(child)
 
     def _popen_group_kwargs(self):
         if os.name == 'posix':
@@ -816,16 +832,252 @@ class ScannerCore:
                 if os.path.exists(output): os.remove(output)
         return None
 
-    def scan_audio_cloud_fallback_local(self, file_path, duration, task_id, audio_map, audio_keywords, enable_local,
-                                        config, passed_segments=None, checkpoint_cb=None):
-        tasks = self.build_audio_scan_tasks(duration, config)
-        segment_len = self.get_audio_segment_len(config)
-        max_segments = self.get_audio_max_segments(config)
+    def scan_one_audio_task(self, file_path, task_id, audio_map, audio_keywords, enable_local, config, task):
         try:
             CLOUD_MAX_DURATION = max(0, int(config.get('cloud_asr_max_duration', 60)))
         except:
             CLOUD_MAX_DURATION = 60
 
+        if self._stopped:
+            return {"status": "cancelled"}
+
+        temp_audio, temp_meta = self.get_audio_cache_paths(task_id, task['name'])
+        min_audio_duration = min(5.0, max(1.0, float(task['duration']) * 0.05))
+        extract_tasks = [task]
+        if '片尾' in str(task['name']) and task['start'] > 0:
+            fallback_start = max(0, task['start'] - task['duration'])
+            if fallback_start < task['start']:
+                fallback_task = dict(task)
+                fallback_task['start'] = fallback_start
+                extract_tasks.append(fallback_task)
+
+        cache_meta = None
+        reused = False
+        for cache_idx, cache_task in enumerate(extract_tasks):
+            candidate_meta = self.get_audio_cache_meta(file_path, cache_task, audio_map)
+            if self.can_reuse_audio_cache(temp_audio, temp_meta, candidate_meta, min_duration=min_audio_duration):
+                cache_meta = candidate_meta
+                reused = True
+                if cache_idx > 0:
+                    self.log(f"♻️ 复用回退音频 [{task['name']}]: {os.path.basename(temp_audio)}")
+                else:
+                    self.log(f"♻️ 复用音频 [{task['name']}]: {os.path.basename(temp_audio)}")
+                break
+
+        if not reused:
+            cache_meta = self.get_audio_cache_meta(file_path, task, audio_map)
+            self.remove_audio_cache(temp_audio, temp_meta, self.get_cloud_flac_path(temp_audio))
+
+            extracted = False
+            for extract_idx, extract_task in enumerate(extract_tasks):
+                if extract_idx > 0:
+                    self.remove_audio_cache(temp_audio, self.get_cloud_flac_path(temp_audio))
+                    self.log(f"↩️ 音频片尾为空，向前重试: {extract_task['start']:.1f}s - {extract_task['duration']}s")
+                else:
+                    self.log(f"✂️ 提取音频 [{task['name']}]: {extract_task['start']:.1f}s - {extract_task['duration']}s")
+
+                if self.extract_audio(file_path, extract_task['start'], extract_task['duration'], temp_audio,
+                                      map_arg=audio_map, min_duration=min_audio_duration):
+                    cache_meta = self.get_audio_cache_meta(file_path, extract_task, audio_map)
+                    extracted = True
+                    break
+
+            if not extracted:
+                self.remove_audio_cache(temp_audio, temp_meta, self.get_cloud_flac_path(temp_audio))
+                if self._stopped:
+                    return {"status": "cancelled"}
+                raise RuntimeError(f"音频提取失败: {task['name']}")
+            self.write_audio_cache_meta(temp_meta, cache_meta)
+
+        cloud_success = False
+        cloud_audio = None
+        cloud_artifacts = []
+        cloud_chunked = False
+        try:
+            if not config.get('enable_cloud_asr', True):
+                self.log("☁️ 云端 API 已停用，跳过云端识别")
+            else:
+                upload_timeout = self.get_positive_int_config(config, 'cloud_asr_upload_timeout', 20)
+                read_timeout_key = 'cloud_asr_long_read_timeout' if task['duration'] >= 450 else 'cloud_asr_read_timeout'
+                read_timeout_default = 180 if task['duration'] >= 450 else 120
+                read_timeout = self.get_positive_int_config(config, read_timeout_key, read_timeout_default)
+                data = {"model": config.get('api_model'), "language": "zh", "response_format": "json"}
+                api_keys = self.get_cloud_api_keys(config)
+                cloud_global_limit = self.get_cloud_asr_concurrency(config)
+                cloud_proxies = self.get_cloud_asr_proxies(config)
+                if cloud_proxies:
+                    self.log("☁️ 云端音频上传代理已启用")
+
+                def submit_cloud_audio(source_audio, label=None, log_request=True):
+                    nonlocal cloud_audio
+                    cloud_audio, cloud_mime = self.prepare_cloud_audio(source_audio, config.get('asr_use_flac'), quiet=not log_request)
+                    if not cloud_audio:
+                        raise RuntimeError("ASR 音频无有效时长")
+                    if cloud_audio != source_audio:
+                        cloud_artifacts.append(cloud_audio)
+                    cloud_size = os.path.getsize(cloud_audio) if os.path.exists(cloud_audio) else 0
+                    source_type = 'FLAC' if cloud_mime else 'WAV'
+                    label_text = f" [{label}]" if label else ""
+                    if log_request:
+                        self.log(f"☁️ 云端识别中{label_text}... (source={source_type}, timeout=上传{upload_timeout}s/识别{read_timeout}s, size={cloud_size / 1048576:.1f}MB)")
+                    api_key = self.acquire_cloud_asr_slot(api_keys, cloud_global_limit)
+                    if not api_key:
+                        raise RuntimeError("云端识别已停止")
+                    try:
+                        headers = {"Authorization": f"Bearer {api_key}"}
+                        with open(cloud_audio, "rb") as f:
+                            if cloud_mime:
+                                files = {"file": (os.path.basename(cloud_audio), f, cloud_mime)}
+                            else:
+                                files = {"file": f}
+                            return requests.post(config.get('api_url'), headers=headers, files=files, data=data,
+                                                 timeout=(upload_timeout, read_timeout), proxies=cloud_proxies)
+                    finally:
+                        self.release_cloud_asr_slot(api_key)
+
+                actual_audio_duration = self.get_media_duration(temp_audio) or float(task['duration'])
+                if CLOUD_MAX_DURATION and actual_audio_duration > CLOUD_MAX_DURATION:
+                    cloud_chunked = True
+                    chunks = []
+                    chunk_start = 0.0
+                    chunk_overlap = min(type(self).CLOUD_ASR_CHUNK_OVERLAP, max(0.0, float(CLOUD_MAX_DURATION) - 1.0))
+                    chunk_step = max(1.0, float(CLOUD_MAX_DURATION) - chunk_overlap)
+                    while chunk_start < actual_audio_duration - 0.5:
+                        chunk_duration = min(float(CLOUD_MAX_DURATION), actual_audio_duration - chunk_start)
+                        if chunk_duration < 1.0 and chunks:
+                            break
+                        chunks.append((chunk_start, chunk_duration))
+                        chunk_start += chunk_step
+
+                    self.log(f"☁️ 云端切块识别 [{task['name']}]: {actual_audio_duration:.1f}s -> {len(chunks)}块，每块≤{CLOUD_MAX_DURATION}s，重叠{chunk_overlap:.0f}s")
+                    chunk_statuses = []
+                    chunk_base, _ = os.path.splitext(temp_audio)
+                    for chunk_idx, (chunk_start, chunk_duration) in enumerate(chunks, 1):
+                        chunk_audio = f"{chunk_base}_cloud_part{chunk_idx:02d}.wav"
+                        chunk_flac = self.get_cloud_flac_path(chunk_audio)
+                        cloud_artifacts.extend([chunk_audio, chunk_flac])
+                        self.remove_audio_cache(chunk_audio, chunk_flac)
+                        if not self.extract_cloud_audio_chunk(temp_audio, chunk_start, chunk_duration, chunk_audio):
+                            chunk_statuses.append(f"{chunk_idx}/{len(chunks)}提取失败")
+                            self.log(f"⚠️ 云端切块失败 [{task['name']}]: {' '.join(chunk_statuses)}")
+                            raise RuntimeError(f"云端切块音频提取失败: {chunk_idx}/{len(chunks)}")
+                        resp = submit_cloud_audio(chunk_audio, f"{task['name']} {chunk_idx}/{len(chunks)}", log_request=False)
+                        if resp.status_code != 200:
+                            c, m = self.get_retry_attempt_label(config)
+                            chunk_statuses.append(f"{chunk_idx}/{len(chunks)}×{resp.status_code}")
+                            self.log(f"⚠️ 云端切块失败 [{task['name']}] (第{c}/{m}次): {' '.join(chunk_statuses)}")
+                            cloud_success = False
+                            break
+
+                        text = self.clean_transcription(resp.json().get('text', ''))
+                        hit, reason = self.check_keywords(text, audio_keywords)
+                        if hit:
+                            hit_text = text or '<空>'
+                            chunk_statuses.append(f"{chunk_idx}/{len(chunks)} 命中 {hit_text}")
+                            self.log(f"☁️ 云端切块命中 [{task['name']}]: {' '.join(chunk_statuses)}")
+                            self.log(f"☁️ [违规] 段 {task['name']} 块 {chunk_idx}/{len(chunks)} 内容: {text}")
+                            self.remove_audio_cache(temp_audio, temp_meta, cloud_audio, *cloud_artifacts)
+                            return {"status": "dirty", "reason": reason, "segment": task['name']}
+                        if config.get('detailed_mode'):
+                            chunk_text = text or '<空>'
+                            chunk_statuses.append(f"{chunk_idx}/{len(chunks)} {chunk_text}")
+                        else:
+                            chunk_statuses.append(f"{chunk_idx}/{len(chunks)}✓")
+                    else:
+                        cloud_success = True
+                    if cloud_success:
+                        self.log(f"✅ 云端切块识别通过 [{task['name']}]: {' '.join(chunk_statuses)}")
+                else:
+                    resp = submit_cloud_audio(temp_audio, task['name'])
+                    if resp.status_code == 200:
+                        text = self.clean_transcription(resp.json().get('text', ''))
+                        hit, reason = self.check_keywords(text, audio_keywords)
+                        if hit:
+                            self.log(f"☁️ [违规] 段 {task['name']} 内容: {text}")
+                            self.remove_audio_cache(temp_audio, temp_meta, cloud_audio, *cloud_artifacts)
+                            return {"status": "dirty", "reason": reason, "segment": task['name']}
+
+                        if config.get('detailed_mode'):
+                            self.log(f"✅ [通过] 段 {task['name']} 内容: {text}")
+                        else:
+                            self.log(f"✅ 云端识别通过 [{task['name']}]")
+                        cloud_success = True
+                    else:
+                        c, m = self.get_retry_attempt_label(config)
+                        self.log(f"⚠️ 云端 API 报错 [{task['name']}] (第{c}/{m}次): {resp.status_code}")
+
+        except Exception as e:
+            cloud_success = False
+            c, m = self.get_retry_attempt_label(config)
+            self.log(f"⚠️ 云端连接异常 [{task['name']}] (第{c}/{m}次): {str(e)}")
+
+        if not cloud_success:
+            if self._stopped:
+                return {"status": "cancelled"}
+            if cloud_chunked:
+                self.remove_audio_cache(cloud_audio, *cloud_artifacts)
+
+            if not enable_local:
+                if not config.get('enable_cloud_asr', True):
+                    self.remove_audio_cache(temp_audio, temp_meta, cloud_audio, *cloud_artifacts)
+                    raise RuntimeError("云端 API 已停用且本地模型未启用")
+                try:
+                    has_retry = int(config.get('current_retry', 1)) <= int(config.get('retry_limit', 3))
+                except:
+                    has_retry = True
+                if has_retry:
+                    self.log(f"♻️ 保留音频供重试复用: {task['name']}")
+                else:
+                    self.remove_audio_cache(temp_audio, temp_meta, cloud_audio, *cloud_artifacts)
+                raise RuntimeError(f"云端失败且策略限制本地模型 -> 请求重排队")
+
+            local_limit = self.get_local_model_concurrency(config)
+            self.log(f"⏳ 等待本地模型资源槽... (并发上限 {local_limit})")
+            active_slots = self.acquire_local_inference_slot(local_limit)
+            if not active_slots:
+                return {"status": "cancelled"}
+            try:
+                if self._stopped:
+                    return {"status": "cancelled"}
+
+                self.log(f"🔒 获得本地模型资源槽 ({active_slots}/{local_limit})，本地 GGUF 推理中...")
+                self.drop_caches()
+
+                try:
+                    st = time.time();
+                    text = self.run_local_sensevoice_gguf(temp_audio, task['duration'])
+                    dur = time.time() - st
+
+                    hit, reason = self.check_keywords(text, audio_keywords)
+                    if hit:
+                        self.log(f"🏠 [违规] 本地内容: {text}")
+                        self.remove_audio_cache(temp_audio, temp_meta, cloud_audio, *cloud_artifacts)
+                        return {"status": "dirty", "reason": f"本地拦截: {reason}", "segment": task['name']}
+
+                    if config.get('detailed_mode'):
+                        self.log(f"✅ [通过] 本地内容: {text or '<空>'}")
+                    elif not text:
+                        self.log(f"✅ 本地识别无文本，按无关键词通过 ({dur:.1f}s)")
+                    else:
+                        self.log(f"✅ 本地识别通过 ({dur:.1f}s)")
+
+                except Exception as e:
+                    self.log(f"❌ 本地模型崩溃: {e}")
+                    self.remove_audio_cache(temp_audio, temp_meta, cloud_audio, *cloud_artifacts)
+                    raise RuntimeError(f"本地模型失败: {e}")
+            finally:
+                self.drop_caches()
+                remaining_slots = self.release_local_inference_slot()
+                self.log(f"🧹 [系统] 本地 GGUF 推理资源已释放 (运行中 {remaining_slots}/{local_limit})")
+
+        self.remove_audio_cache(temp_audio, temp_meta, cloud_audio, *cloud_artifacts)
+        return {"status": "passed", "segment": task['name']}
+
+    def scan_audio_cloud_fallback_local(self, file_path, duration, task_id, audio_map, audio_keywords, enable_local,
+                                        config, passed_segments=None, checkpoint_cb=None):
+        tasks = self.build_audio_scan_tasks(duration, config)
+        segment_len = self.get_audio_segment_len(config)
+        max_segments = self.get_audio_max_segments(config)
         dynamic_sample = config.get('audio_double_sample') is True or str(config.get('audio_double_sample')).lower() == 'true'
         if dynamic_sample:
             names = " -> ".join(task['name'] for task in tasks)
@@ -836,249 +1088,131 @@ class ScannerCore:
 
         audio_progress_base = 50
         audio_progress_span = 45
+        total_segments = max(1, len(tasks))
+        passed_set = set(passed_segments or [])
+        completed = 0
+        pending = []
 
-        def audio_progress_pct(index):
-            return int(audio_progress_base + ((index + 1) * audio_progress_span / max(1, len(tasks))))
+        def progress_pct(done_count):
+            return int(audio_progress_base + (done_count * audio_progress_span / total_segments))
 
-        for i, task in enumerate(tasks):
-            if self._stopped: return False, None
-
-            if passed_segments and task['name'] in passed_segments:
+        for idx, task in enumerate(tasks):
+            if task['name'] in passed_set:
+                completed += 1
                 self.log(f"⏭️ [断点] 跳过: {task['name']}")
-                self.prog_cb(audio_progress_pct(i), f"跳过: {task['name']}", "")
-                continue
+                self.prog_cb(progress_pct(completed), f"跳过: {task['name']}", "")
+            else:
+                pending.append((idx, task))
 
-            temp_audio, temp_meta = self.get_audio_cache_paths(task_id, task['name'])
-            min_audio_duration = min(5.0, max(1.0, float(task['duration']) * 0.05))
-            extract_tasks = [task]
-            if '片尾' in str(task['name']) and task['start'] > 0:
-                fallback_start = max(0, task['start'] - task['duration'])
-                if fallback_start < task['start']:
-                    fallback_task = dict(task)
-                    fallback_task['start'] = fallback_start
-                    extract_tasks.append(fallback_task)
+        if not pending:
+            return False, None
 
-            cache_meta = None
-            reused = False
-            for cache_idx, cache_task in enumerate(extract_tasks):
-                candidate_meta = self.get_audio_cache_meta(file_path, cache_task, audio_map)
-                if self.can_reuse_audio_cache(temp_audio, temp_meta, candidate_meta, min_duration=min_audio_duration):
-                    cache_meta = candidate_meta
-                    reused = True
-                    if cache_idx > 0:
-                        self.log(f"♻️ 复用回退音频 [{task['name']}]: {os.path.basename(temp_audio)}")
-                    else:
-                        self.log(f"♻️ 复用音频 [{task['name']}]: {os.path.basename(temp_audio)}")
+        if config.get('enable_cloud_asr', True):
+            worker_limit = self.get_cloud_asr_concurrency(config)
+        elif enable_local:
+            worker_limit = self.get_local_model_concurrency(config)
+        else:
+            worker_limit = 1
+        worker_limit = max(1, min(len(pending), int(worker_limit or 1)))
+
+        def mark_passed(seg_name):
+            nonlocal completed
+            if checkpoint_cb:
+                checkpoint_cb(seg_name)
+            completed += 1
+            self.log(f"🚦 音频段绿灯: {seg_name} ({completed}/{total_segments})")
+            self.prog_cb(progress_pct(completed), "检测进行中", "")
+
+        if worker_limit <= 1:
+            for _, task in pending:
+                if self._stopped:
+                    return False, None
+                result = self.scan_one_audio_task(file_path, task_id, audio_map, audio_keywords, enable_local, config, task)
+                if result.get('status') == 'cancelled':
+                    return False, None
+                if result.get('status') == 'dirty':
+                    return True, result.get('reason')
+                mark_passed(task['name'])
+            return False, None
+
+        self.log(f"🚦 同任务音频并发: {len(pending)}段待测，最多{worker_limit}段同时识别；全部绿灯后通过")
+        log_queue = queue.Queue()
+
+        def flush_child_logs():
+            while True:
+                try:
+                    self.log_cb(log_queue.get_nowait())
+                except queue.Empty:
                     break
 
-            if not reused:
-                cache_meta = self.get_audio_cache_meta(file_path, task, audio_map)
-                self.remove_audio_cache(temp_audio, temp_meta, self.get_cloud_flac_path(temp_audio))
-
-                extracted = False
-                for extract_idx, extract_task in enumerate(extract_tasks):
-                    if extract_idx > 0:
-                        self.remove_audio_cache(temp_audio, self.get_cloud_flac_path(temp_audio))
-                        self.log(f"↩️ 音频片尾为空，向前重试: {extract_task['start']:.1f}s - {extract_task['duration']}s")
-                    else:
-                        self.log(f"✂️ 提取音频 [{task['name']}]: {extract_task['start']:.1f}s - {extract_task['duration']}s")
-
-                    if self.extract_audio(file_path, extract_task['start'], extract_task['duration'], temp_audio,
-                                          map_arg=audio_map, min_duration=min_audio_duration):
-                        cache_meta = self.get_audio_cache_meta(file_path, extract_task, audio_map)
-                        extracted = True
-                        break
-
-                if not extracted:
-                    self.remove_audio_cache(temp_audio, temp_meta, self.get_cloud_flac_path(temp_audio))
-                    if self._stopped: return False, None
-                    raise RuntimeError(f"音频提取失败: {task['name']}")
-                self.write_audio_cache_meta(temp_meta, cache_meta)
-
-            cloud_success = False
-            cloud_audio = None
-            cloud_artifacts = []
-            cloud_chunked = False
+        def run_child(task):
+            child = ScannerCore(logger_callback=lambda msg: log_queue.put(msg), task_id=self.task_id,
+                                root_dir_name=self.root_dir_name, rclone_remote=self.rclone_remote)
+            child.prog_cb = lambda p, s, e: None
+            self._register_child_core(child)
             try:
-                if not config.get('enable_cloud_asr', True):
-                    self.log("☁️ 云端 API 已停用，跳过云端识别")
-                else:
-                    upload_timeout = self.get_positive_int_config(config, 'cloud_asr_upload_timeout', 20)
-                    read_timeout_key = 'cloud_asr_long_read_timeout' if task['duration'] >= 450 else 'cloud_asr_read_timeout'
-                    read_timeout_default = 180 if task['duration'] >= 450 else 120
-                    read_timeout = self.get_positive_int_config(config, read_timeout_key, read_timeout_default)
-                    data = {"model": config.get('api_model'), "language": "zh", "response_format": "json"}
-                    api_keys = self.get_cloud_api_keys(config)
-                    cloud_global_limit = self.get_cloud_asr_concurrency(config)
-                    cloud_proxies = self.get_cloud_asr_proxies(config)
-                    if cloud_proxies:
-                        self.log("☁️ 云端音频上传代理已启用")
+                if self._stopped:
+                    child.stop()
+                    return {"status": "cancelled", "segment": task['name']}
+                return child.scan_one_audio_task(file_path, task_id, audio_map, audio_keywords, enable_local, config, task)
+            finally:
+                self._unregister_child_core(child)
 
-                    def submit_cloud_audio(source_audio, label=None, log_request=True):
-                        nonlocal cloud_audio
-                        cloud_audio, cloud_mime = self.prepare_cloud_audio(source_audio, config.get('asr_use_flac'), quiet=not log_request)
-                        if not cloud_audio:
-                            raise RuntimeError("ASR 音频无有效时长")
-                        if cloud_audio != source_audio:
-                            cloud_artifacts.append(cloud_audio)
-                        cloud_size = os.path.getsize(cloud_audio) if os.path.exists(cloud_audio) else 0
-                        source_type = 'FLAC' if cloud_mime else 'WAV'
-                        label_text = f" [{label}]" if label else ""
-                        if log_request:
-                            self.log(f"☁️ 云端识别中{label_text}... (source={source_type}, timeout=上传{upload_timeout}s/识别{read_timeout}s, size={cloud_size / 1048576:.1f}MB)")
-                        api_key = self.acquire_cloud_asr_slot(api_keys, cloud_global_limit)
-                        if not api_key:
-                            raise RuntimeError("云端识别已停止")
-                        try:
-                            headers = {"Authorization": f"Bearer {api_key}"}
-                            with open(cloud_audio, "rb") as f:
-                                if cloud_mime:
-                                    files = {"file": (os.path.basename(cloud_audio), f, cloud_mime)}
-                                else:
-                                    files = {"file": f}
-                                return requests.post(config.get('api_url'), headers=headers, files=files, data=data,
-                                                     timeout=(upload_timeout, read_timeout), proxies=cloud_proxies)
-                        finally:
-                            self.release_cloud_asr_slot(api_key)
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=worker_limit)
+        future_map = {}
+        try:
+            for _, task in pending:
+                future_map[executor.submit(run_child, task)] = task
 
-                    actual_audio_duration = self.get_media_duration(temp_audio) or float(task['duration'])
-                    if CLOUD_MAX_DURATION and actual_audio_duration > CLOUD_MAX_DURATION:
-                        cloud_chunked = True
-                        chunks = []
-                        chunk_start = 0.0
-                        chunk_overlap = min(type(self).CLOUD_ASR_CHUNK_OVERLAP, max(0.0, float(CLOUD_MAX_DURATION) - 1.0))
-                        chunk_step = max(1.0, float(CLOUD_MAX_DURATION) - chunk_overlap)
-                        while chunk_start < actual_audio_duration - 0.5:
-                            chunk_duration = min(float(CLOUD_MAX_DURATION), actual_audio_duration - chunk_start)
-                            if chunk_duration < 1.0 and chunks:
-                                break
-                            chunks.append((chunk_start, chunk_duration))
-                            chunk_start += chunk_step
-
-                        self.log(f"☁️ 云端切块识别: {actual_audio_duration:.1f}s -> {len(chunks)}块，每块≤{CLOUD_MAX_DURATION}s，重叠{chunk_overlap:.0f}s")
-                        chunk_statuses = []
-                        chunk_base, _ = os.path.splitext(temp_audio)
-                        for chunk_idx, (chunk_start, chunk_duration) in enumerate(chunks, 1):
-                            chunk_audio = f"{chunk_base}_cloud_part{chunk_idx:02d}.wav"
-                            chunk_flac = self.get_cloud_flac_path(chunk_audio)
-                            cloud_artifacts.extend([chunk_audio, chunk_flac])
-                            self.remove_audio_cache(chunk_audio, chunk_flac)
-                            if not self.extract_cloud_audio_chunk(temp_audio, chunk_start, chunk_duration, chunk_audio):
-                                chunk_statuses.append(f"{chunk_idx}/{len(chunks)}提取失败")
-                                self.log(f"⚠️ 云端切块失败: {' '.join(chunk_statuses)}")
-                                raise RuntimeError(f"云端切块音频提取失败: {chunk_idx}/{len(chunks)}")
-                            resp = submit_cloud_audio(chunk_audio, f"{chunk_idx}/{len(chunks)}", log_request=False)
-                            if resp.status_code != 200:
-                                c, m = self.get_retry_attempt_label(config)
-                                chunk_statuses.append(f"{chunk_idx}/{len(chunks)}×{resp.status_code}")
-                                self.log(f"⚠️ 云端切块失败 (第{c}/{m}次): {' '.join(chunk_statuses)}")
-                                cloud_success = False
-                                break
-
-                            text = self.clean_transcription(resp.json().get('text', ''))
-                            hit, reason = self.check_keywords(text, audio_keywords)
-                            if hit:
-                                hit_text = text or '<空>'
-                                chunk_statuses.append(f"{chunk_idx}/{len(chunks)} 命中 {hit_text}")
-                                self.log(f"☁️ 云端切块命中: {' '.join(chunk_statuses)}")
-                                self.log(f"☁️ [违规] 块 {chunk_idx}/{len(chunks)} 内容: {text}")
-                                self.remove_audio_cache(temp_audio, temp_meta, cloud_audio, *cloud_artifacts)
-                                return True, reason
-                            if config.get('detailed_mode'):
-                                chunk_text = text or '<空>'
-                                chunk_statuses.append(f"{chunk_idx}/{len(chunks)} {chunk_text}")
-                            else:
-                                chunk_statuses.append(f"{chunk_idx}/{len(chunks)}✓")
-                        else:
-                            cloud_success = True
-                        if cloud_success:
-                            self.log(f"✅ 云端切块识别通过: {' '.join(chunk_statuses)}")
-                    else:
-                        resp = submit_cloud_audio(temp_audio)
-                        if resp.status_code == 200:
-                            text = self.clean_transcription(resp.json().get('text', ''))
-                            hit, reason = self.check_keywords(text, audio_keywords)
-                            if hit:
-                                self.log(f"☁️ [违规] 内容: {text}")
-                                self.remove_audio_cache(temp_audio, temp_meta, cloud_audio, *cloud_artifacts)
-                                return True, reason
-
-                            if config.get('detailed_mode'):
-                                self.log(f"✅ [通过] 内容: {text}")
-                            else:
-                                self.log("✅ 云端识别通过")
-                            cloud_success = True
-                        else:
-                            c, m = self.get_retry_attempt_label(config)
-                            self.log(f"⚠️ 云端 API 报错 (第{c}/{m}次): {resp.status_code}")
-
-            except Exception as e:
-                cloud_success = False
-                c, m = self.get_retry_attempt_label(config)
-                self.log(f"⚠️ 云端连接异常 (第{c}/{m}次): {str(e)}")
-
-            if not cloud_success:
-                if self._stopped: return False, None
-                if cloud_chunked:
-                    self.remove_audio_cache(cloud_audio, *cloud_artifacts)
-
-                if not enable_local:
-                    if not config.get('enable_cloud_asr', True):
-                        self.remove_audio_cache(temp_audio, temp_meta, cloud_audio, *cloud_artifacts)
-                        raise RuntimeError("云端 API 已停用且本地模型未启用")
-                    try:
-                        has_retry = int(config.get('current_retry', 1)) <= int(config.get('retry_limit', 3))
-                    except:
-                        has_retry = True
-                    if has_retry:
-                        self.log(f"♻️ 保留音频供重试复用: {task['name']}")
-                    else:
-                        self.remove_audio_cache(temp_audio, temp_meta, cloud_audio, *cloud_artifacts)
-                    raise RuntimeError(f"云端失败且策略限制本地模型 -> 请求重排队")
-
-                local_limit = self.get_local_model_concurrency(config)
-                self.log(f"⏳ 等待本地模型资源槽... (并发上限 {local_limit})")
-                active_slots = self.acquire_local_inference_slot(local_limit)
-                if not active_slots:
+            first_error = None
+            dirty_result = None
+            while future_map:
+                done, _ = concurrent.futures.wait(
+                    future_map.keys(), timeout=0.5, return_when=concurrent.futures.FIRST_COMPLETED
+                )
+                flush_child_logs()
+                if self._stopped:
+                    for future in future_map:
+                        future.cancel()
                     return False, None
-                try:
-                    if self._stopped: return False, None
+                if not done:
+                    continue
 
-                    self.log(f"🔒 获得本地模型资源槽 ({active_slots}/{local_limit})，本地 GGUF 推理中...")
-                    self.drop_caches()
-
+                for future in done:
+                    task = future_map.pop(future)
                     try:
-                        st = time.time();
-                        text = self.run_local_sensevoice_gguf(temp_audio, task['duration'])
-                        dur = time.time() - st
-
-                        hit, reason = self.check_keywords(text, audio_keywords)
-                        if hit:
-                            self.log(f"🏠 [违规] 本地内容: {text}")
-                            self.remove_audio_cache(temp_audio, temp_meta, cloud_audio, *cloud_artifacts)
-                            return True, f"本地拦截: {reason}"
-
-                        if config.get('detailed_mode'):
-                            self.log(f"✅ [通过] 本地内容: {text or '<空>'}")
-                        elif not text:
-                            self.log(f"✅ 本地识别无文本，按无关键词通过 ({dur:.1f}s)")
-                        else:
-                            self.log(f"✅ 本地识别通过 ({dur:.1f}s)")
-
+                        result = future.result()
                     except Exception as e:
-                        self.log(f"❌ 本地模型崩溃: {e}")
-                        self.remove_audio_cache(temp_audio, temp_meta, cloud_audio, *cloud_artifacts)
-                        raise RuntimeError(f"本地模型失败: {e}")
-                finally:
-                    self.drop_caches()
-                    remaining_slots = self.release_local_inference_slot()
-                    self.log(f"🧹 [系统] 本地 GGUF 推理资源已释放 (运行中 {remaining_slots}/{local_limit})")
+                        first_error = first_error or e
+                        self.log(f"⚠️ 音频段失败: {task['name']} -> {e}")
+                        continue
 
-            self.remove_audio_cache(temp_audio, temp_meta, cloud_audio, *cloud_artifacts)
-            if checkpoint_cb: checkpoint_cb(task['name'])
-            self.prog_cb(audio_progress_pct(i), "检测进行中", "")
+                    if result.get('status') == 'cancelled':
+                        return False, None
+                    if result.get('status') == 'dirty':
+                        dirty_result = dirty_result or result
+                        self.log(f"🚫 音频段命中: {result.get('segment') or task['name']}")
+                        continue
+                    mark_passed(result.get('segment') or task['name'])
 
-        return False, None
+                if dirty_result or first_error:
+                    for future in future_map:
+                        future.cancel()
+                    with self._child_lock:
+                        children = list(self._child_cores)
+                    for child in children:
+                        child.stop()
+                    concurrent.futures.wait(future_map.keys())
+                    flush_child_logs()
+                    if dirty_result:
+                        return True, dirty_result.get('reason')
+                    raise first_error
+
+            flush_child_logs()
+            return False, None
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
+            flush_child_logs()
 
     def process_file(self, file_path, config, keywords_config, passed_segments=None, checkpoint_cb=None,
                      rename_cb=None):

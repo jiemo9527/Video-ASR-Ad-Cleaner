@@ -157,6 +157,13 @@ Segment planning:
 - Terminology matters in logs and UI: video/audio sampling units are `段` or `抽样段`; cloud upload splits are `块` or `切块`. Do not call 60s cloud chunks `段`.
 - The dashboard audio indicator should reflect actual planned sample count from task logs such as `动态抽样开启: 5段...` or `动态抽样开启: 全片...`, not the maximum cap `audio_max_segments`.
 
+Segment scheduling:
+
+- Metadata and subtitle checks remain synchronous because they are fast and can rename/remux the file before audio starts.
+- Pending audio segments for the same task run concurrently up to available ASR capacity. With cloud ASR enabled, same-task segment workers are capped by `cloud_asr_concurrency`; with cloud disabled, they are capped by `local_model_concurrency`.
+- Segment completion can be out of order. Each passed segment is checkpointed by name and logged as a green light; the task only succeeds after every planned segment is green.
+- Child segment workers must not write DB logs or checkpoints directly. They queue logs in memory; the parent detection worker flushes logs, saves `_passed`, and updates progress from the Flask app context.
+
 Cloud timeout policy:
 
 - Upload/connect timeout: `cloud_asr_upload_timeout`, default `20s`.
@@ -172,7 +179,7 @@ The log includes the timeout value:
 Cloud failure policy:
 
 - Cloud ASR requests are gated by a process-local limiter. `cloud_asr_concurrency` defaults to `3`; each API key is hard-limited to `2` simultaneous requests. Requests choose keys from `cloud_asr_api_keys` round-robin, falling back to legacy `api_key` when the key pool is empty.
-- Recent SiliconFlow behavior on netcup: real speech FLAC segments up to `60s` returned `200`, while `61s+` returned empty-body `500`; synthetic short silent/tone tests still returned `200`.
+- Historical SiliconFlow behavior on netcup: real speech FLAC segments above `60s` once returned empty-body `500`, while `60s` returned `200`. A later direct endpoint test on 2026-07-06 showed `61s`, `90s`, `120s`, and `180s` real samples all returned `200`; keep chunking as a stability fallback unless deliberately retuning.
 - `cloud_asr_max_duration` defaults to `60`. Longer ASR samples are split into overlapping cloud chunks of at most this duration; the current overlap is `2s`, implemented by moving the next chunk start earlier, not by exceeding the max chunk duration. Chinese logs should use `云端切块识别`, `块`, and `每块≤60s`. The sample passes cloud detection only after every chunk succeeds and no chunk hits an audio keyword.
 - `detect_retry_limit` is the number of automatic retries after the first attempt, not total attempts. For example, `detect_retry_limit = 1` means two total attempts and logs should show `第1/2次` then `第2/2次`.
 - For retry attempts before the retry limit, local model fallback is forced off.
