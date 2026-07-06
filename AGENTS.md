@@ -161,7 +161,9 @@ Segment scheduling:
 
 - Metadata and subtitle checks remain synchronous because they are fast and can rename/remux the file before audio starts.
 - Pending audio segments for the same task run concurrently up to available ASR capacity. With cloud ASR enabled, same-task segment workers are capped by `cloud_asr_concurrency`; with cloud disabled, they are capped by `local_model_concurrency`.
+- Cloud ASR slots are task-prioritized. A task that entered audio detection earlier gets priority for newly freed API slots while it has waiting segment requests; later video tasks only use slots that are not currently needed by earlier audio tasks.
 - Segment completion can be out of order. Each passed segment is checkpointed by name and logged as a green light; the task only succeeds after every planned segment is green.
+- A failed segment should not interrupt other already scheduled segments from the same task. Let siblings finish and checkpoint green segments, then retry the failed segment on the next task retry. Only dirty keyword hits should stop remaining segments immediately.
 - Child segment workers must not write DB logs or checkpoints directly. They queue logs in memory; the parent detection worker flushes logs, saves `_passed`, and updates progress from the Flask app context.
 
 Cloud timeout policy:

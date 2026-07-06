@@ -86,6 +86,10 @@ class ScannerCore:
     _cloud_asr_active_total = 0
     _cloud_asr_active_by_key = {}
     _cloud_asr_next_key = 0
+    _cloud_asr_session_seq = 0
+    _cloud_asr_session_order = {}
+    _cloud_asr_session_waiting = {}
+    _cloud_asr_session_active = {}
 
     def __init__(self, logger_callback=None, progress_callback=None, task_id=None, root_dir_name="downloads",
                  rclone_remote="s25"):
@@ -96,6 +100,7 @@ class ScannerCore:
         self.rclone_remote = rclone_remote
         self.current_proc = None
         self._stopped = False
+        self.cloud_asr_session_token = None
         self._child_lock = threading.Lock()
         self._child_cores = set()
         try:
@@ -187,33 +192,82 @@ class ScannerCore:
         except:
             return default
 
+    def begin_cloud_asr_session(self):
+        cls = type(self)
+        token = f"{self.task_id or 'task'}-{id(self)}-{time.time()}"
+        with cls._cloud_asr_cond:
+            cls._cloud_asr_session_seq += 1
+            cls._cloud_asr_session_order[token] = cls._cloud_asr_session_seq
+            cls._cloud_asr_session_waiting[token] = 0
+            cls._cloud_asr_session_active[token] = 0
+            cls._cloud_asr_cond.notify_all()
+        return token
+
+    def end_cloud_asr_session(self, token):
+        if not token:
+            return
+        cls = type(self)
+        with cls._cloud_asr_cond:
+            cls._cloud_asr_session_order.pop(token, None)
+            cls._cloud_asr_session_waiting.pop(token, None)
+            cls._cloud_asr_session_active.pop(token, None)
+            cls._cloud_asr_cond.notify_all()
+
+    @classmethod
+    def _cloud_asr_session_has_priority(cls, token):
+        if not token or token not in cls._cloud_asr_session_order:
+            return True
+        own_order = cls._cloud_asr_session_order[token]
+        for other_token, order in cls._cloud_asr_session_order.items():
+            if other_token != token and order < own_order and cls._cloud_asr_session_waiting.get(other_token, 0) > 0:
+                return False
+        return True
+
     def acquire_cloud_asr_slot(self, api_keys, global_limit):
         if not api_keys:
             raise RuntimeError("云端 API Key 未配置")
         cls = type(self)
         per_key_limit = cls.CLOUD_ASR_KEY_CONCURRENCY
+        session_token = getattr(self, 'cloud_asr_session_token', None)
         waited = False
+        counted_wait = False
         with cls._cloud_asr_cond:
-            while not self._stopped:
-                if cls._cloud_asr_active_total < global_limit:
-                    for offset in range(len(api_keys)):
-                        idx = (cls._cloud_asr_next_key + offset) % len(api_keys)
-                        key = api_keys[idx]
-                        if cls._cloud_asr_active_by_key.get(key, 0) < per_key_limit:
-                            cls._cloud_asr_next_key = (idx + 1) % len(api_keys)
-                            cls._cloud_asr_active_total += 1
-                            cls._cloud_asr_active_by_key[key] = cls._cloud_asr_active_by_key.get(key, 0) + 1
-                            return key
-                if not waited:
-                    self.log(f"⏳ 等待云端模型并发槽... (全局上限 {global_limit}, Key数 {len(api_keys)}, 单Key上限 {per_key_limit})")
-                    waited = True
-                cls._cloud_asr_cond.wait(timeout=1)
+            if session_token in cls._cloud_asr_session_order:
+                cls._cloud_asr_session_waiting[session_token] = cls._cloud_asr_session_waiting.get(session_token, 0) + 1
+                counted_wait = True
+            try:
+                while not self._stopped:
+                    has_priority = cls._cloud_asr_session_has_priority(session_token)
+                    if has_priority and cls._cloud_asr_active_total < global_limit:
+                        for offset in range(len(api_keys)):
+                            idx = (cls._cloud_asr_next_key + offset) % len(api_keys)
+                            key = api_keys[idx]
+                            if cls._cloud_asr_active_by_key.get(key, 0) < per_key_limit:
+                                cls._cloud_asr_next_key = (idx + 1) % len(api_keys)
+                                cls._cloud_asr_active_total += 1
+                                cls._cloud_asr_active_by_key[key] = cls._cloud_asr_active_by_key.get(key, 0) + 1
+                                if counted_wait:
+                                    cls._cloud_asr_session_waiting[session_token] = max(0, cls._cloud_asr_session_waiting.get(session_token, 0) - 1)
+                                    cls._cloud_asr_session_active[session_token] = cls._cloud_asr_session_active.get(session_token, 0) + 1
+                                    counted_wait = False
+                                return key
+                    if not waited:
+                        if has_priority:
+                            self.log(f"⏳ 等待云端模型并发槽... (全局上限 {global_limit}, Key数 {len(api_keys)}, 单Key上限 {per_key_limit})")
+                        else:
+                            self.log(f"⏳ 等待前序音频任务释放云端槽... (全局上限 {global_limit}, Key数 {len(api_keys)}, 单Key上限 {per_key_limit})")
+                        waited = True
+                    cls._cloud_asr_cond.wait(timeout=1)
+            finally:
+                if counted_wait:
+                    cls._cloud_asr_session_waiting[session_token] = max(0, cls._cloud_asr_session_waiting.get(session_token, 0) - 1)
         return None
 
     def release_cloud_asr_slot(self, api_key):
         if not api_key:
             return
         cls = type(self)
+        session_token = getattr(self, 'cloud_asr_session_token', None)
         with cls._cloud_asr_cond:
             cls._cloud_asr_active_total = max(0, cls._cloud_asr_active_total - 1)
             current = cls._cloud_asr_active_by_key.get(api_key, 0) - 1
@@ -221,6 +275,8 @@ class ScannerCore:
                 cls._cloud_asr_active_by_key[api_key] = current
             else:
                 cls._cloud_asr_active_by_key.pop(api_key, None)
+            if session_token in cls._cloud_asr_session_active:
+                cls._cloud_asr_session_active[session_token] = max(0, cls._cloud_asr_session_active.get(session_token, 0) - 1)
             cls._cloud_asr_cond.notify_all()
 
     def run_cmd(self, cmd, timeout=300, capture=True):
@@ -1073,40 +1129,8 @@ class ScannerCore:
         self.remove_audio_cache(temp_audio, temp_meta, cloud_audio, *cloud_artifacts)
         return {"status": "passed", "segment": task['name']}
 
-    def scan_audio_cloud_fallback_local(self, file_path, duration, task_id, audio_map, audio_keywords, enable_local,
-                                        config, passed_segments=None, checkpoint_cb=None):
-        tasks = self.build_audio_scan_tasks(duration, config)
-        segment_len = self.get_audio_segment_len(config)
-        max_segments = self.get_audio_max_segments(config)
-        dynamic_sample = config.get('audio_double_sample') is True or str(config.get('audio_double_sample')).lower() == 'true'
-        if dynamic_sample:
-            names = " -> ".join(task['name'] for task in tasks)
-            if len(tasks) == 1 and '全片' in tasks[0]['name']:
-                self.log(f"🎚️ 动态抽样开启: 全片 {tasks[0]['duration']:.0f}s，片段长度 {segment_len}s")
-            else:
-                self.log(f"🎚️ 动态抽样开启: {len(tasks)}段 x {segment_len}s，最大{max_segments}段，顺序 {names}")
-
-        audio_progress_base = 50
-        audio_progress_span = 45
-        total_segments = max(1, len(tasks))
-        passed_set = set(passed_segments or [])
-        completed = 0
-        pending = []
-
-        def progress_pct(done_count):
-            return int(audio_progress_base + (done_count * audio_progress_span / total_segments))
-
-        for idx, task in enumerate(tasks):
-            if task['name'] in passed_set:
-                completed += 1
-                self.log(f"⏭️ [断点] 跳过: {task['name']}")
-                self.prog_cb(progress_pct(completed), f"跳过: {task['name']}", "")
-            else:
-                pending.append((idx, task))
-
-        if not pending:
-            return False, None
-
+    def run_audio_pending_tasks(self, file_path, task_id, audio_map, audio_keywords, enable_local, config,
+                                pending, completed, total_segments, progress_pct, checkpoint_cb):
         if config.get('enable_cloud_asr', True):
             worker_limit = self.get_cloud_asr_concurrency(config)
         elif enable_local:
@@ -1149,6 +1173,7 @@ class ScannerCore:
             child = ScannerCore(logger_callback=lambda msg: log_queue.put(msg), task_id=self.task_id,
                                 root_dir_name=self.root_dir_name, rclone_remote=self.rclone_remote)
             child.prog_cb = lambda p, s, e: None
+            child.cloud_asr_session_token = self.cloud_asr_session_token
             self._register_child_core(child)
             try:
                 if self._stopped:
@@ -1195,7 +1220,7 @@ class ScannerCore:
                         continue
                     mark_passed(result.get('segment') or task['name'])
 
-                if dirty_result or first_error:
+                if dirty_result:
                     for future in future_map:
                         future.cancel()
                     with self._child_lock:
@@ -1204,15 +1229,65 @@ class ScannerCore:
                         child.stop()
                     concurrent.futures.wait(future_map.keys())
                     flush_child_logs()
-                    if dirty_result:
-                        return True, dirty_result.get('reason')
-                    raise first_error
+                    return True, dirty_result.get('reason')
 
             flush_child_logs()
+            if first_error:
+                raise first_error
             return False, None
         finally:
             executor.shutdown(wait=True, cancel_futures=True)
             flush_child_logs()
+
+    def scan_audio_cloud_fallback_local(self, file_path, duration, task_id, audio_map, audio_keywords, enable_local,
+                                        config, passed_segments=None, checkpoint_cb=None):
+        tasks = self.build_audio_scan_tasks(duration, config)
+        segment_len = self.get_audio_segment_len(config)
+        max_segments = self.get_audio_max_segments(config)
+        dynamic_sample = config.get('audio_double_sample') is True or str(config.get('audio_double_sample')).lower() == 'true'
+        if dynamic_sample:
+            names = " -> ".join(task['name'] for task in tasks)
+            if len(tasks) == 1 and '全片' in tasks[0]['name']:
+                self.log(f"🎚️ 动态抽样开启: 全片 {tasks[0]['duration']:.0f}s，片段长度 {segment_len}s")
+            else:
+                self.log(f"🎚️ 动态抽样开启: {len(tasks)}段 x {segment_len}s，最大{max_segments}段，顺序 {names}")
+
+        audio_progress_base = 50
+        audio_progress_span = 45
+        total_segments = max(1, len(tasks))
+        passed_set = set(passed_segments or [])
+        completed = 0
+        pending = []
+
+        def progress_pct(done_count):
+            return int(audio_progress_base + (done_count * audio_progress_span / total_segments))
+
+        for idx, task in enumerate(tasks):
+            if task['name'] in passed_set:
+                completed += 1
+                self.log(f"⏭️ [断点] 跳过: {task['name']}")
+                self.prog_cb(progress_pct(completed), f"跳过: {task['name']}", "")
+            else:
+                pending.append((idx, task))
+
+        if not pending:
+            return False, None
+
+        session_token = None
+        previous_token = self.cloud_asr_session_token
+        if config.get('enable_cloud_asr', True):
+            session_token = self.begin_cloud_asr_session()
+            self.cloud_asr_session_token = session_token
+            self.log(f"🎧 云端音频优先会话已建立: {len(pending)}段待测；先进入音频检测的任务优先使用 API 槽")
+        try:
+            return self.run_audio_pending_tasks(
+                file_path, task_id, audio_map, audio_keywords, enable_local, config,
+                pending, completed, total_segments, progress_pct, checkpoint_cb
+            )
+        finally:
+            if session_token:
+                self.end_cloud_asr_session(session_token)
+            self.cloud_asr_session_token = previous_token
 
     def process_file(self, file_path, config, keywords_config, passed_segments=None, checkpoint_cb=None,
                      rename_cb=None):
