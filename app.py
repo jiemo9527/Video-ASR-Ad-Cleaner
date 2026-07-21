@@ -341,6 +341,19 @@ def is_upload_task(task, overrides=None):
     return False
 
 
+def get_batch_task_list(data):
+    requested_ids = data.get('ids') if isinstance(data, dict) else None
+    if not isinstance(requested_ids, list):
+        return Task.query.all()
+    task_ids = []
+    for task_id in requested_ids:
+        try:
+            task_ids.append(int(task_id))
+        except:
+            pass
+    return Task.query.filter(Task.id.in_(sorted(set(task_ids)))).all() if task_ids else []
+
+
 def list_directory_task_files(root_path):
     files = []
     if not root_path or not os.path.isdir(root_path):
@@ -1204,7 +1217,7 @@ def get_tasks():
 @app.route('/api/tasks/batch', methods=['POST'])
 @login_required
 def batch_tasks():
-    d = request.json;
+    d = request.json or {}
     action = d.get('action');
     target = d.get('type');
     count = 0
@@ -1213,7 +1226,7 @@ def batch_tasks():
     detect_ids = [];
     upload_ids = []
 
-    for t in Task.query.all():
+    for t in get_batch_task_list(d):
         ov = get_task_overrides(t)
         is_up = is_upload_task(t, ov)
 
@@ -1238,7 +1251,7 @@ def batch_tasks():
                 t.log += "\n=== 批量重传 ===\n";
                 upload_ids.append(t.id);
                 count += 1
-            elif action == 'stop' and t.status == 'uploading':
+            elif action == 'stop' and t.status in ['pending_upload', 'uploading']:
                 if t.id in running_tasks: running_tasks[t.id].stop()
                 t.status = 'cancelled';
                 t.finished_at = datetime.now();
@@ -1254,13 +1267,14 @@ def batch_tasks():
 @app.route('/api/tasks/batch_upload_remote', methods=['POST'])
 @login_required
 def batch_upload_remote():
-    remote = str((request.json or {}).get('remote') or '').strip().rstrip(':')
+    data = request.json or {}
+    remote = str(data.get('remote') or '').strip().rstrip(':')
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', remote):
         return jsonify({"code": 400, "msg": "远端名只能包含字母、数字、下划线和连字符"})
 
     count = 0
     active_count = 0
-    for task in Task.query.all():
+    for task in get_batch_task_list(data):
         ov = get_task_overrides(task)
         if task.status not in ['pending_upload', 'uploading', 'error', 'cancelled'] or not is_upload_task(task, ov):
             continue

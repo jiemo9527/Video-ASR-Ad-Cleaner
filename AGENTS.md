@@ -48,6 +48,7 @@ Task lifecycle:
 Upload destination override:
 
 - The upload queue toolbar can batch-set an explicit `upload_remote` for incomplete upload tasks.
+- Batch queue actions support selected task IDs; with no selection, they retain their all-task behavior.
 - The override is stored in task overrides and takes precedence over the default `rclone_remote` only for that task.
 - Running uploads keep the destination they already started with; the override applies when they are retried.
 

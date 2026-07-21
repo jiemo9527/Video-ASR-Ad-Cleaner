@@ -69,14 +69,16 @@
 
             <div v-if="view==='detect'">
                 <div class="p-2 border-bottom d-flex gap-2 bg-light bg-opacity-50 ps-3">
-                    <button class="btn btn-sm btn-outline-primary" @click="batchAction('detect', 'retry')"><i class="bi bi-arrow-repeat me-1"></i>全部重试 (错误/取消)</button>
-                    <button class="btn btn-sm btn-outline-danger" @click="batchAction('detect', 'stop')"><i class="bi bi-stop-circle me-1"></i>全部停止</button>
+                    <button class="btn btn-sm btn-outline-primary" @click="batchAction('detect', 'retry')"><i class="bi bi-arrow-repeat me-1"></i>[[ batchActionLabel('detect', 'retry') ]]</button>
+                    <button class="btn btn-sm btn-outline-danger" @click="batchAction('detect', 'stop')"><i class="bi bi-stop-circle me-1"></i>[[ batchActionLabel('detect', 'stop') ]]</button>
+                    <span v-if="selectedCount('detect')" class="small text-primary align-self-center ms-1">已选 [[ selectedCount('detect') ]] 项 <button class="btn btn-link btn-sm p-0 ms-1" @click="clearSelection('detect')">清除</button></span>
                 </div>
                 <div class="table-responsive">
                     <table class="table table-hover align-middle mb-0">
-                        <thead class="table-light"><tr><th class="text-center">ID</th><th>文件信息</th><th class="text-center">状态指示</th><th class="text-center">结果</th><th>实时日志 (双击全屏)</th><th class="text-end pe-4">操作</th></tr></thead>
+                        <thead class="table-light"><tr><th class="text-center" style="width:42px"><input class="form-check-input" type="checkbox" :checked="allSelected('detect')" @change="toggleAll('detect', $event.target.checked)" title="全选"></th><th class="text-center">ID</th><th>文件信息</th><th class="text-center">状态指示</th><th class="text-center">结果</th><th>实时日志 (双击全屏)</th><th class="text-end pe-4">操作</th></tr></thead>
                         <tbody>
                             <tr v-for="t in detectTasks" :key="t.id">
+                                <td class="text-center"><input class="form-check-input" type="checkbox" v-model="selectedTaskIds" :value="t.id" :aria-label="`选择任务 ${t.id}`"></td>
                                 <td class="text-center fw-bold text-muted">[[ t.id ]]</td>
                                 <td><div class="text-truncate fw-bold text-dark" style="max-width:280px" :title="t.filename"><i class="bi bi-file-earmark-play me-1"></i>[[ t.filename ]]</div><div class="small text-muted mt-1"><i class="bi bi-clock"></i> [[ t.created_at ]]</div></td>
                                 <td class="text-center"><div class="d-flex justify-content-center bg-light rounded-pill py-1 px-2 border" style="width: fit-content; margin: 0 auto; gap:3px"><span v-for="i in audioDotCount(t)" :class="['config-dot', getDotClass('audio', t, i)]"></span><span style="border-right:1px solid #ccc; margin:0 2px"></span><span :class="['config-dot', getDotClass('subtitle', t)]"></span><span :class="['config-dot', getDotClass('meta', t)]"></span></div></td>
@@ -87,13 +89,13 @@
                                         <button v-if="canControl(t)" class="btn btn-outline-primary" @click="openConfig(t)" title="调整"><i class="bi bi-sliders"></i></button>
                                         <button v-if="canDoubleSample(t)" class="btn btn-outline-warning" @click="confirmAction('确定让该任务使用动态抽样并重新检测吗？', () => doubleSample(t.id))" title="动态抽样"><i class="bi bi-soundwave"></i></button>
                                         <button v-if="canControl(t)" class="btn btn-outline-success" @click="confirmAction('确定跳过检测直接上传吗？', () => directUpload(t.id))" title="直传"><i class="bi bi-forward-fill"></i></button>
-                                        <button v-if="isRunning(t)" class="btn btn-outline-danger" @click="confirmAction('确定强制停止该任务吗？', () => cancel(t.id))" title="停止"><i class="bi bi-stop-circle-fill"></i></button>
+                                        <button v-if="canStop(t)" class="btn btn-outline-danger" @click="confirmAction('确定停止该任务吗？', () => cancel(t.id))" title="停止"><i class="bi bi-stop-circle-fill"></i></button>
                                         <button v-if="isError(t)" class="btn btn-outline-secondary" @click="retry(t.id)" title="重试"><i class="bi bi-arrow-clockwise"></i></button>
                                         <button class="btn btn-outline-danger" @click="confirmAction('⚠️ 警告：确定要删除此任务吗？', () => deleteTask(t.id))" title="删除"><i class="bi bi-trash-fill"></i></button>
                                     </div>
                                 </td>
                             </tr>
-                            <tr v-if="detectTasks.length===0"><td colspan="6" class="text-center py-5 text-muted">当前没有等待检测的任务</td></tr>
+                            <tr v-if="detectTasks.length===0"><td colspan="7" class="text-center py-5 text-muted">当前没有等待检测的任务</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -101,8 +103,9 @@
 
             <div v-if="view==='upload'">
                 <div class="p-2 border-bottom d-flex gap-2 align-items-center bg-light bg-opacity-50 ps-3">
-                    <button class="btn btn-sm btn-outline-primary" @click="batchAction('upload', 'retry')"><i class="bi bi-arrow-repeat me-1"></i>全部重试 (错误/取消)</button>
-                    <button class="btn btn-sm btn-outline-danger" @click="batchAction('upload', 'stop')"><i class="bi bi-stop-circle me-1"></i>全部停止</button>
+                    <button class="btn btn-sm btn-outline-primary" @click="batchAction('upload', 'retry')"><i class="bi bi-arrow-repeat me-1"></i>[[ batchActionLabel('upload', 'retry') ]]</button>
+                    <button class="btn btn-sm btn-outline-danger" @click="batchAction('upload', 'stop')"><i class="bi bi-stop-circle me-1"></i>[[ batchActionLabel('upload', 'stop') ]]</button>
+                    <span v-if="selectedCount('upload')" class="small text-primary align-self-center ms-1">已选 [[ selectedCount('upload') ]] 项 <button class="btn btn-link btn-sm p-0 ms-1" @click="clearSelection('upload')">清除</button></span>
                     <div class="input-group input-group-sm ms-auto me-2" style="width: 360px;">
                         <span class="input-group-text bg-white">目标远端</span>
                         <input class="form-control font-monospace" v-model.trim="batchUploadRemote" placeholder="例如 gstu">
@@ -111,18 +114,19 @@
                 </div>
                 <div class="table-responsive">
                     <table class="table table-hover align-middle mb-0">
-                        <thead class="table-light"><tr><th class="text-center">ID</th><th>文件信息</th><th>传输进度</th><th>速度 / ETA</th><th>结束时间</th><th class="text-center">状态</th><th class="text-end pe-4">操作</th></tr></thead>
+                        <thead class="table-light"><tr><th class="text-center" style="width:42px"><input class="form-check-input" type="checkbox" :checked="allSelected('upload')" @change="toggleAll('upload', $event.target.checked)" title="全选"></th><th class="text-center">ID</th><th>文件信息</th><th>传输进度</th><th>速度 / ETA</th><th>结束时间</th><th class="text-center">状态</th><th class="text-end pe-4">操作</th></tr></thead>
                         <tbody>
                             <tr v-for="t in uploadTasks" :key="t.id">
+                                <td class="text-center"><input class="form-check-input" type="checkbox" v-model="selectedTaskIds" :value="t.id" :aria-label="`选择任务 ${t.id}`"></td>
                                 <td class="text-center fw-bold text-muted">[[ t.id ]]</td>
                                 <td class="text-truncate" style="max-width:250px" :title="t.filename"><i class="bi bi-file-earmark-arrow-up me-1"></i>[[ t.filename ]]</td>
                                 <td><div class="progress bg-secondary bg-opacity-10" style="height: 12px; border-radius: 6px;"><div class="progress-bar progress-bar-striped progress-bar-animated" :style="{width: t.progress + '%'}" :class="t.status==='uploaded'?'bg-success':'bg-primary'"></div></div><div class="small text-end text-muted mt-1">[[ t.progress ]]%</div></td>
                                 <td><div v-if="t.status==='uploading'" class="small"><div class="fw-bold text-dark">🚀 [[ t.upload_speed ]]</div><div class="text-muted">⏱ [[ t.upload_eta ]]</div></div><div v-else class="text-muted small">-</div></td>
                                 <td class="small text-muted">[[ t.finished_at || '-' ]]</td>
                                 <td class="text-center"><span class="badge rounded-pill" :class="bg(t.status)">[[ statusText[t.status]||t.status ]]</span></td>
-                                <td class="text-end pe-3"><div class="btn-group btn-group-sm"><button v-if="t.status==='uploading'" class="btn btn-outline-danger" @click="confirmAction('确定停止上传？', () => cancel(t.id))"><i class="bi bi-stop-fill"></i></button><button v-if="t.status==='error' || t.status==='cancelled'" class="btn btn-outline-secondary" @click="retry(t.id)"><i class="bi bi-arrow-repeat"></i></button><button class="btn btn-outline-danger" @click="confirmAction('⚠️ 确定删除此记录吗？', () => deleteTask(t.id))"><i class="bi bi-trash-fill"></i></button></div></td>
+                                <td class="text-end pe-3"><div class="btn-group btn-group-sm"><button v-if="canStop(t)" class="btn btn-outline-danger" @click="confirmAction('确定停止上传？', () => cancel(t.id))"><i class="bi bi-stop-fill"></i></button><button v-if="t.status==='error' || t.status==='cancelled'" class="btn btn-outline-secondary" @click="retry(t.id)"><i class="bi bi-arrow-repeat"></i></button><button class="btn btn-outline-danger" @click="confirmAction('⚠️ 确定删除此记录吗？', () => deleteTask(t.id))"><i class="bi bi-trash-fill"></i></button></div></td>
                             </tr>
-                            <tr v-if="uploadTasks.length===0"><td colspan="7" class="text-center py-5 text-muted">暂无上传任务</td></tr>
+                            <tr v-if="uploadTasks.length===0"><td colspan="8" class="text-center py-5 text-muted">暂无上传任务</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -157,7 +161,7 @@
 let modalConfig, modalLog, modalConfirm, toastInstance;
 Vue.createApp({
     delimiters: ['[[', ']]'],
-    data(){ return { tasks:[], view:'detect', curTask:{}, sysLogs:'', sysLogFilter:'', autoRefreshLogs:true, currentLogTitle:'', currentLogContent:'', batchUploadRemote:'', statusText:{'pending':'⏳ 等待中','processing':'🔄 检测中','pending_upload':'✅ 待上传','uploading':'☁️ 上传中','uploaded':'🎉 已完成','dirty':'🚫 已拦截','error':'❌ 出错了','cancelled':'⏹ 已停止'}, toastMsg:'', toastClass:'bg-primary', toastIcon:'bi-info-circle', confirmMsg:'', confirmCallback:null, pollTimer: null }},
+    data(){ return { tasks:[], view:'detect', curTask:{}, sysLogs:'', sysLogFilter:'', autoRefreshLogs:true, currentLogTitle:'', currentLogContent:'', batchUploadRemote:'', selectedTaskIds:[], statusText:{'pending':'⏳ 等待中','processing':'🔄 检测中','pending_upload':'✅ 待上传','uploading':'☁️ 上传中','uploaded':'🎉 已完成','dirty':'🚫 已拦截','error':'❌ 出错了','cancelled':'⏹ 已停止'}, toastMsg:'', toastClass:'bg-primary', toastIcon:'bi-info-circle', confirmMsg:'', confirmCallback:null, pollTimer: null }},
     computed: {
         filteredSystemLogs() { if(!this.sysLogs)return[]; const l=this.sysLogs.split('\n'); if(!this.sysLogFilter.trim())return l; const k=this.sysLogFilter.toLowerCase(); return l.filter(x=>x.toLowerCase().includes(k)) },
         detectTasks() { return this.tasks.filter(t => !this.isUploadTask(t)) },
@@ -191,7 +195,11 @@ Vue.createApp({
 
         load(){
             if(!document.getElementById('configModal').classList.contains('show')) {
-                return axios.get('/api/tasks').then(r=>this.tasks=r.data)
+                return axios.get('/api/tasks').then(r=>{
+                    this.tasks=r.data;
+                    const ids=new Set(this.tasks.map(t=>t.id));
+                    this.selectedTaskIds=this.selectedTaskIds.filter(id=>ids.has(id));
+                })
             }
             return Promise.resolve();
         },
@@ -251,7 +259,14 @@ Vue.createApp({
         loadSysLogs(s=false){ if(!s)this.sysLogs='读取中...'; axios.get('/api/system_logs?lines=9999&t='+Date.now()).then(r=>{ this.sysLogs=r.data.data; const b=document.getElementById('sysLogBox'); if(b&&(b.scrollHeight-b.scrollTop-b.clientHeight<100||!s))this.$nextTick(()=>b.scrollTop=b.scrollHeight) }) },
         clearSysLogs(){ axios.post('/api/system_logs/clear').then(r=>{ this.loadSysLogs(); this.showToast(r.data.msg) }) },
         showFullLog(t){ this.currentLogTitle=t.filename; this.currentLogContent=t.log; modalLog.show() },
-        isRunning(t){ return ['processing','uploading'].includes(t.status) }, isError(t){ return ['error','cancelled','dirty'].includes(t.status) }, canControl(t){ return ['pending','dirty','error','cancelled'].includes(t.status) },
+        queueTasks(type){ return type==='upload' ? this.uploadTasks : this.detectTasks },
+        selectedIds(type){ const ids=new Set(this.queueTasks(type).map(t=>t.id)); return this.selectedTaskIds.filter(id=>ids.has(id)) },
+        selectedCount(type){ return this.selectedIds(type).length },
+        allSelected(type){ const tasks=this.queueTasks(type); return tasks.length>0 && tasks.every(t=>this.selectedTaskIds.includes(t.id)) },
+        toggleAll(type, checked){ const ids=this.queueTasks(type).map(t=>t.id); this.selectedTaskIds=checked ? [...new Set([...this.selectedTaskIds,...ids])] : this.selectedTaskIds.filter(id=>!ids.includes(id)) },
+        clearSelection(type){ const ids=new Set(this.queueTasks(type).map(t=>t.id)); this.selectedTaskIds=this.selectedTaskIds.filter(id=>!ids.has(id)) },
+        batchActionLabel(type, action){ const count=this.selectedCount(type); if(count)return `${action==='retry'?'重试':'停止'}选中 (${count})`; return action==='retry'?'全部重试 (错误/取消)':'全部停止' },
+        isRunning(t){ return ['processing','uploading'].includes(t.status) }, isError(t){ return ['error','cancelled','dirty'].includes(t.status) }, canControl(t){ return ['pending','dirty','error','cancelled'].includes(t.status) }, canStop(t){ return ['pending','processing','pending_upload','uploading'].includes(t.status) },
         cancel(id){ axios.post('/api/cancel/'+id).then(()=>{ this.load(); this.showToast('任务已停止','error') }) },
         retry(id){ axios.post('/api/retry/'+id, {type:this.view}).then(()=>{ this.load(); this.showToast('重试任务') }) },
         doubleSample(id){ axios.post(`/api/task/${id}/double_sample`).then(()=>{ this.load(); this.showToast('已切换动态抽样') }).catch(e=>this.showToast(e.response?.data?.msg || '切换失败','error')) },
@@ -264,9 +279,12 @@ Vue.createApp({
         updateBatchUploadRemote() {
             const remote = this.batchUploadRemote.replace(/:$/, '').trim();
             if(!remote) return;
-            this.confirmAction(`确定将全部未完成上传任务的目标改为【${remote}:】吗？\n上传中的任务不会中断，将在下次重试时切换。`, () => {
-                axios.post('/api/tasks/batch_upload_remote', {remote}).then(res => {
+            const ids = this.selectedIds('upload');
+            const scope = ids.length ? `选中的 ${ids.length} 个` : '全部';
+            this.confirmAction(`确定将${scope}未完成上传任务的目标改为【${remote}:】吗？\n上传中的任务不会中断，将在下次重试时切换。`, () => {
+                axios.post('/api/tasks/batch_upload_remote', {remote, ...(ids.length ? {ids} : {})}).then(res => {
                     this.batchUploadRemote = remote;
+                    this.clearSelection('upload');
                     this.showToast(res.data.msg);
                     this.load();
                 }).catch(e => this.showToast(e.response?.data?.msg || '修改失败', 'error'));
@@ -275,8 +293,11 @@ Vue.createApp({
 
         batchAction(type, action) {
             const actName = action==='retry'?'重试':'停止';
-            this.confirmAction(`确定要对当前列表执行【全部${actName}】吗？`, () => {
-                axios.post('/api/tasks/batch', {type, action}).then(res => {
+            const ids = this.selectedIds(type);
+            const scope = ids.length ? `选中的 ${ids.length} 个任务` : '当前列表全部任务';
+            this.confirmAction(`确定要对${scope}执行【${actName}】吗？`, () => {
+                axios.post('/api/tasks/batch', {type, action, ...(ids.length ? {ids} : {})}).then(res => {
+                    this.clearSelection(type);
                     this.showToast(res.data.msg);
                     this.load();
                 });
