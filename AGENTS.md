@@ -45,6 +45,12 @@ Task lifecycle:
 4. Clean files are marked `pending_upload` and queued to `upload_queue`.
 5. `upload_worker()` runs `rclone moveto`.
 
+Upload destination override:
+
+- The upload queue toolbar can batch-set an explicit `upload_remote` for incomplete upload tasks.
+- The override is stored in task overrides and takes precedence over the default `rclone_remote` only for that task.
+- Running uploads keep the destination they already started with; the override applies when they are retried.
+
 Important statuses:
 
 - `pending`: waiting for detection.

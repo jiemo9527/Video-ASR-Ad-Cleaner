@@ -389,11 +389,11 @@ def resolve_directory_task_path(file_path, file_count, scan_path):
     return os.path.dirname(abs_path)
 
 
-def build_directory_remote_path(root_path, file_path, root_dir_name, default_remote):
+def build_directory_remote_path(root_path, file_path, root_dir_name, default_remote, remote_override=None):
     normalized_root = root_path.rstrip('/\\')
     root_name = os.path.basename(normalized_root)
     parent_name = os.path.basename(os.path.dirname(normalized_root))
-    remote_prefix = default_remote if (parent_name == root_dir_name or not parent_name) else parent_name
+    remote_prefix = remote_override or (default_remote if (parent_name == root_dir_name or not parent_name) else parent_name)
     rel_path = os.path.relpath(file_path, root_path).replace(os.sep, '/')
     remote_rel = f"{root_name}/{rel_path}" if rel_path and rel_path != '.' else root_name
     return remote_prefix, f"{remote_prefix}:{remote_rel}"
@@ -758,12 +758,14 @@ def upload_worker():
                     continue
 
                 if dir_task:
+                    upload_remote = str(task_overrides.get('upload_remote') or '').strip()
                     dest_remote, remote_path = build_directory_remote_path(task.filepath, current_upload_path, current_root_name,
-                                                                          rclone_remote)
+                                                                            rclone_remote, remote_override=upload_remote)
                 else:
                     folder_name = os.path.basename(os.path.dirname(task.filepath))
-                    dest_remote = rclone_remote if (folder_name == current_root_name or not folder_name) else folder_name
-                    remote_path = None
+                    upload_remote = str(task_overrides.get('upload_remote') or '').strip()
+                    dest_remote = upload_remote or (rclone_remote if (folder_name == current_root_name or not folder_name) else folder_name)
+                    remote_path = f"{dest_remote}:{os.path.basename(current_upload_path)}" if upload_remote else None
 
                 def db_logger(msg):
                     try:
@@ -1247,6 +1249,33 @@ def batch_tasks():
     for i in upload_ids: upload_queue.put(i)
 
     return jsonify({"code": 200, "msg": f"操作了 {count} 个任务"})
+
+
+@app.route('/api/tasks/batch_upload_remote', methods=['POST'])
+@login_required
+def batch_upload_remote():
+    remote = str((request.json or {}).get('remote') or '').strip().rstrip(':')
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', remote):
+        return jsonify({"code": 400, "msg": "远端名只能包含字母、数字、下划线和连字符"})
+
+    count = 0
+    active_count = 0
+    for task in Task.query.all():
+        ov = get_task_overrides(task)
+        if task.status not in ['pending_upload', 'uploading', 'error', 'cancelled'] or not is_upload_task(task, ov):
+            continue
+        ov['upload_remote'] = remote
+        set_task_overrides(task, ov)
+        task.log = (task.log or '') + f"\n=== 批量修改上传位置: {remote}: ===\n"
+        count += 1
+        if task.status == 'uploading':
+            active_count += 1
+
+    db.session.commit()
+    msg = f"已更新 {count} 个未完成上传任务到 {remote}:"
+    if active_count:
+        msg += f"；{active_count} 个上传中任务将在下次重试时切换"
+    return jsonify({"code": 200, "msg": msg})
 
 
 @app.route('/api/retry/<int:tid>', methods=['POST'])

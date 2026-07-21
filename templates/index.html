@@ -100,9 +100,14 @@
             </div>
 
             <div v-if="view==='upload'">
-                <div class="p-2 border-bottom d-flex gap-2 bg-light bg-opacity-50 ps-3">
+                <div class="p-2 border-bottom d-flex gap-2 align-items-center bg-light bg-opacity-50 ps-3">
                     <button class="btn btn-sm btn-outline-primary" @click="batchAction('upload', 'retry')"><i class="bi bi-arrow-repeat me-1"></i>全部重试 (错误/取消)</button>
                     <button class="btn btn-sm btn-outline-danger" @click="batchAction('upload', 'stop')"><i class="bi bi-stop-circle me-1"></i>全部停止</button>
+                    <div class="input-group input-group-sm ms-auto me-2" style="width: 360px;">
+                        <span class="input-group-text bg-white">目标远端</span>
+                        <input class="form-control font-monospace" v-model.trim="batchUploadRemote" placeholder="例如 gstu">
+                        <button class="btn btn-outline-success" :disabled="!batchUploadRemote" @click="updateBatchUploadRemote"><i class="bi bi-folder-symlink me-1"></i>批量修改位置</button>
+                    </div>
                 </div>
                 <div class="table-responsive">
                     <table class="table table-hover align-middle mb-0">
@@ -152,7 +157,7 @@
 let modalConfig, modalLog, modalConfirm, toastInstance;
 Vue.createApp({
     delimiters: ['[[', ']]'],
-    data(){ return { tasks:[], view:'detect', curTask:{}, sysLogs:'', sysLogFilter:'', autoRefreshLogs:true, currentLogTitle:'', currentLogContent:'', statusText:{'pending':'⏳ 等待中','processing':'🔄 检测中','pending_upload':'✅ 待上传','uploading':'☁️ 上传中','uploaded':'🎉 已完成','dirty':'🚫 已拦截','error':'❌ 出错了','cancelled':'⏹ 已停止'}, toastMsg:'', toastClass:'bg-primary', toastIcon:'bi-info-circle', confirmMsg:'', confirmCallback:null, pollTimer: null }},
+    data(){ return { tasks:[], view:'detect', curTask:{}, sysLogs:'', sysLogFilter:'', autoRefreshLogs:true, currentLogTitle:'', currentLogContent:'', batchUploadRemote:'', statusText:{'pending':'⏳ 等待中','processing':'🔄 检测中','pending_upload':'✅ 待上传','uploading':'☁️ 上传中','uploaded':'🎉 已完成','dirty':'🚫 已拦截','error':'❌ 出错了','cancelled':'⏹ 已停止'}, toastMsg:'', toastClass:'bg-primary', toastIcon:'bi-info-circle', confirmMsg:'', confirmCallback:null, pollTimer: null }},
     computed: {
         filteredSystemLogs() { if(!this.sysLogs)return[]; const l=this.sysLogs.split('\n'); if(!this.sysLogFilter.trim())return l; const k=this.sysLogFilter.toLowerCase(); return l.filter(x=>x.toLowerCase().includes(k)) },
         detectTasks() { return this.tasks.filter(t => !this.isUploadTask(t)) },
@@ -255,6 +260,18 @@ Vue.createApp({
         clearHistory(){ axios.post('/api/tasks/clear').then(r=>{ this.showToast(r.data.msg); this.load() }) },
         openConfig(t){ this.curTask=JSON.parse(JSON.stringify(t)); modalConfig.show() },
         saveAndRetry(){ axios.post(`/api/task/${this.curTask.id}/save_and_retry`,this.curTask.config).then(()=>{ modalConfig.hide(); this.load(); this.showToast('策略更新') }) },
+
+        updateBatchUploadRemote() {
+            const remote = this.batchUploadRemote.replace(/:$/, '').trim();
+            if(!remote) return;
+            this.confirmAction(`确定将全部未完成上传任务的目标改为【${remote}:】吗？\n上传中的任务不会中断，将在下次重试时切换。`, () => {
+                axios.post('/api/tasks/batch_upload_remote', {remote}).then(res => {
+                    this.batchUploadRemote = remote;
+                    this.showToast(res.data.msg);
+                    this.load();
+                }).catch(e => this.showToast(e.response?.data?.msg || '修改失败', 'error'));
+            });
+        },
 
         batchAction(type, action) {
             const actName = action==='retry'?'重试':'停止';
