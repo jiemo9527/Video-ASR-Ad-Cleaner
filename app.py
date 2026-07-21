@@ -8,6 +8,7 @@ import queue
 import time
 import random
 import re
+import socket
 import concurrent.futures
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, render_template, redirect, url_for
@@ -410,6 +411,34 @@ def build_directory_remote_path(root_path, file_path, root_dir_name, default_rem
     rel_path = os.path.relpath(file_path, root_path).replace(os.sep, '/')
     remote_rel = f"{root_name}/{rel_path}" if rel_path and rel_path != '.' else root_name
     return remote_prefix, f"{remote_prefix}:{remote_rel}"
+
+
+def get_task_upload_target(task, config=None):
+    final_settings = config or get_final_config(task.overrides)
+    task_overrides = get_task_overrides(task)
+    rclone_remote = str(task_overrides.get('upload_remote') or final_settings.get('rclone_remote') or '').strip()
+    if is_directory_task(task, task_overrides):
+        current_path = task_overrides.get('_current_item') or task.filepath
+        if current_path:
+            root_name = os.path.basename(str(final_settings.get('scan_path') or '/root/downloads').rstrip('/\\'))
+            _, remote_path = build_directory_remote_path(task.filepath, current_path, root_name,
+                                                         final_settings.get('rclone_remote', 's25'),
+                                                         remote_override=task_overrides.get('upload_remote'))
+            return remote_path
+    filename = os.path.basename(task.filepath or task.filename or '')
+    return f"{rclone_remote}:{filename}" if rclone_remote else filename
+
+
+def get_masked_server_ip():
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(('8.8.8.8', 80))
+            parts = sock.getsockname()[0].split('.')
+        if len(parts) == 4:
+            return f"{parts[0]}.{parts[1]}.***.***"
+    except:
+        pass
+    return '***.***.***.***'
 
 
 def get_next_persistent_id():
@@ -1128,7 +1157,7 @@ def logout(): logout_user(); return redirect(url_for('login'))
 
 @app.route('/')
 @login_required
-def index(): return render_template('index.html')
+def index(): return render_template('index.html', server_ip=get_masked_server_ip())
 
 
 @app.route('/settings_page')
@@ -1206,11 +1235,12 @@ def get_tasks():
 
     res = []
     for t in (detect_sel + upload_sel):
+        final_config = get_final_config(t.overrides)
         res.append({"id": t.id, "filename": t.filename, "status": t.status, "log": t.log,
                     "created_at": t.created_at.strftime("%m-%d %H:%M"),
                     "finished_at": t.finished_at.strftime("%H:%M:%S") if t.finished_at else "-", "progress": t.progress,
                     "upload_speed": t.upload_speed, "upload_eta": t.upload_eta,
-                    "config": get_final_config(t.overrides)})
+                    "upload_target": get_task_upload_target(t, final_config), "config": final_config})
     return jsonify(res)
 
 
@@ -1316,13 +1346,17 @@ def retry(tid):
     t.retry_count = 0
     if is_up:
         t.status = 'pending_upload';
+        t.progress = 0
+        t.upload_speed = ''
+        t.upload_eta = '-'
         db.session.commit();
         upload_queue.put(t.id)
+        return jsonify({"code": 200, "msg": "已重新加入上传队列", "status": "pending_upload"})
     else:
         t.status = 'pending';
         db.session.commit();
         enqueue_detect_task(t.id, priority=True)
-    return jsonify({"code": 200})
+        return jsonify({"code": 200, "msg": "已重新加入检测队列", "status": "pending"})
 
 
 @app.route('/api/task/<int:tid>/direct_upload', methods=['POST'])

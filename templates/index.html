@@ -45,6 +45,7 @@
                 Scanner Pro Dashboard
             </h4>
             <div class="d-flex gap-3">
+                <span class="badge bg-light text-muted border px-3 py-2 font-monospace" title="服务器出口 IP 已隐匿"><i class="bi bi-hdd-network text-secondary"></i> 节点: {{ server_ip }}</span>
                 <span class="badge bg-light text-dark border px-3 py-2"><i class="bi bi-search text-primary"></i> 检测中: [[ activeDetectCount ]]</span>
                 <span class="badge bg-light text-dark border px-3 py-2"><i class="bi bi-cloud-arrow-up text-info"></i> 上传中: [[ activeUploadCount ]]</span>
             </div>
@@ -114,19 +115,20 @@
                 </div>
                 <div class="table-responsive">
                     <table class="table table-hover align-middle mb-0">
-                        <thead class="table-light"><tr><th class="text-center" style="width:42px"><input class="form-check-input" type="checkbox" :checked="allSelected('upload')" @change="toggleAll('upload', $event.target.checked)" title="全选"></th><th class="text-center">ID</th><th>文件信息</th><th>传输进度</th><th>速度 / ETA</th><th>结束时间</th><th class="text-center">状态</th><th class="text-end pe-4">操作</th></tr></thead>
+                        <thead class="table-light"><tr><th class="text-center" style="width:42px"><input class="form-check-input" type="checkbox" :checked="allSelected('upload')" @change="toggleAll('upload', $event.target.checked)" title="全选"></th><th class="text-center">ID</th><th>文件信息</th><th>上传目标</th><th>传输进度</th><th>速度 / ETA</th><th>结束时间</th><th class="text-center">状态</th><th class="text-end pe-4">操作</th></tr></thead>
                         <tbody>
                             <tr v-for="t in uploadTasks" :key="t.id">
                                 <td class="text-center"><input class="form-check-input" type="checkbox" v-model="selectedTaskIds" :value="t.id" :aria-label="`选择任务 ${t.id}`"></td>
                                 <td class="text-center fw-bold text-muted">[[ t.id ]]</td>
                                 <td class="text-truncate" style="max-width:250px" :title="t.filename"><i class="bi bi-file-earmark-arrow-up me-1"></i>[[ t.filename ]]</td>
+                                <td class="font-monospace small text-truncate" style="max-width:260px" :title="t.upload_target">[[ t.upload_target || '-' ]]</td>
                                 <td><div class="progress bg-secondary bg-opacity-10" style="height: 12px; border-radius: 6px;"><div class="progress-bar progress-bar-striped progress-bar-animated" :style="{width: t.progress + '%'}" :class="t.status==='uploaded'?'bg-success':'bg-primary'"></div></div><div class="small text-end text-muted mt-1">[[ t.progress ]]%</div></td>
                                 <td><div v-if="t.status==='uploading'" class="small"><div class="fw-bold text-dark">🚀 [[ t.upload_speed ]]</div><div class="text-muted">⏱ [[ t.upload_eta ]]</div></div><div v-else class="text-muted small">-</div></td>
                                 <td class="small text-muted">[[ t.finished_at || '-' ]]</td>
                                 <td class="text-center"><span class="badge rounded-pill" :class="bg(t.status)">[[ statusText[t.status]||t.status ]]</span></td>
                                 <td class="text-end pe-3"><div class="btn-group btn-group-sm"><button v-if="canStop(t)" class="btn btn-outline-danger" @click="confirmAction('确定停止上传？', () => cancel(t.id))"><i class="bi bi-stop-fill"></i></button><button v-if="t.status==='error' || t.status==='cancelled'" class="btn btn-outline-secondary" @click="retry(t.id)"><i class="bi bi-arrow-repeat"></i></button><button class="btn btn-outline-danger" @click="confirmAction('⚠️ 确定删除此记录吗？', () => deleteTask(t.id))"><i class="bi bi-trash-fill"></i></button></div></td>
                             </tr>
-                            <tr v-if="uploadTasks.length===0"><td colspan="8" class="text-center py-5 text-muted">暂无上传任务</td></tr>
+                            <tr v-if="uploadTasks.length===0"><td colspan="9" class="text-center py-5 text-muted">暂无上传任务</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -268,7 +270,7 @@ Vue.createApp({
         batchActionLabel(type, action){ const count=this.selectedCount(type); if(count)return `${action==='retry'?'重试':'停止'}选中 (${count})`; return action==='retry'?'全部重试 (错误/取消)':'全部停止' },
         isRunning(t){ return ['processing','uploading'].includes(t.status) }, isError(t){ return ['error','cancelled','dirty'].includes(t.status) }, canControl(t){ return ['pending','dirty','error','cancelled'].includes(t.status) }, canStop(t){ return ['pending','processing','pending_upload','uploading'].includes(t.status) },
         cancel(id){ axios.post('/api/cancel/'+id).then(()=>{ this.load(); this.showToast('任务已停止','error') }) },
-        retry(id){ axios.post('/api/retry/'+id, {type:this.view}).then(()=>{ this.load(); this.showToast('重试任务') }) },
+        retry(id){ axios.post('/api/retry/'+id, {type:this.view}).then(r=>{ this.showToast(r.data.msg || '已重新入队'); this.load() }).catch(e=>this.showToast(e.response?.data?.msg || '重试请求失败','error')) },
         doubleSample(id){ axios.post(`/api/task/${id}/double_sample`).then(()=>{ this.load(); this.showToast('已切换动态抽样') }).catch(e=>this.showToast(e.response?.data?.msg || '切换失败','error')) },
         directUpload(id){ axios.post(`/api/task/${id}/direct_upload`).then(()=>{ this.load(); this.showToast('切换直传') }) },
         deleteTask(id){ axios.post(`/api/task/${id}/delete`).then(r=>{ this.showToast(r.data.msg); this.load() }) },
