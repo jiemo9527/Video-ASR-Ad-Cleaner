@@ -315,7 +315,7 @@ UPLOAD_LOG_MARKERS = (
     '❌ 上传失败',
     '上传异常',
     '上传中断',
-    '上传已停止/删除',
+    '上传已停止',
     '✅ 上传成功',
     '🎉 上传成功',
     '目录任务上传完成',
@@ -416,17 +416,22 @@ def build_directory_remote_path(root_path, file_path, root_dir_name, default_rem
 def get_task_upload_target(task, config=None):
     final_settings = config or get_final_config(task.overrides)
     task_overrides = get_task_overrides(task)
-    rclone_remote = str(task_overrides.get('upload_remote') or final_settings.get('rclone_remote') or '').strip()
+    upload_remote = str(task_overrides.get('upload_remote') or '').strip()
+    rclone_remote = str(upload_remote or final_settings.get('rclone_remote') or '').strip()
     if is_directory_task(task, task_overrides):
         current_path = task_overrides.get('_current_item') or task.filepath
         if current_path:
             root_name = os.path.basename(str(final_settings.get('scan_path') or '/root/downloads').rstrip('/\\'))
             _, remote_path = build_directory_remote_path(task.filepath, current_path, root_name,
-                                                         final_settings.get('rclone_remote', 's25'),
-                                                         remote_override=task_overrides.get('upload_remote'))
+                                                          final_settings.get('rclone_remote', 's25'),
+                                                          remote_override=upload_remote)
             return remote_path
-    filename = os.path.basename(task.filepath or task.filename or '')
-    return f"{rclone_remote}:{filename}" if rclone_remote else filename
+    filepath = str(task.filepath or '')
+    filename = os.path.basename(filepath or task.filename or '')
+    root_name = os.path.basename(str(final_settings.get('scan_path') or '/root/downloads').rstrip('/\\'))
+    folder_name = os.path.basename(os.path.dirname(filepath))
+    remote_prefix = upload_remote or (rclone_remote if (folder_name == root_name or not folder_name) else folder_name)
+    return f"{remote_prefix}:{filename}" if remote_prefix else filename
 
 
 def get_masked_server_ip():
@@ -1177,6 +1182,9 @@ def trigger():
     if request.headers.get('X-API-Token') != t: return jsonify({"code": 403}), 403
     req = request.json or {}
     path = req.get('path')
+    upload_remote = str(req.get('upload_remote') or '').strip().rstrip(':')
+    if upload_remote and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', upload_remote):
+        return jsonify({"code": 400, "msg": "远端名只能包含字母、数字、下划线和连字符"}), 400
     try:
         file_count = int(req.get('file_count', 1) or 1)
     except:
@@ -1196,6 +1204,8 @@ def trigger():
             '_dir_total_files': file_count,
             '_dir_uploaded_count': 0
         }
+    if upload_remote:
+        task_overrides['upload_remote'] = upload_remote
 
     new_id = get_next_persistent_id()
     task = Task(
@@ -1283,6 +1293,7 @@ def batch_tasks():
                 count += 1
             elif action == 'stop' and t.status in ['pending_upload', 'uploading']:
                 if t.id in running_tasks: running_tasks[t.id].stop()
+                t.log = (t.log or '') + "\n⏹ 上传已停止\n"
                 t.status = 'cancelled';
                 t.finished_at = datetime.now();
                 count += 1
@@ -1404,6 +1415,41 @@ def save_and_retry(tid):
     return jsonify({"code": 200})
 
 
+def remove_task_files(task):
+    files_to_remove = set()
+    if task.filepath:
+        files_to_remove.add(task.filepath)
+        try:
+            dirname = os.path.dirname(task.filepath)
+            basename = os.path.basename(task.filepath)
+            name, ext = os.path.splitext(basename)
+            files_to_remove.add(os.path.join(dirname, f"{name}_clean{ext}"))
+            files_to_remove.add(os.path.join(dirname, f"{name}_clean_meta{ext}"))
+            if "_clean" in name:
+                orig = name.replace("_clean_meta", "").replace("_clean", "")
+                files_to_remove.add(os.path.join(dirname, f"{orig}{ext}"))
+        except:
+            pass
+
+    deleted = []
+    if is_directory_task(task):
+        if task.filepath and os.path.isdir(task.filepath):
+            try:
+                shutil.rmtree(task.filepath)
+                deleted.append(os.path.basename(task.filepath.rstrip('/\\')))
+            except:
+                pass
+    else:
+        for fp in files_to_remove:
+            if fp and os.path.exists(fp):
+                try:
+                    os.remove(fp);
+                    deleted.append(os.path.basename(fp))
+                except:
+                    pass
+    return deleted
+
+
 @app.route('/api/task/<int:tid>/delete', methods=['POST'])
 @login_required
 def delete_task_file(tid):
@@ -1418,41 +1464,49 @@ def delete_task_file(tid):
         safe_db_commit(f"defer delete active task {tid}")
         return jsonify({"code": 409, "msg": "任务仍在运行，已发送停止指令；请稍后再删除记录"})
 
-    files_to_remove = set()
-    if t.filepath:
-        files_to_remove.add(t.filepath)
-        try:
-            dirname = os.path.dirname(t.filepath)
-            basename = os.path.basename(t.filepath)
-            name, ext = os.path.splitext(basename)
-            files_to_remove.add(os.path.join(dirname, f"{name}_clean{ext}"))
-            files_to_remove.add(os.path.join(dirname, f"{name}_clean_meta{ext}"))
-            if "_clean" in name:
-                orig = name.replace("_clean_meta", "").replace("_clean", "")
-                files_to_remove.add(os.path.join(dirname, f"{orig}{ext}"))
-        except:
-            pass
-
-    deleted = []
-    if is_directory_task(t):
-        if t.filepath and os.path.isdir(t.filepath):
-            try:
-                shutil.rmtree(t.filepath)
-                deleted.append(os.path.basename(t.filepath.rstrip('/\\')))
-            except:
-                pass
-    else:
-        for fp in files_to_remove:
-            if fp and os.path.exists(fp):
-                try:
-                    os.remove(fp);
-                    deleted.append(os.path.basename(fp))
-                except:
-                    pass
-
+    deleted = remove_task_files(t)
     db.session.delete(t);
     db.session.commit()
     msg = f"任务及文件已删除 ({', '.join(deleted)})" if deleted else "任务记录已删除 (未找到文件)"
+    return jsonify({"code": 200, "msg": msg})
+
+
+@app.route('/api/tasks/batch_delete', methods=['POST'])
+@login_required
+def batch_delete_tasks():
+    data = request.json or {}
+    task_ids = data.get('ids')
+    if not isinstance(task_ids, list) or not task_ids:
+        return jsonify({"code": 400, "msg": "请先选择要删除的任务"}), 400
+
+    selected_tasks = get_batch_task_list(data)
+    active_ids = get_active_task_ids()
+    deleted_count = 0
+    deleted_files = 0
+    stopped_count = 0
+
+    for task in selected_tasks:
+        if task.id in active_ids:
+            core = running_tasks.get(task.id)
+            if core:
+                core.stop()
+            if is_upload_task(task):
+                task.log = (task.log or '') + "\n⏹ 上传已停止\n"
+            task.status = 'cancelled'
+            task.finished_at = datetime.now()
+            stopped_count += 1
+            continue
+
+        deleted_files += len(remove_task_files(task))
+        db.session.delete(task)
+        deleted_count += 1
+
+    db.session.commit()
+    msg = f"已删除 {deleted_count} 个任务"
+    if deleted_files:
+        msg += f"及 {deleted_files} 个本地文件"
+    if stopped_count:
+        msg += f"；{stopped_count} 个运行中任务已停止，待结束后可再次删除"
     return jsonify({"code": 200, "msg": msg})
 
 

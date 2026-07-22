@@ -72,6 +72,7 @@
                 <div class="p-2 border-bottom d-flex gap-2 bg-light bg-opacity-50 ps-3">
                     <button class="btn btn-sm btn-outline-primary" @click="batchAction('detect', 'retry')"><i class="bi bi-arrow-repeat me-1"></i>[[ batchActionLabel('detect', 'retry') ]]</button>
                     <button class="btn btn-sm btn-outline-danger" @click="batchAction('detect', 'stop')"><i class="bi bi-stop-circle me-1"></i>[[ batchActionLabel('detect', 'stop') ]]</button>
+                    <button class="btn btn-sm btn-outline-danger" :disabled="!selectedCount('detect')" @click="batchDelete('detect')"><i class="bi bi-trash-fill me-1"></i>批量删除</button>
                     <span v-if="selectedCount('detect')" class="small text-primary align-self-center ms-1">已选 [[ selectedCount('detect') ]] 项 <button class="btn btn-link btn-sm p-0 ms-1" @click="clearSelection('detect')">清除</button></span>
                 </div>
                 <div class="table-responsive">
@@ -106,6 +107,7 @@
                 <div class="p-2 border-bottom d-flex gap-2 align-items-center bg-light bg-opacity-50 ps-3">
                     <button class="btn btn-sm btn-outline-primary" @click="batchAction('upload', 'retry')"><i class="bi bi-arrow-repeat me-1"></i>[[ batchActionLabel('upload', 'retry') ]]</button>
                     <button class="btn btn-sm btn-outline-danger" @click="batchAction('upload', 'stop')"><i class="bi bi-stop-circle me-1"></i>[[ batchActionLabel('upload', 'stop') ]]</button>
+                    <button class="btn btn-sm btn-outline-danger" :disabled="!selectedCount('upload')" @click="batchDelete('upload')"><i class="bi bi-trash-fill me-1"></i>批量删除</button>
                     <span v-if="selectedCount('upload')" class="small text-primary align-self-center ms-1">已选 [[ selectedCount('upload') ]] 项 <button class="btn btn-link btn-sm p-0 ms-1" @click="clearSelection('upload')">清除</button></span>
                     <div class="input-group input-group-sm ms-auto me-2" style="width: 360px;">
                         <span class="input-group-text bg-white">目标远端</span>
@@ -188,7 +190,7 @@ Vue.createApp({
                 if(t.config && t.config.direct_upload) return true;
                 if(t.upload_speed || (t.upload_eta && t.upload_eta !== '-')) return true;
                 const log = t.log || '';
-                const markers = ['☁️ 上传:', '=== 批量重传 ===', '=== 直传 ===', '❌ 上传失败', '上传异常', '上传中断', '上传已停止/删除', '✅ 上传成功', '🎉 上传成功', '目录任务上传完成', '文件上传成功'];
+                const markers = ['☁️ 上传:', '=== 批量重传 ===', '=== 直传 ===', '❌ 上传失败', '上传异常', '上传中断', '上传已停止', '✅ 上传成功', '🎉 上传成功', '目录任务上传完成', '文件上传成功'];
                 if(markers.some(m => log.includes(m))) return true;
             }
             return false;
@@ -304,6 +306,17 @@ Vue.createApp({
                     this.showToast(res.data.msg);
                     this.load();
                 });
+            });
+        },
+        batchDelete(type) {
+            const ids = this.selectedIds(type);
+            if(!ids.length) return;
+            this.confirmAction(`⚠️ 确定删除选中的 ${ids.length} 个任务及其本地媒体文件吗？此操作不可恢复。运行中的任务将先停止，结束后可再次删除。`, () => {
+                axios.post('/api/tasks/batch_delete', {ids}).then(res => {
+                    this.clearSelection(type);
+                    this.showToast(res.data.msg);
+                    this.load();
+                }).catch(e => this.showToast(e.response?.data?.msg || '批量删除失败', 'error'));
             });
         }
     }
