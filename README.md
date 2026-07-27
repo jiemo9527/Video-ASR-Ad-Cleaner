@@ -48,7 +48,10 @@ sudo bash -c 'bash <(curl -fsSL https://raw.githubusercontent.com/jiemo9527/Vide
 安装器会下载项目、安装依赖，初始化 Scanner 管理的 Aria2 配置，并进行网络与可选 Nginx HTTPS/WSS 配置。
 
 ### 首次登录
-安装完成后，终端会一次性显示随机 Dashboard 用户名与密码。忘记密码时，在项目目录运行 `install/install.sh`，选择 `3. 重置 Dashboard 密码`；工具会生成并打印新的随机密码。
+安装完成后，终端会一次性显示随机 Dashboard 用户名与密码。忘记密码时，在项目目录运行 `install/install.sh`，选择 `4. 重置 Dashboard 密码`；工具会生成并打印新的随机密码。
+
+### 更新
+再次运行安装命令后选择 `2. 更新`。更新模式会下载最新项目代码、更新依赖并重启 Scanner；保留数据库、`scanner.env`、Aria2 配置与 `rpc-secret`、Nginx、模型和 AriaNg 数据，不重新进入网络或 Nginx 配置。
 
 ### 基本配置
 登录后进入 `设置`：

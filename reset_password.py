@@ -19,9 +19,10 @@ with app.app_context():
             raise SystemExit(f'Dashboard user not found: {args.username}')
         raise SystemExit('No Dashboard user exists. Start Scanner once before resetting a password.')
 
+    username = user.id
     password = secrets.token_urlsafe(18)
     user.password_hash = generate_password_hash(password)
     db.session.commit()
 
-print(f'username={user.id}')
+print(f'username={username}')
 print(f'password={password}')

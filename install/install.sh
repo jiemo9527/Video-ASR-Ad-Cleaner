@@ -91,6 +91,140 @@ function install_p3terx_aria2() {
     echo -e "${GREEN}✅ P3TERX Aria2 已安装: /usr/local/bin/aria2c ($release)${NC}"
 }
 
+function install_system_dependencies() {
+    apt-get update -qq || return 1
+    apt-get install -y \
+        ffmpeg python3 python3-pip unzip curl ca-certificates libsndfile1 net-tools \
+        git cmake build-essential rclone tar gzip openssl > /dev/null || return 1
+
+    for REQUIRED_CMD in ffmpeg ffprobe python3 pip3 git cmake rclone; do
+        if ! command -v "$REQUIRED_CMD" >/dev/null 2>&1; then
+            echo -e "${YELLOW}⚠️  未检测到 $REQUIRED_CMD，请确认系统依赖安装是否成功。${NC}"
+        fi
+    done
+    install_p3terx_aria2
+}
+
+function deploy_project_archive() {
+    local install_base="$1"
+    local project_tmp project_archive detected_app detected_dir scanner_env_backup
+
+    if [ -d "$install_base" ]; then
+        echo -e "${YELLOW}⚠️  目录 $install_base 已存在，正在覆盖代码文件并保留运行数据...${NC}"
+    fi
+    scanner_env_backup=""
+    if [ -f "$install_base/scanner.env" ]; then
+        scanner_env_backup=$(mktemp)
+        cp -a "$install_base/scanner.env" "$scanner_env_backup" || return 1
+    fi
+
+    project_tmp=$(mktemp -d)
+    project_archive="$project_tmp/scanner.zip"
+    if ! curl -fL --retry 3 -o "$project_archive" "$PROJECT_ARCHIVE_URL"; then
+        [ -n "$scanner_env_backup" ] && rm -f "$scanner_env_backup"
+        rm -rf "$project_tmp"
+        echo -e "${RED}❌ 项目下载失败: $PROJECT_ARCHIVE_URL${NC}"
+        return 1
+    fi
+    if ! unzip -q "$project_archive" -d "$project_tmp/source"; then
+        [ -n "$scanner_env_backup" ] && rm -f "$scanner_env_backup"
+        rm -rf "$project_tmp"
+        echo -e "${RED}❌ 项目压缩包解压失败。${NC}"
+        return 1
+    fi
+    detected_app=$(find "$project_tmp/source" -type f -name "app.py" -print -quit)
+    if [ -z "$detected_app" ]; then
+        [ -n "$scanner_env_backup" ] && rm -f "$scanner_env_backup"
+        rm -rf "$project_tmp"
+        echo -e "${RED}❌ 项目压缩包中未找到 app.py。${NC}"
+        return 1
+    fi
+    detected_dir=$(dirname "$detected_app")
+    mkdir -p "$install_base"
+    if ! cp -a "$detected_dir"/. "$install_base/"; then
+        [ -n "$scanner_env_backup" ] && rm -f "$scanner_env_backup"
+        rm -rf "$project_tmp"
+        echo -e "${RED}❌ 无法部署项目文件到: $install_base${NC}"
+        return 1
+    fi
+    if [ -n "$scanner_env_backup" ]; then
+        cp -a "$scanner_env_backup" "$install_base/scanner.env" || {
+            rm -f "$scanner_env_backup"
+            rm -rf "$project_tmp"
+            echo -e "${RED}❌ 无法恢复现有 scanner.env。${NC}"
+            return 1
+        }
+        rm -f "$scanner_env_backup"
+    fi
+    rm -rf "$project_tmp"
+    PROJECT_ROOT="$install_base"
+    echo -e "${YELLOW}>>> 项目根目录确认: $PROJECT_ROOT${NC}"
+}
+
+function ensure_ariang_assets() {
+    local project_root="$1"
+    local ariang_dir marker ariang_tmp ariang_index ariang_views
+
+    ariang_dir="$project_root/ariang"
+    marker="$ariang_dir/.scanner_ariang_allinone_1.3.14"
+    if [ -f "$ariang_dir/index.html" ] && [ -f "$ariang_dir/views/settings-ariang.html" ] && [ -f "$marker" ]; then
+        return
+    fi
+
+    echo -e "${GREEN}>>> 下载/修复 AriaNg 下载器资源...${NC}"
+    ariang_tmp=$(mktemp -d)
+    if curl -fL --retry 3 -o "$ariang_tmp/ariang.zip" "https://github.com/mayswind/AriaNg/releases/download/1.3.14/AriaNg-1.3.14-AllInOne.zip" \
+        && unzip -q "$ariang_tmp/ariang.zip" -d "$ariang_tmp/extract" \
+        && curl -fL --retry 3 -o "$ariang_tmp/source.zip" "https://github.com/mayswind/AriaNg/archive/refs/tags/1.3.14.zip" \
+        && unzip -q "$ariang_tmp/source.zip" -d "$ariang_tmp/source"; then
+        ariang_index=$(find "$ariang_tmp/extract" -type f -name index.html -print -quit)
+        ariang_views=$(find "$ariang_tmp/source" -type d -path '*/src/views' -print -quit)
+        if [ -n "$ariang_index" ] && [ -n "$ariang_views" ]; then
+            mkdir -p "$ariang_dir"
+            cp -a "$(dirname "$ariang_index")"/. "$ariang_dir/"
+            cp -a "$ariang_views" "$ariang_dir/"
+            touch "$marker"
+            echo -e "${GREEN}✅ AriaNg 资源已就绪。${NC}"
+        else
+            echo -e "${YELLOW}⚠️ AriaNg 压缩包中未找到网页资源或设置模板，跳过。${NC}"
+        fi
+    else
+        echo -e "${YELLOW}⚠️ AriaNg 下载失败，安装后可重新运行脚本补齐。${NC}"
+    fi
+    rm -rf "$ariang_tmp"
+}
+
+function install_python_dependencies() {
+    local project_root="$1"
+    local pip_xargs=""
+
+    if [ ! -f "$project_root/requirements.txt" ]; then
+        echo -e "${YELLOW}⚠️ 未找到 requirements.txt，跳过。${NC}"
+        return
+    fi
+    if pip3 install --help | grep -q "break-system-packages"; then
+        echo -e "${YELLOW}>>> 启用 PEP 668 系统保护绕过模式...${NC}"
+        pip_xargs="--break-system-packages"
+    fi
+    echo -e "${CYAN}正在修复系统包冲突 (blinker)...${NC}"
+    pip3 install blinker --ignore-installed $pip_xargs > /dev/null 2>&1
+    echo -e "${CYAN}正在安装/检查其余依赖...${NC}"
+    pip3 install -r "$project_root/requirements.txt" $pip_xargs
+}
+
+function get_installed_project_root() {
+    local project_root=""
+
+    if [ -f "/etc/systemd/system/$SERVICE_NAME.service" ]; then
+        project_root=$(grep "WorkingDirectory=" "/etc/systemd/system/$SERVICE_NAME.service" | cut -d= -f2)
+    fi
+    if [ -z "$project_root" ] || [ ! -f "$project_root/app.py" ]; then
+        echo -e "${RED}❌ 未找到已安装的 Scanner 服务或项目目录。${NC}" >&2
+        return 1
+    fi
+    printf '%s\n' "$project_root"
+}
+
 function set_aria2_rpc_secret() {
     local config="$1"
     local rpc_secret
@@ -513,81 +647,16 @@ function install_app() {
 
     # 2. 系统依赖
     echo -e "${GREEN}>>> [1/5] 安装/检查系统依赖...${NC}"
-    apt-get update -qq
-    apt-get install -y \
-        ffmpeg python3 python3-pip unzip curl ca-certificates libsndfile1 net-tools \
-        git cmake build-essential rclone tar gzip openssl > /dev/null
-
-    for REQUIRED_CMD in ffmpeg ffprobe python3 pip3 git cmake rclone; do
-        if ! command -v "$REQUIRED_CMD" >/dev/null 2>&1; then
-            echo -e "${YELLOW}⚠️  未检测到 $REQUIRED_CMD，请确认系统依赖安装是否成功。${NC}"
-        fi
-    done
-    install_p3terx_aria2 || return
+    install_system_dependencies || return
 
     # 3. 下载、解压并部署项目
     echo -e "${GREEN}>>> [2/5] 下载并部署项目...${NC}"
-    if [ -d "$INSTALL_BASE" ]; then
-        echo -e "${YELLOW}⚠️  目录 $INSTALL_BASE 已存在，正在覆盖...${NC}"
-    fi
-    PROJECT_TMP=$(mktemp -d)
-    PROJECT_ARCHIVE="$PROJECT_TMP/scanner.zip"
-    if ! curl -fL --retry 3 -o "$PROJECT_ARCHIVE" "$PROJECT_ARCHIVE_URL"; then
-        rm -rf "$PROJECT_TMP"
-        echo -e "${RED}❌ 项目下载失败: $PROJECT_ARCHIVE_URL${NC}"
-        return
-    fi
-    if ! unzip -q "$PROJECT_ARCHIVE" -d "$PROJECT_TMP/source"; then
-        rm -rf "$PROJECT_TMP"
-        echo -e "${RED}❌ 项目压缩包解压失败。${NC}"
-        return
-    fi
-    DETECTED_APP=$(find "$PROJECT_TMP/source" -type f -name "app.py" -print -quit)
-    if [ -z "$DETECTED_APP" ]; then
-        rm -rf "$PROJECT_TMP"
-        echo -e "${RED}❌ 项目压缩包中未找到 app.py。${NC}"
-        return
-    fi
-    DETECTED_DIR=$(dirname "$DETECTED_APP")
-    mkdir -p "$INSTALL_BASE"
-    if ! cp -a "$DETECTED_DIR"/. "$INSTALL_BASE/"; then
-        rm -rf "$PROJECT_TMP"
-        echo -e "${RED}❌ 无法部署项目文件到: $INSTALL_BASE${NC}"
-        return
-    fi
-    rm -rf "$PROJECT_TMP"
-    PROJECT_ROOT="$INSTALL_BASE"
-    echo -e "${YELLOW}>>> 项目根目录确认: $PROJECT_ROOT${NC}"
+    deploy_project_archive "$INSTALL_BASE" || return
 
     ARIA2_CONFIG_ARCHIVE="$PROJECT_ROOT/$ARIA2_CONFIG_ARCHIVE_RELATIVE"
     initialize_scanner_aria2_config "$ARIA2_CONFIG_ARCHIVE" "$ARIA2_CONF" || return
 
-    # AriaNg is kept outside Git and downloaded as a static web asset.
-    ARIANG_DIR="$PROJECT_ROOT/ariang"
-    ARIANG_COMPLETE_MARKER="$ARIANG_DIR/.scanner_ariang_allinone_1.3.14"
-    if [ ! -f "$ARIANG_DIR/index.html" ] || [ ! -f "$ARIANG_DIR/views/settings-ariang.html" ] || [ ! -f "$ARIANG_COMPLETE_MARKER" ]; then
-        echo -e "${GREEN}>>> 下载/修复 AriaNg 下载器资源...${NC}"
-        ARIANG_TMP=$(mktemp -d)
-        if curl -fL --retry 3 -o "$ARIANG_TMP/ariang.zip" "https://github.com/mayswind/AriaNg/releases/download/1.3.14/AriaNg-1.3.14-AllInOne.zip" \
-            && unzip -q "$ARIANG_TMP/ariang.zip" -d "$ARIANG_TMP/extract" \
-            && curl -fL --retry 3 -o "$ARIANG_TMP/source.zip" "https://github.com/mayswind/AriaNg/archive/refs/tags/1.3.14.zip" \
-            && unzip -q "$ARIANG_TMP/source.zip" -d "$ARIANG_TMP/source"; then
-            ARIANG_INDEX=$(find "$ARIANG_TMP/extract" -type f -name index.html -print -quit)
-            ARIANG_VIEWS=$(find "$ARIANG_TMP/source" -type d -path '*/src/views' -print -quit)
-            if [ -n "$ARIANG_INDEX" ] && [ -n "$ARIANG_VIEWS" ]; then
-                mkdir -p "$ARIANG_DIR"
-                cp -a "$(dirname "$ARIANG_INDEX")"/. "$ARIANG_DIR/"
-                cp -a "$ARIANG_VIEWS" "$ARIANG_DIR/"
-                touch "$ARIANG_COMPLETE_MARKER"
-                echo -e "${GREEN}✅ AriaNg 资源已就绪。${NC}"
-            else
-                echo -e "${YELLOW}⚠️ AriaNg 压缩包中未找到网页资源或设置模板，跳过。${NC}"
-            fi
-        else
-            echo -e "${YELLOW}⚠️ AriaNg 下载失败，安装后可重新运行脚本补齐。${NC}"
-        fi
-        rm -rf "$ARIANG_TMP"
-    fi
+    ensure_ariang_assets "$PROJECT_ROOT"
 
     # 5. 配置监听地址
     echo -e "${GREEN}>>> [Extra] 配置网络监听...${NC}"
@@ -613,28 +682,7 @@ function install_app() {
 
     # 6. Python 依赖 (当前版本使用 GGUF/llama.cpp，本地 ASR 不再依赖 Torch/FunASR)
     echo -e "${GREEN}>>> [3/5] 安装 Python 依赖...${NC}"
-    if [ -f "$PROJECT_ROOT/requirements.txt" ]; then
-
-        # 准备参数: 检测是否需要 --break-system-packages
-        PIP_XARGS=""
-        if pip3 install --help | grep -q "break-system-packages"; then
-            echo -e "${YELLOW}>>> 启用 PEP 668 系统保护绕过模式...${NC}"
-            PIP_XARGS="--break-system-packages"
-        fi
-
-        # === 关键修复步骤 Start ===
-        # 1. 单独强制重装 blinker (解决 RECORD file not found 错误)
-        echo -e "${CYAN}正在修复系统包冲突 (blinker)...${NC}"
-        pip3 install blinker --ignore-installed $PIP_XARGS > /dev/null 2>&1
-
-        # 2. 正常安装轻量 Web/API 依赖
-        echo -e "${CYAN}正在安装/检查其余依赖...${NC}"
-        pip3 install -r "$PROJECT_ROOT/requirements.txt" $PIP_XARGS
-        # === 关键修复步骤 End ===
-
-    else
-        echo -e "${YELLOW}⚠️ 未找到 requirements.txt，跳过。${NC}"
-    fi
+    install_python_dependencies "$PROJECT_ROOT"
 
     # 7. Aria2 运行集成
     echo -e "${GREEN}>>> [4/5] 检查 Aria2 服务...${NC}"
@@ -787,6 +835,36 @@ EOF
     echo -e "------------------------------------------------"
 }
 
+function update_app() {
+    local project_root
+
+    echo -e "${CYAN}>>> 更新 Scanner Pro...${NC}"
+    project_root=$(get_installed_project_root) || return
+    echo -e "${YELLOW}>>> 更新目录: $project_root${NC}"
+    echo -e "${YELLOW}>>> 保留数据库、scanner.env、Aria2 配置/rpc-secret、Nginx、模型和 AriaNg 数据。${NC}"
+
+    echo -e "${GREEN}>>> [1/3] 检查系统依赖...${NC}"
+    install_system_dependencies || return
+
+    echo -e "${GREEN}>>> [2/3] 下载并更新代码...${NC}"
+    deploy_project_archive "$project_root" || return
+    chmod +x "$PROJECT_ROOT/trigger.sh"
+    ensure_ariang_assets "$PROJECT_ROOT"
+
+    echo -e "${GREEN}>>> [3/3] 更新 Python 依赖并重启服务...${NC}"
+    install_python_dependencies "$PROJECT_ROOT" || return
+    if ! systemctl restart "$SERVICE_NAME"; then
+        echo -e "${RED}❌ Scanner 重启失败，请检查: systemctl status $SERVICE_NAME${NC}"
+        return 1
+    fi
+    if systemctl is-active --quiet "$SERVICE_NAME"; then
+        echo -e "${GREEN}✅ 更新完成，Scanner 正在运行。${NC}"
+    else
+        echo -e "${RED}❌ Scanner 更新后未处于运行状态。${NC}"
+        return 1
+    fi
+}
+
 function reset_dashboard_password() {
     local project_root reset_username
 
@@ -886,16 +964,18 @@ function uninstall_app() {
 while true; do
     echo -e "\n${CYAN}=== Scanner Pro 管理脚本 ===${NC}"
     echo "1. 安装 (Install)"
-    echo "2. 卸载 (Uninstall)"
-    echo "3. 重置 Dashboard 密码 (Reset Password)"
-    echo "4. 退出 (Exit)"
-    read -p "请输入选项 [1-4]: " choice
+    echo "2. 更新 (Update)"
+    echo "3. 卸载 (Uninstall)"
+    echo "4. 重置 Dashboard 密码 (Reset Password)"
+    echo "5. 退出 (Exit)"
+    read -p "请输入选项 [1-5]: " choice
 
     case $choice in
         1) install_app; break ;;
-        2) uninstall_app; break ;;
-        3) reset_dashboard_password; break ;;
-        4) exit 0 ;;
+        2) update_app; break ;;
+        3) uninstall_app; break ;;
+        4) reset_dashboard_password; break ;;
+        5) exit 0 ;;
         *) echo -e "${RED}无效选项。${NC}" ;;
     esac
 done
