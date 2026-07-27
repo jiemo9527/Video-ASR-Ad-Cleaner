@@ -507,6 +507,9 @@ def add_aria2_rpc_token(command, secret):
     if not secret or not isinstance(command, dict):
         return
     params = command.get('params')
+    if params is None:
+        params = []
+        command['params'] = params
     if not isinstance(params, list):
         return
     if command.get('method') == 'system.multicall':
@@ -1460,7 +1463,12 @@ def aria_ng(filename='index.html'):
         theme_path = os.path.join(APP_ROOT, 'static', 'ariang-scanner.css')
         theme_version = int(os.path.getmtime(theme_path)) if os.path.isfile(theme_path) else 0
         theme_link = f'<link rel="stylesheet" href="{url_for("static", filename="ariang-scanner.css", v=theme_version)}">'
-        return page.replace('</head>', f'{theme_link}</head>'), 200, {
+        quiet_dialogs_path = os.path.join(APP_ROOT, 'static', 'ariang-scanner-quiet-dialogs.js')
+        quiet_dialogs_version = int(os.path.getmtime(quiet_dialogs_path)) if os.path.isfile(quiet_dialogs_path) else 0
+        quiet_dialogs_script = (
+            f'<script defer src="{url_for("static", filename="ariang-scanner-quiet-dialogs.js", v=quiet_dialogs_version)}"></script>'
+        )
+        return page.replace('</head>', f'{theme_link}{quiet_dialogs_script}</head>'), 200, {
             'Content-Type': 'text/html; charset=utf-8'
         }
     return send_from_directory(ARIA_NG_DIR, filename)

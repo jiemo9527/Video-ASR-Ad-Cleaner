@@ -163,7 +163,7 @@
             </div>
 
             <div v-show="view==='aria2'" class="p-3 bg-light">
-                <div class="aria-ng-toolbar d-flex justify-content-between align-items-center mb-2"><div class="d-flex align-items-center gap-2"><span class="fw-bold text-primary"><i class="bi bi-download me-1"></i>Aria2 下载器</span><span class="badge bg-warning text-dark">等待 [[ aria2Stats.waiting ]]</span><span class="badge bg-secondary">已停止 [[ aria2Stats.stopped ]]</span></div><a href="{{ url_for('aria_ng_launcher') }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">新窗口</a></div>
+                <div class="aria-ng-toolbar d-flex justify-content-between align-items-center mb-2"><span class="fw-bold text-primary"><i class="bi bi-download me-1"></i>Aria2 下载器</span><a href="{{ url_for('aria_ng_launcher') }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">新窗口</a></div>
                 {% if aria_ng_available %}
                 <iframe id="ariaNgFrame" class="aria-ng-frame" src="{{ url_for('aria_ng_launcher') }}" title="AriaNg 下载器"></iframe>
                 <details class="aria-ng-options-import mt-2 border rounded bg-white">
@@ -173,7 +173,6 @@
                             <label for="ariaNgOptionsImport" class="small text-muted mb-0">AriaNg.Options JSON</label>
                             <div class="d-flex gap-1">
                                 <button class="btn btn-sm btn-outline-secondary" @click="exportAriaNgOptions"><i class="bi bi-clipboard me-1"></i>导出到剪贴板</button>
-                                <button class="btn btn-sm btn-outline-danger" @click="clearAriaNgOptions"><i class="bi bi-eraser me-1"></i>清空配置</button>
                                 <button class="btn btn-sm btn-outline-primary" :disabled="!ariaNgOptionsImport.trim()" @click="importAriaNgOptions"><i class="bi bi-arrow-repeat me-1"></i>导入并刷新</button>
                             </div>
                         </div>
@@ -310,16 +309,6 @@ Vue.createApp({
                 const frame=document.getElementById('ariaNgFrame');
                 if(frame) frame.src=frame.getAttribute('src') || frame.src;
                 this.showToast('AriaNg 设置已导入，下载器正在刷新');
-            });
-        },
-
-        clearAriaNgOptions(){
-            this.confirmAction('确定清空当前浏览器的 AriaNg 配置吗？\n不会修改服务器 Aria2 设置或下载任务，下载器将恢复 Scanner 默认连接。', () => {
-                localStorage.removeItem('AriaNg.Options');
-                this.ariaNgOptionsImport='';
-                const frame=document.getElementById('ariaNgFrame');
-                if(frame) frame.src=frame.getAttribute('src') || frame.src;
-                this.showToast('AriaNg 配置已清空，下载器正在恢复默认连接');
             });
         },
 

@@ -98,6 +98,26 @@ body.skin-aria-ng {
     display: none !important;
 }
 
+.skin-aria-ng .sidebar-menu > li > a .scanner-task-count {
+    float: none;
+    min-width: 0;
+    margin-left: 4px;
+    padding: 0;
+    color: var(--scanner-violet);
+    background: transparent;
+    font-size: 16px;
+    font-weight: 700;
+    line-height: 1;
+    text-align: center;
+    vertical-align: -1px;
+}
+
+/* Scanner's embedded mode never uses AriaNg's blocking SweetAlert dialogs. */
+.skin-aria-ng .sweet-alert,
+.skin-aria-ng .sweet-overlay {
+    display: none !important;
+}
+
 .skin-aria-ng .pagination > .active > a,
 .skin-aria-ng .pagination > .active > span {
     background-color: var(--scanner-violet);
