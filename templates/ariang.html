@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Aria2 下载器</title>
+</head>
+<body>
+<script>
+(() => {
+    const key = 'AriaNg.Options';
+    let options = {};
+    try { options = JSON.parse(localStorage.getItem(key) || '{}'); } catch (_) {}
+    // AriaNg expects language even before it creates its remaining defaults.
+    if (!options.language) options.language = 'zh_Hans';
+    const port = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
+    Object.assign(options, {
+        rpcHost: window.location.hostname,
+        rpcPort: port,
+        rpcInterface: 'api/aria2/jsonrpc',
+        protocol: window.location.protocol.replace(':', ''),
+        httpMethod: 'POST',
+        secret: ''
+    });
+    localStorage.setItem(key, JSON.stringify(options));
+    window.location.replace('{{ url_for('aria_ng') }}#/downloading');
+})();
+</script>
+</body>
+</html>

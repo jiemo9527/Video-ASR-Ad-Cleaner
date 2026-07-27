@@ -1,0 +1,2176 @@
+import os
+import json
+import shutil
+import subprocess
+import sys
+import threading
+import queue
+import secrets
+import time
+import random
+import re
+import socket
+import concurrent.futures
+import requests
+from datetime import datetime, timedelta
+from flask import Flask, request, jsonify, render_template, redirect, url_for, send_from_directory
+from flask_login import LoginManager, login_user, login_required, logout_user, current_user
+from werkzeug.security import check_password_hash, generate_password_hash
+from database import db, Task, Config, Keyword, User
+from core_logic import ScannerCore, sensevoice_gguf_ready, VIDEO_EXTENSIONS
+from sqlalchemy import text
+
+app = Flask(__name__)
+APP_ROOT = os.path.dirname(os.path.abspath(__file__))
+ARIA_NG_DIR = os.path.join(APP_ROOT, 'ariang')
+ARIA2_CONFIG_PATH = os.environ.get('SCANNER_ARIA2_CONFIG_PATH', '/root/.aria2c/aria2.conf')
+
+# ================= 🔐 Session 密钥持久化 =================
+secret_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.flask_secret')
+if os.path.exists(secret_file):
+    try:
+        with open(secret_file, 'rb') as f:
+            app.secret_key = f.read()
+    except:
+        app.secret_key = os.urandom(24)
+else:
+    new_key = os.urandom(24)
+    try:
+        with open(secret_file, 'wb') as f:
+            f.write(new_key)
+    except:
+        pass
+    app.secret_key = new_key
+app.permanent_session_lifetime = timedelta(days=30)
+
+# ================= 🔧 基础配置 =================
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///tasks.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db.init_app(app)
+
+APP_VERSION = os.environ.get('APP_VERSION', 'v20260705')
+
+login_manager = LoginManager(app)
+login_manager.login_view = 'login'
+
+
+class FrontQueue(queue.Queue):
+    def put_front(self, item, block=True, timeout=None):
+        with self.not_full:
+            if self.maxsize > 0:
+                if not block:
+                    if self._qsize() >= self.maxsize:
+                        raise queue.Full
+                elif timeout is None:
+                    while self._qsize() >= self.maxsize:
+                        self.not_full.wait()
+                elif timeout < 0:
+                    raise ValueError("'timeout' must be a non-negative number")
+                else:
+                    endtime = time.time() + timeout
+                    while self._qsize() >= self.maxsize:
+                        remaining = endtime - time.time()
+                        if remaining <= 0.0:
+                            raise queue.Full
+                        self.not_full.wait(remaining)
+            self.queue.appendleft(item)
+            self.unfinished_tasks += 1
+            self.not_empty.notify()
+
+
+detect_queue = FrontQueue()
+upload_queue = queue.Queue()
+running_tasks = {}
+active_detect_tasks = set()
+active_upload_tasks = set()
+task_state_lock = threading.Lock()
+trigger_task_lock = threading.Lock()
+download_proc = None;
+download_logs = [];
+download_lock = threading.Lock()
+LOGIN_ATTEMPTS = {}
+
+
+def enqueue_detect_task(task_id, priority=False):
+    if priority:
+        detect_queue.put_front(task_id)
+    else:
+        detect_queue.put(task_id)
+
+
+def claim_task_stage(task_id, stage):
+    current_set = active_detect_tasks if stage == 'detect' else active_upload_tasks
+    other_set = active_upload_tasks if stage == 'detect' else active_detect_tasks
+    with task_state_lock:
+        if task_id in current_set or task_id in other_set:
+            return False
+        current_set.add(task_id)
+        return True
+
+
+def release_task_stage(task_id, stage):
+    current_set = active_detect_tasks if stage == 'detect' else active_upload_tasks
+    with task_state_lock:
+        current_set.discard(task_id)
+
+
+def clear_running_task(task_id, core):
+    with task_state_lock:
+        if running_tasks.get(task_id) is core:
+            del running_tasks[task_id]
+
+
+def get_active_task_ids():
+    with task_state_lock:
+        return set(running_tasks.keys()) | set(active_detect_tasks) | set(active_upload_tasks)
+
+
+def safe_db_rollback(context="db"):
+    try:
+        db.session.rollback()
+    except Exception as e:
+        print(f"⚠️ DB回滚失败[{context}]: {e}")
+
+
+def safe_db_commit(context="db"):
+    try:
+        db.session.commit()
+        return True
+    except Exception as e:
+        safe_db_rollback(context)
+        print(f"⚠️ DB提交失败[{context}]: {e}")
+        return False
+
+
+def check_ip_ban(ip):
+    now = datetime.now()
+    if ip in LOGIN_ATTEMPTS:
+        r = LOGIN_ATTEMPTS[ip]
+        if r['ban_until']:
+            if now < r['ban_until']:
+                return True, int((r['ban_until'] - now).total_seconds() / 60)
+            else:
+                LOGIN_ATTEMPTS.pop(ip)
+    return False, 0
+
+
+def record_login_fail(ip):
+    now = datetime.now()
+    if ip not in LOGIN_ATTEMPTS: LOGIN_ATTEMPTS[ip] = {'count': 0, 'ban_until': None}
+    LOGIN_ATTEMPTS[ip]['count'] += 1
+    if LOGIN_ATTEMPTS[ip]['count'] >= 3:
+        LOGIN_ATTEMPTS[ip]['ban_until'] = now + timedelta(minutes=60)
+        print(f"🚫 IP {ip} 封禁 60 分钟")
+
+
+def reset_login_fail(ip):
+    if ip in LOGIN_ATTEMPTS: LOGIN_ATTEMPTS.pop(ip)
+
+
+@login_manager.user_loader
+def load_user(user_id): return User.query.get(user_id)
+
+
+AUDIO_BLACKLIST_INIT = ["加群", "交流群", "TG群", "Telegram", "QQ群", "Q群", "资源群", "微信号", "微信群", "微信公众号","加群","关注公众号",
+                        "群36", "资源区"]
+SUBTITLE_BLACKLIST_INIT = ["加群", "交流群", "微信号", "微信群", "QQ", "qq", "q群", "公众号", "网址", ".com", "Q群","http",
+                           "www", "link3.cc", "ysepan.com", "Tacit0924", "资源群"]
+SUB_META_BLACKLIST_INIT = ["http", "www", "weixin", "Telegram", "TG@", "TG频道@", "群：", "群:", "资源群", "加群",
+                           "微信号", "微信群", "QQ", "qq", "q群", "公众号", "微博", "b站", "资源站", "资源网", "发布页",
+                           "荣誉出品", "link3.cc", "ysepan.com", "GyWEB", "Qqun", "hehehe", ".com", "PTerWEB",
+                           "panclub", "BT之家", "CMCT", "Byakuya", "ed3000", "yunpantv", "KKYY", "盘酱酱", "TREX",
+                           "£yhq@tv", "1000fr", "HDCTV", "HHWEB", "ADWeb", "PanWEB", "BestWEB", "hanWEB", "it.com",
+                           "Mandarin", "HDSky", "HDsky", "Feibanyama"]
+
+
+def seed_default_keywords():
+    try:
+        for kw in AUDIO_BLACKLIST_INIT:
+            if not Keyword.query.filter_by(type='audio', content=kw).first(): db.session.add(
+                Keyword(type='audio', content=kw, enabled=True))
+        for kw in SUBTITLE_BLACKLIST_INIT:
+            if not Keyword.query.filter_by(type='subtitle', content=kw).first(): db.session.add(
+                Keyword(type='subtitle', content=kw, enabled=True))
+        for kw in SUB_META_BLACKLIST_INIT:
+            if not Keyword.query.filter_by(type='meta', content=kw).first(): db.session.add(
+                Keyword(type='meta', content=kw, enabled=True))
+        db.session.commit()
+    except:
+        pass
+
+
+def get_final_config(overrides_json=None):
+    final_conf = {
+        "check_audio": True, "check_subtitles": True, "sanitize_metadata": True, "enable_cloud_asr": True,
+        "cloud_asr_proxy_enabled": False,
+        "enable_local_model": False, "detailed_mode": False, "asr_use_flac": False, "audio_double_sample": False,
+        "tg_bot_token": "", "tg_chat_id": "",
+        "audio_threshold_multi": 600, "audio_threshold_long": 3600,
+        "audio_len_head": 240, "audio_len_mid": 240, "audio_len_tail": 300, "audio_len_tail_long": 600,
+        "audio_segment_len": 360, "audio_max_segments": 8,
+        "api_url": "https://api.siliconflow.cn/v1/audio/transcriptions",
+        "api_key": "", "cloud_asr_api_keys": "", "cloud_asr_proxy": "",
+        "api_model": "FunAudioLLM/SenseVoiceSmall", "cloud_asr_max_duration": 60, "cloud_asr_concurrency": 3,
+        "cloud_asr_upload_timeout": 20, "cloud_asr_read_timeout": 120, "cloud_asr_long_read_timeout": 180,
+        "scan_path": "/root/downloads", "rclone_remote": "s25", "upload_remote_hijack_enabled": False,
+        "upload_remote_hijack_remote": "", "api_token": "8pUoqOTHhEAhRnacl3c19",
+        "notify_upload_success": False, "notify_errors": True,
+        "cleanup_scanner_history": True,
+        "cleanup_scanner_uploaded": True, "cleanup_scanner_dirty": True,
+        "cleanup_scanner_error": True, "cleanup_scanner_cancelled": True,
+        "cleanup_aria2_completed": True,
+        "concurrency_detect": 2, "concurrency_upload": 9, "detect_retry_limit": 3,
+        "local_model_concurrency": 2
+    }
+    db_configs = {c.key: c.value for c in Config.query.all()}
+    for k, v in db_configs.items():
+        if k == "download_proxy":
+            continue
+        if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "cloud_asr_proxy_enabled", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample", "upload_remote_hijack_enabled",
+                  "notify_upload_success", "notify_errors", "cleanup_scanner_history", "cleanup_scanner_uploaded", "cleanup_scanner_dirty", "cleanup_scanner_error", "cleanup_scanner_cancelled", "cleanup_aria2_completed"]:
+            final_conf[k] = (str(v).lower() == 'true')
+        elif k in ["audio_threshold_multi", "audio_threshold_long", "audio_len_head", "audio_len_mid", "audio_len_tail",
+                   "audio_len_tail_long", "audio_segment_len", "audio_max_segments", "cloud_asr_max_duration", "cloud_asr_concurrency", "cloud_asr_upload_timeout", "cloud_asr_read_timeout", "cloud_asr_long_read_timeout", "concurrency_detect", "concurrency_upload", "detect_retry_limit",
+                   "local_model_concurrency"]:
+            try:
+                final_conf[k] = int(v)
+            except:
+                pass
+        else:
+            final_conf[k] = v
+    cleanup_status_keys = ['cleanup_scanner_uploaded', 'cleanup_scanner_dirty', 'cleanup_scanner_error', 'cleanup_scanner_cancelled']
+    if 'cleanup_scanner_history' in db_configs and not any(key in db_configs for key in cleanup_status_keys):
+        legacy_cleanup_enabled = str(db_configs['cleanup_scanner_history']).lower() == 'true'
+        for key in cleanup_status_keys:
+            final_conf[key] = legacy_cleanup_enabled
+    if overrides_json:
+        try:
+            ov = json.loads(overrides_json)
+            for k, v in ov.items():
+                if v is not None:
+                    if k in final_conf and isinstance(final_conf[k], bool):
+                        final_conf[k] = (str(v).lower() == 'true' or v is True)
+                    elif k in final_conf and isinstance(final_conf[k], int):
+                        try:
+                            final_conf[k] = int(v)
+                        except:
+                            pass
+                    else:
+                        final_conf[k] = v
+        except:
+            pass
+    return final_conf
+
+
+def get_runtime_cloud_asr_config(overrides_json=None):
+    conf = get_final_config(overrides_json)
+    return {
+        'cloud_asr_proxy_enabled': conf.get('cloud_asr_proxy_enabled', False),
+        'cloud_asr_proxy': conf.get('cloud_asr_proxy', '')
+    }
+
+
+def normalize_cloud_api_key_config(data):
+    if 'cloud_asr_api_keys' not in data and 'api_key' not in data:
+        return data
+    raw_keys = str(data.get('cloud_asr_api_keys') or data.get('api_key') or '')
+    keys = []
+    seen = set()
+    for key in raw_keys.splitlines():
+        key = key.strip()
+        if key and key not in seen:
+            keys.append(key)
+            seen.add(key)
+    data['cloud_asr_api_keys'] = "\n".join(keys)
+    data['api_key'] = keys[0] if keys else ""
+    return data
+
+
+def get_task_overrides(task):
+    try:
+        if not task or not task.overrides:
+            return {}
+        data = json.loads(task.overrides)
+        return data if isinstance(data, dict) else {}
+    except:
+        return {}
+
+
+def set_task_overrides(task, data):
+    task.overrides = json.dumps(data) if data else None
+
+
+def update_task_overrides(task, patch=None, remove_keys=None):
+    data = get_task_overrides(task)
+    if patch:
+        data.update(patch)
+    if remove_keys:
+        for key in remove_keys:
+            data.pop(key, None)
+    set_task_overrides(task, data)
+    return data
+
+
+def replace_public_task_overrides(task, new_values):
+    private_data = {k: v for k, v in get_task_overrides(task).items() if str(k).startswith('_')}
+    if new_values:
+        private_data.update(new_values)
+    set_task_overrides(task, private_data)
+    return private_data
+
+
+def is_directory_task(task, overrides=None):
+    ov = overrides if overrides is not None else get_task_overrides(task)
+    return bool(ov.get('_dir_task'))
+
+
+UPLOAD_LOG_MARKERS = (
+    '☁️ 上传:',
+    '=== 批量重传 ===',
+    '=== 直传 ===',
+    '❌ 上传失败',
+    '上传异常',
+    '上传中断',
+    '上传已停止',
+    '✅ 上传成功',
+    '🎉 上传成功',
+    '目录任务上传完成',
+    '文件上传成功',
+)
+
+
+def is_upload_task(task, overrides=None):
+    ov = overrides if overrides is not None else get_task_overrides(task)
+    if task.status in ['pending_upload', 'uploading', 'uploaded']:
+        return True
+    if ov.get('_dir_stage') == 'upload':
+        return True
+    if task.status in ['error', 'cancelled', 'dirty']:
+        if ov.get('direct_upload') is True:
+            return True
+        if task.upload_speed:
+            return True
+        if task.upload_eta and task.upload_eta != '-':
+            return True
+        log = task.log or ''
+        if any(marker in log for marker in UPLOAD_LOG_MARKERS):
+            return True
+    return False
+
+
+def apply_upload_remote_hijack(task, source):
+    config = get_final_config(None)
+    remote = str(config.get('upload_remote_hijack_remote') or '').strip().rstrip(':')
+    if not config.get('upload_remote_hijack_enabled') or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', remote):
+        return False
+    overrides = get_task_overrides(task)
+    if overrides.get('upload_remote') == remote:
+        return False
+    overrides['upload_remote'] = remote
+    set_task_overrides(task, overrides)
+    task.log = (task.log or '') + f"\n=== 远端劫持: {remote}: ({source}) ===\n"
+    return True
+
+
+def get_batch_task_list(data):
+    requested_ids = data.get('ids') if isinstance(data, dict) else None
+    if not isinstance(requested_ids, list):
+        return Task.query.all()
+    task_ids = []
+    for task_id in requested_ids:
+        try:
+            task_ids.append(int(task_id))
+        except:
+            pass
+    return Task.query.filter(Task.id.in_(sorted(set(task_ids)))).all() if task_ids else []
+
+
+def list_directory_task_files(root_path):
+    files = []
+    if not root_path or not os.path.isdir(root_path):
+        return files
+
+    for dirpath, dirnames, filenames in os.walk(root_path):
+        dirnames.sort()
+        for name in sorted(filenames):
+            if name.endswith('.aria2'):
+                continue
+            full_path = os.path.join(dirpath, name)
+            if os.path.isfile(full_path):
+                files.append(full_path)
+    return files
+
+
+def resolve_directory_task_path(file_path, file_count, scan_path):
+    if os.path.isdir(file_path):
+        return file_path
+    if not file_path or file_count <= 1:
+        return file_path
+
+    abs_path = os.path.abspath(file_path)
+    abs_scan = os.path.abspath(scan_path.rstrip('/\\'))
+    candidate = os.path.dirname(abs_path)
+
+    while candidate and candidate.startswith(abs_scan):
+        count = 0
+        try:
+            for dirpath, dirnames, filenames in os.walk(candidate):
+                dirnames.sort()
+                for name in filenames:
+                    if name.endswith('.aria2'):
+                        continue
+                    count += 1
+                    if count >= file_count:
+                        return candidate
+        except:
+            break
+
+        if os.path.normpath(candidate) == os.path.normpath(abs_scan):
+            break
+        parent = os.path.dirname(candidate)
+        if parent == candidate:
+            break
+        candidate = parent
+
+    return os.path.dirname(abs_path)
+
+
+def build_directory_remote_path(root_path, file_path, root_dir_name, default_remote, remote_override=None):
+    normalized_root = root_path.rstrip('/\\')
+    root_name = os.path.basename(normalized_root)
+    parent_name = os.path.basename(os.path.dirname(normalized_root))
+    remote_prefix = remote_override or (default_remote if (parent_name == root_dir_name or not parent_name) else parent_name)
+    rel_path = os.path.relpath(file_path, root_path).replace(os.sep, '/')
+    remote_rel = f"{root_name}/{rel_path}" if rel_path and rel_path != '.' else root_name
+    return remote_prefix, f"{remote_prefix}:{remote_rel}"
+
+
+def get_task_upload_target(task, config=None):
+    final_settings = config or get_final_config(task.overrides)
+    task_overrides = get_task_overrides(task)
+    upload_remote = str(task_overrides.get('upload_remote') or '').strip()
+    rclone_remote = str(upload_remote or final_settings.get('rclone_remote') or '').strip()
+    if is_directory_task(task, task_overrides):
+        current_path = task_overrides.get('_current_item') or task.filepath
+        if current_path:
+            root_name = os.path.basename(str(final_settings.get('scan_path') or '/root/downloads').rstrip('/\\'))
+            _, remote_path = build_directory_remote_path(task.filepath, current_path, root_name,
+                                                          final_settings.get('rclone_remote', 's25'),
+                                                          remote_override=upload_remote)
+            return remote_path
+    filepath = str(task.filepath or '')
+    filename = os.path.basename(filepath or task.filename or '')
+    root_name = os.path.basename(str(final_settings.get('scan_path') or '/root/downloads').rstrip('/\\'))
+    folder_name = os.path.basename(os.path.dirname(filepath))
+    remote_prefix = upload_remote or (rclone_remote if (folder_name == root_name or not folder_name) else folder_name)
+    return f"{remote_prefix}:{filename}" if remote_prefix else filename
+
+
+def get_masked_server_ip():
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(('8.8.8.8', 80))
+            parts = sock.getsockname()[0].split('.')
+        if len(parts) == 4:
+            return f"{parts[0]}.{parts[1]}.***.***"
+    except:
+        pass
+    return '***.***.***.***'
+
+
+def get_aria2_rpc_config():
+    port = 6800
+    secret = ''
+    try:
+        with open(ARIA2_CONFIG_PATH, encoding='utf-8') as config_file:
+            for raw_line in config_file:
+                key, separator, value = raw_line.strip().partition('=')
+                if not separator:
+                    continue
+                if key == 'rpc-listen-port':
+                    try:
+                        port = int(value)
+                    except ValueError:
+                        pass
+                elif key == 'rpc-secret':
+                    secret = value
+    except OSError:
+        pass
+    return port if 1 <= port <= 65535 else 6800, secret
+
+
+def add_aria2_rpc_token(command, secret):
+    if not secret or not isinstance(command, dict):
+        return
+    params = command.get('params')
+    if not isinstance(params, list):
+        return
+    if command.get('method') == 'system.multicall':
+        if params and isinstance(params[0], list):
+            for call in params[0]:
+                add_aria2_rpc_token(call, secret)
+        return
+    token = f'token:{secret}'
+    if params and isinstance(params[0], str) and params[0].startswith('token:'):
+        params[0] = token
+    else:
+        params.insert(0, token)
+
+
+def call_aria2_rpc(method, params):
+    port, secret = get_aria2_rpc_config()
+    command = {'jsonrpc': '2.0', 'id': 'scanner-history-cleanup', 'method': method, 'params': params}
+    add_aria2_rpc_token(command, secret)
+    try:
+        response = requests.post(f'http://127.0.0.1:{port}/jsonrpc', json=command, timeout=(3, 30))
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.RequestException, ValueError) as e:
+        raise RuntimeError(f'Aria2 RPC 请求失败: {e}') from e
+    if not isinstance(payload, dict) or payload.get('error') or 'result' not in payload:
+        raise RuntimeError('Aria2 RPC 返回异常')
+    return payload['result']
+
+
+def remove_aria2_download_results(gids):
+    if not gids:
+        return 0, 0
+    port, secret = get_aria2_rpc_config()
+    removed = 0
+    failed = 0
+    for start in range(0, len(gids), 100):
+        batch = gids[start:start + 100]
+        commands = [
+            {'jsonrpc': '2.0', 'id': f'scanner-history-cleanup-{start + index}',
+             'method': 'aria2.removeDownloadResult', 'params': [gid]}
+            for index, gid in enumerate(batch)
+        ]
+        for command in commands:
+            add_aria2_rpc_token(command, secret)
+        try:
+            response = requests.post(f'http://127.0.0.1:{port}/jsonrpc', json=commands, timeout=(3, 30))
+            response.raise_for_status()
+            payload = response.json()
+        except (requests.RequestException, ValueError) as e:
+            raise RuntimeError(f'Aria2 RPC 请求失败: {e}') from e
+        if not isinstance(payload, list):
+            raise RuntimeError('Aria2 RPC 批量返回异常')
+        results = {str(item.get('id')): item for item in payload if isinstance(item, dict)}
+        for command in commands:
+            result = results.get(str(command['id']), {})
+            if result.get('result') == 'OK':
+                removed += 1
+            else:
+                failed += 1
+    return removed, failed
+
+
+def clear_aria2_completed_results():
+    cleaned = 0
+    failed = 0
+    offset = 0
+    page_size = 1000
+    try:
+        while True:
+            stopped = call_aria2_rpc('aria2.tellStopped', [offset, page_size, ['gid', 'status']])
+            if not isinstance(stopped, list):
+                raise RuntimeError('Aria2 停止记录格式异常')
+            completed_gids = [
+                item.get('gid') for item in stopped
+                if isinstance(item, dict) and item.get('status') == 'complete' and item.get('gid')
+            ]
+            removed, remove_failed = remove_aria2_download_results(completed_gids)
+            cleaned += removed
+            failed += remove_failed
+            # Removed results shift the list left; keep the offset on entries still present.
+            offset += len(stopped) - removed
+            if len(stopped) < page_size:
+                break
+    except RuntimeError as e:
+        print(f'⚠️ 清理 Aria2 已完成记录失败: {e}')
+        return {'cleaned': cleaned, 'failed': failed, 'error': str(e)}
+    return {'cleaned': cleaned, 'failed': failed, 'error': ''}
+
+
+def get_next_persistent_id():
+    c = Config.query.filter_by(key='sys_task_counter').first()
+    if not c:
+        current = 0;
+        c = Config(key='sys_task_counter', value='0');
+        db.session.add(c)
+    else:
+        try:
+            current = int(c.value)
+        except:
+            current = 0
+    next_id = current + 1
+    if next_id > 9999: next_id = 1
+    existing = Task.query.get(next_id)
+    if existing:
+        if next_id in running_tasks: running_tasks[next_id].stop(); del running_tasks[next_id]
+        db.session.delete(existing);
+        db.session.commit()
+    c.value = str(next_id);
+    db.session.add(c);
+    db.session.commit()
+    return next_id
+
+
+def create_trigger_task(path, file_count=1, upload_remote='', aria_gid='', source=''):
+    if not path or not os.path.exists(path):
+        return None, False
+
+    try:
+        file_count = max(1, int(file_count or 1))
+    except:
+        file_count = 1
+
+    c = get_final_config(None)
+    path = os.path.abspath(path)
+    is_directory = os.path.isdir(path)
+    task_path = path
+    task_overrides = {}
+    if is_directory or file_count > 1:
+        task_path = resolve_directory_task_path(path, file_count, c.get('scan_path', '/root/downloads'))
+        if not os.path.exists(task_path):
+            task_path = os.path.dirname(path)
+        task_overrides = {
+            '_dir_task': True,
+            '_dir_total_files': file_count,
+            '_dir_uploaded_count': 0
+        }
+    if upload_remote:
+        task_overrides['upload_remote'] = upload_remote
+    if aria_gid:
+        task_overrides['_aria_gid'] = str(aria_gid)
+
+    # Aria2 may complete several files in the same second. Reserve the custom
+    # task ID and commit the task as one critical section to prevent collisions.
+    with trigger_task_lock:
+        if aria_gid:
+            gid_marker = f'"_aria_gid": "{aria_gid}"'
+            existing = Task.query.filter(Task.overrides.like(f'%{gid_marker}%')).first()
+            if existing:
+                return existing, False
+
+        existing = Task.query.filter(
+            Task.filepath == task_path,
+            Task.status.in_(['pending', 'processing', 'pending_upload', 'uploading'])
+        ).first()
+        if existing:
+            return existing, False
+
+        task = Task(
+            id=get_next_persistent_id(),
+            filename=os.path.basename(task_path.rstrip('/\\')),
+            filepath=task_path,
+            status='pending',
+            log=f"=== {source} ===\n" if source else '',
+            overrides=json.dumps(task_overrides) if task_overrides else None
+        )
+        db.session.add(task)
+        db.session.commit()
+        detect_queue.put(task.id)
+        return task, True
+
+
+def reconcile_orphan_downloads():
+    c = get_final_config(None)
+    scan_path = os.path.abspath(str(c.get('scan_path') or ''))
+    if not scan_path or not os.path.isdir(scan_path):
+        return 0
+
+    known_tasks = []
+    for task in Task.query.filter(Task.status != 'uploaded').all():
+        if task.filepath:
+            known_tasks.append((os.path.normcase(os.path.abspath(task.filepath)), is_directory_task(task)))
+
+    queued = 0
+    now = time.time()
+    for dirpath, _, filenames in os.walk(scan_path):
+        for filename in filenames:
+            if queued >= 50:
+                return queued
+            path = os.path.join(dirpath, filename)
+            if filename.endswith('.aria2') or os.path.splitext(filename)[1].lower() not in VIDEO_EXTENSIONS:
+                continue
+            try:
+                if os.path.exists(path + '.aria2') or now - os.path.getmtime(path) < 60:
+                    continue
+            except OSError:
+                continue
+
+            normalized_path = os.path.normcase(os.path.abspath(path))
+            covered = False
+            for task_path, directory_task in known_tasks:
+                if normalized_path == task_path:
+                    covered = True
+                    break
+                if directory_task:
+                    try:
+                        if os.path.commonpath([normalized_path, task_path]) == task_path:
+                            covered = True
+                            break
+                    except ValueError:
+                        pass
+            if covered:
+                continue
+
+            task, created = create_trigger_task(path, source='补偿扫描：发现未入队的已完成文件')
+            if created:
+                known_tasks.append((normalized_path, False))
+                queued += 1
+    return queued
+
+
+def orphan_reconcile_worker():
+    while True:
+        time.sleep(300)
+        try:
+            with app.app_context():
+                queued = reconcile_orphan_downloads()
+                if queued:
+                    print(f"🔎 补偿扫描已入队 {queued} 个遗漏下载")
+        except Exception as e:
+            print(f"⚠️ 补偿扫描失败: {e}")
+
+
+# ----------------- Worker Functions -----------------
+def detection_worker():
+    with app.app_context():
+        seed_default_keywords()
+        while True:
+            task_id = None
+            try:
+                task_id = detect_queue.get()
+                if not claim_task_stage(task_id, 'detect'):
+                    detect_queue.task_done()
+                    continue
+                task = Task.query.get(task_id)
+                if not task or task.status != 'pending':
+                    release_task_stage(task_id, 'detect')
+                    detect_queue.task_done()
+                    continue
+                task.status = 'processing';
+                task.progress = 0;
+                if not safe_db_commit(f"detect start {task_id}"):
+                    release_task_stage(task_id, 'detect')
+                    detect_queue.task_done()
+                    time.sleep(1)
+                    enqueue_detect_task(task_id, priority=True)
+                    print(f"⚠️ 检测启动状态保存失败，已重新入队: {task_id}")
+                    continue
+
+                final_settings = get_final_config(task.overrides)
+
+                try:
+                    RETRY_LIMIT = max(0, int(final_settings.get('detect_retry_limit', 3)))
+                except:
+                    RETRY_LIMIT = 3
+                user_local_pref = final_settings.get('enable_local_model', False)
+                cloud_enabled = final_settings.get('enable_cloud_asr', True)
+
+                final_settings['current_retry'] = task.retry_count + 1
+                final_settings['retry_limit'] = RETRY_LIMIT
+
+                if not cloud_enabled:
+                    final_settings['enable_local_model'] = user_local_pref
+                elif task.retry_count < RETRY_LIMIT:
+                    final_settings['enable_local_model'] = False
+                else:
+                    final_settings['enable_local_model'] = user_local_pref
+
+                scan_path = final_settings.get('scan_path', '/root/downloads')
+                rclone_remote = final_settings.get('rclone_remote', 's25')
+                current_root_name = os.path.basename(scan_path.rstrip('/'))
+                runtime_overrides_json = task.overrides
+
+                def refresh_cloud_config():
+                    with app.app_context():
+                        return get_runtime_cloud_asr_config(runtime_overrides_json)
+
+                audio_kws = [k.content for k in Keyword.query.filter_by(type='audio', enabled=True).all()]
+                sub_kws = [k.content for k in Keyword.query.filter_by(type='subtitle', enabled=True).all()]
+                meta_kws = [k.content for k in Keyword.query.filter_by(type='meta', enabled=True).all()]
+                keywords_config = {'audio': audio_kws, 'subtitle': sub_kws, 'meta': meta_kws}
+
+                def db_logger(msg):
+                    try:
+                        t = Task.query.get(task_id)
+                        if t:
+                            t.log = (t.log or "") + f"{msg}\n"
+                            safe_db_commit(f"detect log {task_id}")
+                    except Exception as e:
+                        safe_db_rollback(f"detect log {task_id}")
+                        print(f"⚠️ 写入检测日志失败[{task_id}]: {e}")
+
+                task_overrides = get_task_overrides(task)
+                dir_task = is_directory_task(task, task_overrides)
+                current_process_path = task.filepath
+                passed_segments = []
+
+                if dir_task:
+                    remaining_files = list_directory_task_files(task.filepath)
+                    if not remaining_files:
+                        total_files = max(1, int(task_overrides.get('_dir_total_files', 1) or 1))
+                        uploaded_count = int(task_overrides.get('_dir_uploaded_count', 0) or 0)
+                        task.status = 'uploaded' if uploaded_count >= total_files else 'error'
+                        task.progress = 100 if task.status == 'uploaded' else 0
+                        task.upload_eta = "完成" if task.status == 'uploaded' else "-"
+                        task.finished_at = datetime.now()
+                        db_logger("✅ 目录任务已完成" if task.status == 'uploaded' else "❌ 目录任务中未找到可处理文件")
+                        release_task_stage(task_id, 'detect')
+                        detect_queue.task_done()
+                        continue
+
+                    current_process_path = remaining_files[0]
+                    if task_overrides.get('_current_item') != current_process_path or task_overrides.get('_dir_stage') != 'detect':
+                        task_overrides = update_task_overrides(
+                            task,
+                            {'_current_item': current_process_path, '_dir_stage': 'detect'},
+                            remove_keys=['_passed', '_passed_file', '_audio_segments', '_audio_segments_file']
+                        )
+                        safe_db_commit(f"detect dir current {task_id}")
+                    if task_overrides.get('_passed_file') == current_process_path:
+                        passed_segments = task_overrides.get('_passed', [])
+                    if task_overrides.get('_audio_segments_file') == current_process_path:
+                        states = task_overrides.get('_audio_segments', {})
+                        if isinstance(states, dict):
+                            passed_segments = sorted(set(passed_segments) | {name for name, state in states.items() if isinstance(state, dict) and state.get('status') == 'passed'})
+                else:
+                    passed_segments = task_overrides.get('_passed', [])
+                    if task_overrides.get('_audio_segments_file') == current_process_path:
+                        states = task_overrides.get('_audio_segments', {})
+                        if isinstance(states, dict):
+                            passed_segments = sorted(set(passed_segments) | {name for name, state in states.items() if isinstance(state, dict) and state.get('status') == 'passed'})
+
+                def detect_prog(pct, msg, _):
+                    try:
+                        t = Task.query.get(task_id)
+                        if not t:
+                            return
+                        if dir_task:
+                            ov = get_task_overrides(t)
+                            total_files = max(1, int(ov.get('_dir_total_files', 1) or 1))
+                            uploaded_count = int(ov.get('_dir_uploaded_count', 0) or 0)
+                            t.progress = int(min(99, ((uploaded_count + (pct / 100.0) * 0.5) / total_files) * 100))
+                        else:
+                            t.progress = pct
+                        safe_db_commit(f"detect progress {task_id}")
+                    except Exception as e:
+                        safe_db_rollback(f"detect progress {task_id}")
+                        print(f"⚠️ 更新检测进度失败[{task_id}]: {e}")
+
+                def save_checkpoint(seg_name, status='passed', reason=None):
+                    try:
+                        t = Task.query.get(task_id)
+                        if not t:
+                            return
+                        ov = get_task_overrides(t)
+                        current_item = ov.get('_current_item') if dir_task else current_process_path
+                        if ov.get('_audio_segments_file') != current_item:
+                            ov['_audio_segments'] = {}
+                        states = ov.get('_audio_segments', {})
+                        if not isinstance(states, dict):
+                            states = {}
+                        states[seg_name] = {
+                            'status': status,
+                            'reason': str(reason or ''),
+                            'updated_at': datetime.now().strftime('%m-%d %H:%M:%S')
+                        }
+                        ov['_audio_segments'] = states
+                        ov['_audio_segments_file'] = current_item
+                        passed = ov.get('_passed', [])
+                        if not isinstance(passed, list):
+                            passed = []
+                        if status == 'passed' and seg_name not in passed:
+                            passed.append(seg_name)
+                        elif status != 'passed' and seg_name in passed:
+                            passed.remove(seg_name)
+                        if passed:
+                            ov['_passed'] = passed
+                            ov['_passed_file'] = current_item
+                        else:
+                            ov.pop('_passed', None)
+                            ov['_passed_file'] = current_item
+                        set_task_overrides(t, ov)
+                        safe_db_commit(f"detect checkpoint {task_id}")
+                    except Exception as e:
+                        safe_db_rollback(f"detect checkpoint {task_id}")
+                        print(f"⚠️ 保存检测断点失败[{task_id}]: {e}")
+
+                def update_filepath(new_path):
+                    try:
+                        t = Task.query.get(task_id)
+                        if not t or not new_path:
+                            return
+                        if dir_task:
+                            ov = update_task_overrides(t, {'_current_item': new_path})
+                            if ov.get('_passed_file') and ov.get('_passed_file') != new_path:
+                                ov['_passed_file'] = new_path
+                            if ov.get('_audio_segments_file') and ov.get('_audio_segments_file') != new_path:
+                                ov['_audio_segments_file'] = new_path
+                            set_task_overrides(t, ov)
+                            t.log = (t.log or "") + f"🔄 当前文件已更新为: {os.path.basename(new_path)}\n"
+                        elif t.filepath != new_path:
+                            t.filepath = new_path
+                            t.filename = os.path.basename(new_path)
+                            ov = get_task_overrides(t)
+                            if ov.get('_passed_file') and ov.get('_passed_file') != new_path:
+                                ov['_passed_file'] = new_path
+                            if ov.get('_audio_segments_file') and ov.get('_audio_segments_file') != new_path:
+                                ov['_audio_segments_file'] = new_path
+                            set_task_overrides(t, ov)
+                            t.log = (t.log or "") + f"🔄 文件已更新为: {t.filename}\n"
+                        safe_db_commit(f"detect filepath {task_id}")
+                    except Exception as e:
+                        safe_db_rollback(f"detect filepath {task_id}")
+                        print(f"⚠️ 更新检测文件路径失败[{task_id}]: {e}")
+
+                core = ScannerCore(logger_callback=db_logger, task_id=task_id, root_dir_name=current_root_name,
+                                   rclone_remote=rclone_remote, config_refresh_callback=refresh_cloud_config)
+                core.prog_cb = detect_prog
+                with task_state_lock:
+                    running_tasks[task_id] = core
+
+                try:
+                    res = core.process_file(
+                        current_process_path, final_settings, keywords_config,
+                        passed_segments=passed_segments,
+                        checkpoint_cb=save_checkpoint,
+                        rename_cb=update_filepath
+                    )
+
+                    if res['status'] == 'cancelled':
+                        task.status = 'cancelled'
+                        task.finished_at = datetime.now()
+                        db_logger("⏹ 任务已手动停止")
+                    elif res['status'] == 'dirty':
+                        task.status = 'dirty';
+                        task.finished_at = datetime.now()
+                        if dir_task:
+                            update_task_overrides(task, remove_keys=['_passed', '_passed_file', '_audio_segments', '_audio_segments_file'])
+                            db_logger(f"🚫 命中文件: {os.path.basename(current_process_path)}")
+                        elif os.path.exists(task.filepath):
+                            os.remove(task.filepath)
+                        if final_settings.get('notify_errors', True): core.send_tg_msg(final_settings,
+                                                                                      f"🚫 拦截: {task.filename}\n原因: {res['msg']}")
+                    elif res['status'] == 'ready_to_upload':
+                        if dir_task:
+                            current_upload_path = res.get('new_filepath') or get_task_overrides(task).get('_current_item') or current_process_path
+                            update_task_overrides(task, {'_current_item': current_upload_path, '_dir_stage': 'upload'}, remove_keys=['_passed', '_passed_file', '_audio_segments', '_audio_segments_file'])
+                        elif res.get('new_filepath'):
+                            task.filepath = res['new_filepath'];
+                            task.filename = os.path.basename(res['new_filepath'])
+                        task.status = 'pending_upload';
+                        apply_upload_remote_hijack(task, '检测通过入队')
+                        if dir_task:
+                            ov = get_task_overrides(task)
+                            total_files = max(1, int(ov.get('_dir_total_files', 1) or 1))
+                            uploaded_count = int(ov.get('_dir_uploaded_count', 0) or 0)
+                            task.progress = int(min(99, ((uploaded_count + 0.5) / total_files) * 100))
+                            db_logger(f"✅ 文件检测通过，加入上传队列: {os.path.basename(current_upload_path)}")
+                        else:
+                            task.progress = 0
+                            db_logger("✅ 检测通过，加入上传队列")
+                        if safe_db_commit(f"detect ready upload {task_id}"):
+                            upload_queue.put(task_id)
+                    else:
+                        err_msg = str(res.get('msg', ''))
+                        if task.retry_count < RETRY_LIMIT and '云端 API 已停用且本地模型未启用' not in err_msg:
+                            task.retry_count += 1
+                            task.status = 'pending'
+                            db_logger(f"⚠️ 云端异常/超时 -> 重新排队 (尝试 {task.retry_count}/{RETRY_LIMIT})")
+                            if safe_db_commit(f"detect retry {task_id}"):
+                                enqueue_detect_task(task_id, priority=True)
+                        else:
+                            task.status = 'error';
+                            task.finished_at = datetime.now();
+                            db_logger(f"❌ 最终失败: 本地模型也无法处理 (或未启用)")
+                            if final_settings.get('notify_errors', True): core.send_tg_msg(final_settings,
+                                                                                           f"❌ 任务出错: {task.filename}\n原因: {res.get('msg')}")
+
+                except Exception as e:
+                    safe_db_rollback(f"detect exception {task_id}")
+                    task = Task.query.get(task_id)
+                    if not task:
+                        continue
+                    if task.retry_count < RETRY_LIMIT:
+                        task.retry_count += 1
+                        task.status = 'pending'
+                        db_logger(f"⚠️ 异常 -> 重新排队 (尝试 {task.retry_count}/{RETRY_LIMIT})\nErr: {str(e)}")
+                        if safe_db_commit(f"detect exception retry {task_id}"):
+                            enqueue_detect_task(task_id, priority=True)
+                    else:
+                        task.status = 'error';
+                        task.finished_at = datetime.now();
+                        db_logger(f"❌ 最终异常: {e}")
+                        if final_settings.get('notify_errors', True): core.send_tg_msg(final_settings,
+                                                                                       f"❌ 系统异常: {task.filename}")
+                finally:
+                    clear_running_task(task_id, core)
+                    release_task_stage(task_id, 'detect')
+                    safe_db_commit(f"detect finally {task_id}");
+                    detect_queue.task_done()
+            except Exception as e:
+                safe_db_rollback("detect worker")
+                if task_id is not None:
+                    release_task_stage(task_id, 'detect')
+                    try:
+                        detect_queue.task_done()
+                    except Exception:
+                        pass
+                print(e)
+
+
+def upload_worker():
+    with app.app_context():
+        while True:
+            task_id = None
+            try:
+                task_id = upload_queue.get()
+                if not claim_task_stage(task_id, 'upload'):
+                    upload_queue.task_done()
+                    continue
+                task = Task.query.get(task_id)
+                if not task or task.status != 'pending_upload':
+                    release_task_stage(task_id, 'upload')
+                    upload_queue.task_done()
+                    continue
+                task.status = 'uploading';
+                if not safe_db_commit(f"upload start {task_id}"):
+                    release_task_stage(task_id, 'upload')
+                    upload_queue.task_done()
+                    time.sleep(1)
+                    upload_queue.put(task_id)
+                    print(f"⚠️ 上传启动状态保存失败，已重新入队: {task_id}")
+                    continue
+
+                final_settings = get_final_config(task.overrides)
+                scan_path = final_settings.get('scan_path', '/root/downloads')
+                rclone_remote = final_settings.get('rclone_remote', 's25')
+                current_root_name = os.path.basename(scan_path.rstrip('/'))
+                task_overrides = get_task_overrides(task)
+                dir_task = is_directory_task(task, task_overrides)
+                current_upload_path = task_overrides.get('_current_item') if dir_task else task.filepath
+
+                if dir_task and (not current_upload_path or not os.path.exists(current_upload_path)):
+                    remaining_files = list_directory_task_files(task.filepath)
+                    if remaining_files:
+                        current_upload_path = remaining_files[0]
+                        update_task_overrides(task, {'_current_item': current_upload_path, '_dir_stage': 'upload'}, remove_keys=['_passed', '_passed_file', '_audio_segments', '_audio_segments_file'])
+                        safe_db_commit(f"upload dir current {task_id}")
+
+                if dir_task and not current_upload_path:
+                    task.status = 'error'
+                    task.finished_at = datetime.now()
+                    task.log = (task.log or "") + "❌ 上传失败：目录任务未找到待上传文件\n"
+                    safe_db_commit(f"upload missing file {task_id}")
+                    release_task_stage(task_id, 'upload')
+                    upload_queue.task_done()
+                    continue
+
+                if dir_task:
+                    upload_remote = str(task_overrides.get('upload_remote') or '').strip()
+                    dest_remote, remote_path = build_directory_remote_path(task.filepath, current_upload_path, current_root_name,
+                                                                            rclone_remote, remote_override=upload_remote)
+                else:
+                    folder_name = os.path.basename(os.path.dirname(task.filepath))
+                    upload_remote = str(task_overrides.get('upload_remote') or '').strip()
+                    dest_remote = upload_remote or (rclone_remote if (folder_name == current_root_name or not folder_name) else folder_name)
+                    remote_path = f"{dest_remote}:{os.path.basename(current_upload_path)}" if upload_remote else None
+
+                def db_logger(msg):
+                    try:
+                        t = Task.query.get(task_id)
+                        if t:
+                            t.log = (t.log or "") + f"{msg}\n"
+                            safe_db_commit(f"upload log {task_id}")
+                    except Exception as e:
+                        safe_db_rollback(f"upload log {task_id}")
+                        print(f"⚠️ 写入上传日志失败[{task_id}]: {e}")
+
+                def upload_prog(pct, speed, eta):
+                    try:
+                        t = Task.query.get(task_id)
+                        if not t:
+                            return
+                        if dir_task:
+                            ov = get_task_overrides(t)
+                            total_files = max(1, int(ov.get('_dir_total_files', 1) or 1))
+                            uploaded_count = int(ov.get('_dir_uploaded_count', 0) or 0)
+                            t.progress = int(min(99, ((uploaded_count + 0.5 + (pct / 100.0) * 0.5) / total_files) * 100))
+                        else:
+                            t.progress = pct
+                        t.upload_speed = speed; t.upload_eta = eta; safe_db_commit(f"upload progress {task_id}")
+                    except Exception as e:
+                        safe_db_rollback(f"upload progress {task_id}")
+                        print(f"⚠️ 更新上传进度失败[{task_id}]: {e}")
+
+                core = ScannerCore(logger_callback=db_logger, task_id=task_id, root_dir_name=current_root_name,
+                                   rclone_remote=rclone_remote)
+                core.prog_cb = upload_prog
+                with task_state_lock:
+                    running_tasks[task_id] = core
+                try:
+                    if core.upload_with_progress(current_upload_path, remote_path=remote_path):
+                        if dir_task:
+                            core.cleanup_empty_dirs(current_upload_path)
+                            ov = update_task_overrides(
+                                task,
+                                {
+                                    '_dir_uploaded_count': int(get_task_overrides(task).get('_dir_uploaded_count', 0) or 0) + 1,
+                                    '_dir_stage': 'detect'
+                                },
+                                remove_keys=['_current_item', '_passed', '_passed_file', '_audio_segments', '_audio_segments_file']
+                            )
+                            total_files = max(1, int(ov.get('_dir_total_files', 1) or 1))
+                            uploaded_count = int(ov.get('_dir_uploaded_count', 0) or 0)
+                            remaining_files = list_directory_task_files(task.filepath)
+                            task.upload_speed = ""
+                            if not remaining_files:
+                                task.status = 'uploaded';
+                                task.progress = 100;
+                                task.upload_eta = "完成";
+                                task.finished_at = datetime.now();
+                                db_logger("✅ 目录任务上传完成")
+                                if os.path.isdir(task.filepath):
+                                    shutil.rmtree(task.filepath, ignore_errors=True)
+                                if final_settings.get('notify_upload_success', False): core.send_tg_msg(
+                                    final_settings,
+                                    f"🎉 上传成功: {task.filename}\n☁️ 节点: {dest_remote}"
+                                )
+                            else:
+                                task.status = 'pending'
+                                task.progress = int(min(99, (uploaded_count / total_files) * 100))
+                                task.upload_eta = "-"
+                                task.finished_at = None
+                                db_logger(f"✅ 文件上传成功 ({uploaded_count}/{total_files})，继续处理下一文件")
+                                if safe_db_commit(f"upload continue dir {task_id}"):
+                                    detect_queue.put(task_id)
+                        else:
+                            task.status = 'uploaded';
+                            task.progress = 100;
+                            task.upload_eta = "完成";
+                            task.finished_at = datetime.now();
+                            db_logger("✅ 上传成功");
+                            core.cleanup_empty_dirs(task.filepath)
+                            if final_settings.get('notify_upload_success', False): core.send_tg_msg(final_settings,
+                                                                                                    f"🎉 上传成功: {task.filename}\n☁️ 节点: {dest_remote}")
+                    else:
+                        # 🔥🔥🔥 修复逻辑：检查是“失败”还是“手动停止”
+                        if core._stopped:
+                            # 仅仅记录停止日志，不要报错，不要发通知
+                            db_logger("⏹ 上传已停止/删除")
+                        elif task.status != 'cancelled':
+                            task.status = 'error';
+                            task.finished_at = datetime.now();
+                            db_logger(f"❌ 上传失败{': ' + os.path.basename(current_upload_path) if dir_task and current_upload_path else ''}")
+                            if final_settings.get('notify_errors', True): core.send_tg_msg(final_settings,
+                                                                                           f"❌ 上传失败: {task.filename}")
+                except Exception as e:
+                    safe_db_rollback(f"upload exception {task_id}")
+                    task = Task.query.get(task_id)
+                    if not task:
+                        continue
+                    if core._stopped:
+                        db_logger(f"⏹ 上传中断: {e}")
+                    else:
+                        task.status = 'error';
+                        db_logger(f"上传异常: {e}")
+                        if final_settings.get('notify_errors', True): core.send_tg_msg(final_settings,
+                                                                                       f"❌ 上传异常: {task.filename}")
+                finally:
+                    clear_running_task(task_id, core)
+                    release_task_stage(task_id, 'upload')
+                    safe_db_commit(f"upload finally {task_id}")
+                    upload_queue.task_done()
+            except Exception as e:
+                safe_db_rollback("upload worker")
+                if task_id is not None:
+                    release_task_stage(task_id, 'upload')
+                    try:
+                        upload_queue.task_done()
+                    except Exception:
+                        pass
+                print(e)
+
+
+# ----------------- Model & System Routes -----------------
+def check_local_models_exist():
+    return sensevoice_gguf_ready(os.getcwd())
+
+
+@app.route('/api/model/download', methods=['POST'])
+@login_required
+def download_model():
+    global download_proc, download_logs
+    with download_lock:
+        if download_proc and download_proc.poll() is None: return jsonify({"code": 409, "msg": "下载任务正在进行"})
+        download_logs = ["=== 🚀 初始化 GGUF 本地模型资源下载 ==="]
+        env = os.environ.copy()
+        script = """
+import json, os, platform, shutil, stat, subprocess, sys, tarfile, tempfile, time, urllib.request, zipfile
+
+ROOT = os.path.join(os.getcwd(), 'models', 'sensevoice-gguf')
+GGUF_DIR = os.path.join(ROOT, 'gguf')
+RUNTIME_VERSION = 'runtime-llamacpp-v0.1.2'
+os.makedirs(GGUF_DIR, exist_ok=True)
+
+def log(msg):
+    print(msg, flush=True)
+
+def download(url, dest, min_size=1):
+    if os.path.exists(dest) and os.path.getsize(dest) >= min_size:
+        log(f"✅ 已存在，跳过: {os.path.basename(dest)}")
+        return
+    tmp = dest + '.part'
+    for attempt in range(1, 6):
+        try:
+            log(f"⬇️ 下载: {os.path.basename(dest)} (尝试 {attempt}/5)")
+            req = urllib.request.Request(url, headers={'User-Agent': 'scanner-web/gguf-downloader'})
+            with urllib.request.urlopen(req, timeout=60) as r, open(tmp, 'wb') as f:
+                shutil.copyfileobj(r, f)
+            if os.path.getsize(tmp) < min_size:
+                raise RuntimeError('下载文件过小')
+            os.replace(tmp, dest)
+            log(f"✅ 完成: {os.path.basename(dest)} ({os.path.getsize(dest) / 1048576:.1f}MB)")
+            return
+        except Exception as e:
+            try:
+                if os.path.exists(tmp): os.remove(tmp)
+            except: pass
+            log(f"⚠️ 下载失败: {str(e).splitlines()[0]}")
+            time.sleep(5)
+    raise RuntimeError(f"下载失败: {url}")
+
+def normalized_machine():
+    machine = platform.machine().lower()
+    if machine in ('x86_64', 'amd64'):
+        return 'x64'
+    if machine in ('aarch64', 'arm64'):
+        return 'arm64'
+    raise RuntimeError(f'暂不支持的平台架构: {platform.system().lower()}/{machine}')
+
+def runtime_asset_name():
+    system = platform.system().lower()
+    machine = normalized_machine()
+    if system == 'linux':
+        return 'funasr-llamacpp-linux-arm64.tar.gz' if machine == 'arm64' else 'funasr-llamacpp-linux-x64.tar.gz'
+    if system == 'darwin' and machine == 'arm64':
+        return 'funasr-llamacpp-macos-arm64.tar.gz'
+    if system == 'windows' and machine == 'x64':
+        return 'funasr-llamacpp-windows-x64.zip'
+    raise RuntimeError(f'暂不支持的平台: {system}/{platform.machine().lower()}')
+
+def is_linux():
+    return platform.system().lower() == 'linux'
+
+def runtime_build_id():
+    return f'{RUNTIME_VERSION} GGML_NATIVE=OFF linux/{normalized_machine()}'
+
+def runtime_marker_path():
+    return os.path.join(ROOT, f'runtime-source-build-linux-{normalized_machine()}.txt')
+
+def stream_cmd(cmd, cwd=None, timeout=None):
+    log('$ ' + ' '.join(cmd))
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            if line:
+                log(line)
+        rc = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise RuntimeError('命令超时: ' + ' '.join(cmd))
+    if rc != 0:
+        raise RuntimeError(f'命令失败({rc}): ' + ' '.join(cmd))
+
+def build_runtime_from_source():
+    build_id = runtime_build_id()
+    marker_path = runtime_marker_path()
+    binary_name = 'llama-funasr-sensevoice'
+    binary_path = os.path.join(ROOT, binary_name)
+    if os.path.exists(marker_path) and os.path.exists(binary_path) and os.path.getsize(binary_path) > 1024 * 1024:
+        with open(marker_path, 'r', encoding='utf-8') as f:
+            marker = f.read().strip()
+        if marker == build_id:
+            log(f'✅ Linux 本机编译 runtime 已存在，跳过编译 ({normalized_machine()})')
+            return
+        log(f'⚠️ runtime 架构标记不匹配，将重新编译: {marker or "empty"}')
+
+    if os.path.exists(binary_path) and not os.path.exists(marker_path):
+        log('⚠️ 发现旧 runtime 但缺少本机编译标记，将重新编译以适配当前 CPU/GLIBC')
+
+    missing = [tool for tool in ('git', 'cmake', 'c++') if not shutil.which(tool)]
+    if missing:
+        raise RuntimeError('Linux 服务器需要本机编译 runtime，缺少工具: ' + ', '.join(missing))
+
+    log(f'🛠️ Linux {normalized_machine()} 开始本机编译 GGML_NATIVE=OFF')
+    with tempfile.TemporaryDirectory(prefix='sensevoice_runtime_build_') as tmpdir:
+        repo = os.path.join(tmpdir, 'SenseVoice')
+        stream_cmd(['git', 'clone', '--depth', '1', '--branch', RUNTIME_VERSION,
+                    'https://github.com/FunAudioLLM/SenseVoice.git', repo], timeout=300)
+        runtime_dir = os.path.join(repo, 'runtime', 'llama.cpp')
+        stream_cmd(['cmake', '-B', 'build', '-DCMAKE_BUILD_TYPE=Release', '-DGGML_NATIVE=OFF', '-DLLAMA_CURL=OFF'],
+                   cwd=runtime_dir, timeout=300)
+        stream_cmd(['cmake', '--build', 'build', '-j', '2', '--target', 'llama-funasr-sensevoice'],
+                   cwd=runtime_dir, timeout=1200)
+        built = os.path.join(runtime_dir, 'build', 'bin', binary_name)
+        if not os.path.exists(built):
+            raise RuntimeError('编译完成但未找到 llama-funasr-sensevoice')
+        shutil.copy2(built, binary_path)
+        os.chmod(binary_path, os.stat(binary_path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        with open(marker_path, 'w', encoding='utf-8') as f:
+            f.write(build_id + '\\n')
+        log(f'✅ Linux 本机编译 runtime 编译完成 ({normalized_machine()})')
+
+def latest_runtime_url(asset_name):
+    try:
+        req = urllib.request.Request('https://api.github.com/repos/FunAudioLLM/SenseVoice/releases/latest', headers={'User-Agent': 'scanner-web/gguf-downloader'})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            release = json.load(r)
+        for asset in release.get('assets', []):
+            if asset.get('name') == asset_name:
+                return asset.get('browser_download_url')
+    except Exception as e:
+        log(f"⚠️ 获取最新 release 失败，使用固定版本: {str(e).splitlines()[0]}")
+    return f'https://github.com/FunAudioLLM/SenseVoice/releases/download/{RUNTIME_VERSION}/{asset_name}'
+
+def extract_runtime(archive_path):
+    log('📦 解压 llama.cpp runtime...')
+    with tempfile.TemporaryDirectory(prefix='sensevoice_runtime_') as tmpdir:
+        if archive_path.endswith('.zip'):
+            with zipfile.ZipFile(archive_path) as z:
+                z.extractall(tmpdir)
+        else:
+            with tarfile.open(archive_path, 'r:gz') as t:
+                t.extractall(tmpdir)
+
+        binary_name = 'llama-funasr-sensevoice.exe' if platform.system().lower() == 'windows' else 'llama-funasr-sensevoice'
+        script_name = 'download-funasr-model.sh'
+        found_binary = None
+        found_script = None
+        for dirpath, _, filenames in os.walk(tmpdir):
+            for filename in filenames:
+                full = os.path.join(dirpath, filename)
+                if filename == binary_name:
+                    found_binary = full
+                elif filename == script_name:
+                    found_script = full
+        if not found_binary:
+            raise RuntimeError('runtime 包中未找到 llama-funasr-sensevoice')
+        shutil.copy2(found_binary, os.path.join(ROOT, binary_name))
+        if found_script:
+            shutil.copy2(found_script, os.path.join(ROOT, script_name))
+        if platform.system().lower() != 'windows':
+            for name in (binary_name, script_name):
+                path = os.path.join(ROOT, name)
+                if os.path.exists(path):
+                    os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        log('✅ runtime 已就绪')
+
+if is_linux():
+    build_runtime_from_source()
+else:
+    asset = runtime_asset_name()
+    archive = os.path.join(ROOT, asset)
+    download(latest_runtime_url(asset), archive, 1024 * 1024)
+    extract_runtime(archive)
+download('https://huggingface.co/FunAudioLLM/SenseVoiceSmall-GGUF/resolve/main/sensevoice-small-q8.gguf', os.path.join(GGUF_DIR, 'sensevoice-small-q8.gguf'), 100 * 1024 * 1024)
+download('https://huggingface.co/FunAudioLLM/fsmn-vad-GGUF/resolve/main/fsmn-vad.gguf', os.path.join(GGUF_DIR, 'fsmn-vad.gguf'), 100 * 1024)
+log('🎉 GGUF 本地模型资源下载完成')
+"""
+
+        def run():
+            global download_proc;
+            download_proc = subprocess.Popen([sys.executable, '-u', '-c', script], stdout=subprocess.PIPE,
+                                             stderr=subprocess.STDOUT, text=True, env=env)
+            for l in download_proc.stdout: download_logs.append(l.strip()); (
+                download_logs.pop(0) if len(download_logs) > 500 else None)
+            download_proc.wait();
+            download_logs.append("=== ✅ 成功 ===" if download_proc.returncode == 0 else "=== ❌ 失败 ===")
+
+        threading.Thread(target=run, daemon=True).start()
+        return jsonify({"code": 200})
+
+
+@app.route('/api/model/log', methods=['GET'])
+@login_required
+def get_download_log(): return jsonify(
+    {"code": 200, "running": (download_proc and download_proc.poll() is None), "logs": "\n".join(download_logs)})
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if current_user.is_authenticated: return redirect(url_for('index'))
+    if request.method == 'POST':
+        u = request.form.get('username');
+        p = request.form.get('password');
+        ip = request.remote_addr
+        is_b, w = check_ip_ban(ip)
+        if is_b: return render_template('login.html', error=f"⚠️ IP封禁中，剩余 {w} 分钟")
+        user = User.query.get(u)
+        if user and check_password_hash(user.password_hash, p): reset_login_fail(ip); login_user(user,
+                                                                                                 remember=True); return redirect(
+            url_for('index'))
+        record_login_fail(ip);
+        time.sleep(1);
+        return render_template('login.html', error="❌ 用户名或密码错误")
+    return render_template('login.html')
+
+
+@app.route('/logout')
+@login_required
+def logout(): logout_user(); return redirect(url_for('login'))
+
+
+@app.route('/')
+@login_required
+def index():
+    return render_template(
+        'index.html',
+        server_ip=get_masked_server_ip(),
+        aria_ng_available=os.path.isfile(os.path.join(ARIA_NG_DIR, 'index.html'))
+    )
+
+
+@app.route('/aria2/')
+@login_required
+def aria_ng_launcher():
+    if not os.path.isfile(os.path.join(ARIA_NG_DIR, 'index.html')):
+        return 'AriaNg is not installed. Run the Scanner installer to download it.', 503
+    return render_template('ariang.html')
+
+
+@app.route('/ariang/')
+@app.route('/ariang/<path:filename>')
+@login_required
+def aria_ng(filename='index.html'):
+    if not os.path.isfile(os.path.join(ARIA_NG_DIR, 'index.html')):
+        return 'AriaNg is not installed. Run the Scanner installer to download it.', 503
+    if filename == 'index.html':
+        with open(os.path.join(ARIA_NG_DIR, filename), encoding='utf-8') as index_file:
+            page = index_file.read()
+        theme_path = os.path.join(APP_ROOT, 'static', 'ariang-scanner.css')
+        theme_version = int(os.path.getmtime(theme_path)) if os.path.isfile(theme_path) else 0
+        theme_link = f'<link rel="stylesheet" href="{url_for("static", filename="ariang-scanner.css", v=theme_version)}">'
+        return page.replace('</head>', f'{theme_link}</head>'), 200, {
+            'Content-Type': 'text/html; charset=utf-8'
+        }
+    return send_from_directory(ARIA_NG_DIR, filename)
+
+
+def get_scanner_api_token():
+    token = get_final_config(None).get('api_token', '8pUoqOTHhEAhRnacl3c19')
+    token_path = os.path.join(APP_ROOT, '.token_secret')
+    if os.path.exists(token_path):
+        try:
+            with open(token_path) as token_file:
+                token = token_file.read().strip()
+        except OSError:
+            pass
+    return str(token or '')
+
+
+@app.route('/api/aria2/jsonrpc', methods=['POST'])
+@login_required
+def aria2_jsonrpc_proxy():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, (dict, list)):
+        return jsonify({'code': 400, 'msg': 'Aria2 RPC 请求格式无效'}), 400
+
+    port, secret = get_aria2_rpc_config()
+    commands = payload if isinstance(payload, list) else [payload]
+    for command in commands:
+        add_aria2_rpc_token(command, secret)
+
+    try:
+        response = requests.post(
+            f'http://127.0.0.1:{port}/jsonrpc', json=payload, timeout=(3, 30)
+        )
+    except requests.RequestException:
+        return jsonify({'code': 502, 'msg': '无法连接本机 Aria2 RPC'}), 502
+    return response.content, response.status_code, {
+        'Content-Type': response.headers.get('Content-Type', 'application/json')
+    }
+
+
+@app.route('/settings_page')
+@login_required
+def settings_page(): return render_template('settings.html', app_version=APP_VERSION)
+
+
+@app.route('/api/trigger', methods=['POST'])
+def trigger():
+    if request.headers.get('X-API-Token') != get_scanner_api_token(): return jsonify({"code": 403}), 403
+    req = request.json or {}
+    path = req.get('path')
+    aria_gid = str(req.get('gid') or '').strip()
+    upload_remote = str(req.get('upload_remote') or '').strip().rstrip(':')
+    if upload_remote and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', upload_remote):
+        return jsonify({"code": 400, "msg": "远端名只能包含字母、数字、下划线和连字符"}), 400
+    task, created = create_trigger_task(
+        path, req.get('file_count', 1), upload_remote, aria_gid, 'Aria2 完成回调'
+    )
+    if not task:
+        return jsonify({"code": 400}), 400
+    return jsonify({"code": 200, "task_id": task.id, "duplicate": not created})
+
+
+@app.route('/api/tasks')
+@login_required
+def get_tasks():
+    # UI 需要同时展示“检测队列/上传队列”，并且两边都最多展示 N 条。
+    # 这里用与 batch 操作、前端同样的规则来判断任务属于上传还是检测。
+    LIMIT_EACH = 9999
+    SCAN_LIMIT = LIMIT_EACH * 2
+
+    scan = Task.query.order_by(Task.id.desc()).limit(SCAN_LIMIT).all()
+    detect_sel = []
+    upload_sel = []
+
+    for t in scan:
+        if is_upload_task(t):
+            if len(upload_sel) < LIMIT_EACH:
+                upload_sel.append(t)
+        else:
+            if len(detect_sel) < LIMIT_EACH:
+                detect_sel.append(t)
+        if len(detect_sel) >= LIMIT_EACH and len(upload_sel) >= LIMIT_EACH:
+            break
+
+    res = []
+    for t in (detect_sel + upload_sel):
+        final_config = get_final_config(t.overrides)
+        res.append({"id": t.id, "filename": t.filename, "status": t.status, "log": t.log,
+                    "created_at": t.created_at.strftime("%m-%d %H:%M"),
+                    "finished_at": t.finished_at.strftime("%H:%M:%S") if t.finished_at else "-", "progress": t.progress,
+                    "upload_speed": t.upload_speed, "upload_eta": t.upload_eta,
+                    "upload_target": get_task_upload_target(t, final_config), "config": final_config})
+    return jsonify(res)
+
+
+@app.route('/api/tasks/batch', methods=['POST'])
+@login_required
+def batch_tasks():
+    d = request.json or {}
+    action = d.get('action');
+    target = d.get('type');
+    count = 0
+    if not action or not target: return jsonify({"code": 400})
+
+    detect_ids = [];
+    upload_ids = []
+
+    for t in get_batch_task_list(d):
+        ov = get_task_overrides(t)
+        is_up = is_upload_task(t, ov)
+
+        if target == 'detect':
+            if action == 'retry' and t.status in ['error', 'cancelled', 'dirty'] and not is_up:
+                t.status = 'pending';
+                t.retry_count = 0;
+                t.log += "\n=== 批量重试 (检测) ===\n";
+                detect_ids.append(t.id);
+                count += 1
+
+            elif action == 'stop' and t.status in ['pending', 'processing']:
+                if t.id in running_tasks: running_tasks[t.id].stop()
+                t.status = 'cancelled';
+                t.finished_at = datetime.now();
+                count += 1
+
+        elif target == 'upload':
+            if action == 'retry' and t.status in ['error', 'cancelled'] and is_up:
+                t.status = 'pending_upload';
+                t.retry_count = 0;
+                t.log += "\n=== 批量重传 ===\n";
+                apply_upload_remote_hijack(t, '批量上传重试')
+                upload_ids.append(t.id);
+                count += 1
+            elif action == 'stop' and t.status in ['pending_upload', 'uploading']:
+                if t.id in running_tasks: running_tasks[t.id].stop()
+                t.log = (t.log or '') + "\n⏹ 上传已停止\n"
+                t.status = 'cancelled';
+                t.finished_at = datetime.now();
+                count += 1
+
+    db.session.commit()
+    for i in reversed(detect_ids): enqueue_detect_task(i, priority=True)
+    for i in upload_ids: upload_queue.put(i)
+
+    return jsonify({"code": 200, "msg": f"操作了 {count} 个任务"})
+
+
+@app.route('/api/upload_remote_hijack', methods=['GET', 'POST'])
+@login_required
+def upload_remote_hijack():
+    if request.method == 'GET':
+        config = get_final_config(None)
+        return jsonify({
+            'enabled': bool(config.get('upload_remote_hijack_enabled')),
+            'remote': str(config.get('upload_remote_hijack_remote') or '')
+        })
+
+    data = request.get_json(silent=True) or {}
+    enabled = data.get('enabled') is True or str(data.get('enabled')).lower() == 'true'
+    remote = str(data.get('remote') or '').strip().rstrip(':')
+    if enabled and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', remote):
+        return jsonify({'code': 400, 'msg': '开启远端劫持时必须填写有效 remote 名'}), 400
+    if remote and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', remote):
+        return jsonify({'code': 400, 'msg': '远端名只能包含字母、数字、下划线和连字符'}), 400
+
+    for key, value in {
+        'upload_remote_hijack_enabled': 'true' if enabled else 'false',
+        'upload_remote_hijack_remote': remote
+    }.items():
+        config = Config.query.get(key) or Config(key=key)
+        config.value = value
+        db.session.add(config)
+    db.session.commit()
+    state = f'已开启，目标 {remote}:' if enabled else '已关闭'
+    return jsonify({'code': 200, 'msg': f'远端劫持{state}'})
+
+
+@app.route('/api/tasks/batch_upload_remote', methods=['POST'])
+@login_required
+def batch_upload_remote():
+    data = request.json or {}
+    remote = str(data.get('remote') or '').strip().rstrip(':')
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', remote):
+        return jsonify({"code": 400, "msg": "远端名只能包含字母、数字、下划线和连字符"})
+
+    count = 0
+    active_count = 0
+    for task in get_batch_task_list(data):
+        ov = get_task_overrides(task)
+        if task.status not in ['pending_upload', 'uploading', 'error', 'cancelled'] or not is_upload_task(task, ov):
+            continue
+        ov['upload_remote'] = remote
+        set_task_overrides(task, ov)
+        if task.status == 'uploading':
+            task.log = (task.log or '') + f"\n=== 一次性修改 remote: {remote}: (上传中，下次重试生效) ===\n"
+            active_count += 1
+        else:
+            task.log = (task.log or '') + f"\n=== 一次性修改 remote: {remote}: ===\n"
+        count += 1
+
+    db.session.commit()
+    msg = f"已一次性修改 {count} 个未完成上传任务到 {remote}:"
+    if active_count:
+        msg += f"；{active_count} 个上传中任务将在下次重试时切换"
+    return jsonify({"code": 200, "msg": msg})
+
+
+@app.route('/api/retry/<int:tid>', methods=['POST'])
+@login_required
+def retry(tid):
+    t = Task.query.get(tid);
+    if not t: return jsonify({"code": 404})
+    payload = request.get_json(silent=True) or {}
+    target = payload.get('type')
+
+    ov = get_task_overrides(t)
+    if target == 'detect':
+        is_up = False
+        ov.pop('direct_upload', None)
+        set_task_overrides(t, ov)
+        t.upload_speed = ''
+        t.upload_eta = '-'
+    elif target == 'upload':
+        is_up = True
+    else:
+        is_up = is_upload_task(t, ov)
+    t.log += "\n=== 人工重试 ===\n";
+    t.finished_at = None;
+    t.retry_count = 0
+    if is_up:
+        t.status = 'pending_upload';
+        t.progress = 0
+        t.upload_speed = ''
+        t.upload_eta = '-'
+        apply_upload_remote_hijack(t, '人工上传重试')
+        db.session.commit();
+        upload_queue.put(t.id)
+        return jsonify({"code": 200, "msg": "已重新加入上传队列", "status": "pending_upload"})
+    else:
+        t.status = 'pending';
+        db.session.commit();
+        enqueue_detect_task(t.id, priority=True)
+        return jsonify({"code": 200, "msg": "已重新加入检测队列", "status": "pending"})
+
+
+@app.route('/api/task/<int:tid>/direct_upload', methods=['POST'])
+@login_required
+def direct_upload(tid):
+    t = Task.query.get(tid);
+    if t:
+        update_task_overrides(t, {'direct_upload': True})
+        t.status = 'pending'; t.log += "\n=== 直传 ===\n"; t.finished_at = None; t.retry_count = 0; db.session.commit(); detect_queue.put(
+            t.id)
+    return jsonify({"code": 200})
+
+
+@app.route('/api/task/<int:tid>/double_sample', methods=['POST'])
+@login_required
+def double_sample_task(tid):
+    t = Task.query.get(tid)
+    if not t:
+        return jsonify({"code": 404}), 404
+    if t.status in ['processing', 'uploading']:
+        return jsonify({"code": 409, "msg": "任务运行中，无法切换抽样"}), 409
+
+    update_task_overrides(
+        t,
+        {'check_audio': True, 'audio_double_sample': True},
+        remove_keys=['_passed', '_passed_file', '_audio_segments', '_audio_segments_file']
+    )
+    t.status = 'pending'
+    t.log += "\n=== 单任务动态抽样 ===\n"
+    t.finished_at = None
+    t.retry_count = 0
+    db.session.commit()
+    enqueue_detect_task(t.id, priority=True)
+    return jsonify({"code": 200})
+
+
+@app.route('/api/task/<int:tid>/save_and_retry', methods=['POST'])
+@login_required
+def save_and_retry(tid):
+    t = Task.query.get(tid);
+    if t:
+        replace_public_task_overrides(t, request.json or {})
+        t.status = 'pending'; t.log += "\n=== 调整重试 ===\n"; t.finished_at = None; t.retry_count = 0; db.session.commit(); enqueue_detect_task(
+            t.id, priority=True)
+    return jsonify({"code": 200})
+
+
+def remove_task_files(task):
+    files_to_remove = set()
+    if task.filepath:
+        files_to_remove.add(task.filepath)
+        try:
+            dirname = os.path.dirname(task.filepath)
+            basename = os.path.basename(task.filepath)
+            name, ext = os.path.splitext(basename)
+            files_to_remove.add(os.path.join(dirname, f"{name}_clean{ext}"))
+            files_to_remove.add(os.path.join(dirname, f"{name}_clean_meta{ext}"))
+            if "_clean" in name:
+                orig = name.replace("_clean_meta", "").replace("_clean", "")
+                files_to_remove.add(os.path.join(dirname, f"{orig}{ext}"))
+        except:
+            pass
+
+    deleted = []
+    if is_directory_task(task):
+        if task.filepath and os.path.isdir(task.filepath):
+            try:
+                shutil.rmtree(task.filepath)
+                deleted.append(os.path.basename(task.filepath.rstrip('/\\')))
+            except:
+                pass
+    else:
+        for fp in files_to_remove:
+            if fp and os.path.exists(fp):
+                try:
+                    os.remove(fp);
+                    deleted.append(os.path.basename(fp))
+                except:
+                    pass
+    return deleted
+
+
+@app.route('/api/task/<int:tid>/delete', methods=['POST'])
+@login_required
+def delete_task_file(tid):
+    t = Task.query.get(tid);
+    if not t: return jsonify({"code": 404})
+    if tid in get_active_task_ids():
+        core = running_tasks.get(tid)
+        if core:
+            core.stop()
+        t.status = 'cancelled'
+        t.finished_at = datetime.now()
+        safe_db_commit(f"defer delete active task {tid}")
+        return jsonify({"code": 409, "msg": "任务仍在运行，已发送停止指令；请稍后再删除记录"})
+
+    deleted = remove_task_files(t)
+    db.session.delete(t);
+    db.session.commit()
+    msg = f"任务及文件已删除 ({', '.join(deleted)})" if deleted else "任务记录已删除 (未找到文件)"
+    return jsonify({"code": 200, "msg": msg})
+
+
+@app.route('/api/tasks/batch_delete', methods=['POST'])
+@login_required
+def batch_delete_tasks():
+    data = request.json or {}
+    task_ids = data.get('ids')
+    if not isinstance(task_ids, list) or not task_ids:
+        return jsonify({"code": 400, "msg": "请先选择要删除的任务"}), 400
+
+    selected_tasks = get_batch_task_list(data)
+    active_ids = get_active_task_ids()
+    deleted_count = 0
+    deleted_files = 0
+    stopped_count = 0
+
+    for task in selected_tasks:
+        if task.id in active_ids:
+            core = running_tasks.get(task.id)
+            if core:
+                core.stop()
+            if is_upload_task(task):
+                task.log = (task.log or '') + "\n⏹ 上传已停止\n"
+            task.status = 'cancelled'
+            task.finished_at = datetime.now()
+            stopped_count += 1
+            continue
+
+        deleted_files += len(remove_task_files(task))
+        db.session.delete(task)
+        deleted_count += 1
+
+    db.session.commit()
+    msg = f"已删除 {deleted_count} 个任务"
+    if deleted_files:
+        msg += f"及 {deleted_files} 个本地文件"
+    if stopped_count:
+        msg += f"；{stopped_count} 个运行中任务已停止，待结束后可再次删除"
+    return jsonify({"code": 200, "msg": msg})
+
+
+@app.route('/api/cancel/<int:tid>', methods=['POST'])
+@login_required
+def cancel(tid):
+    if tid in running_tasks: running_tasks[tid].stop()
+    t = Task.query.get(tid);
+    if t: t.status = 'cancelled'; t.finished_at = datetime.now(); db.session.commit()
+    return jsonify({"code": 200})
+
+
+@app.route('/api/settings', methods=['GET', 'POST'])
+@login_required
+def settings():
+    if request.method == 'POST':
+        data = dict(request.json or {})
+        normalize_cloud_api_key_config(data)
+        for k, v in data.items():
+            if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "cloud_asr_proxy_enabled", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample",
+                     "notify_upload_success", "notify_errors", "cleanup_scanner_history", "cleanup_scanner_uploaded", "cleanup_scanner_dirty", "cleanup_scanner_error", "cleanup_scanner_cancelled", "cleanup_aria2_completed"]:
+                val = "true" if (v is True or str(v).lower() == 'true') else "false"
+            else:
+                val = str(v)
+            c = Config.query.get(k) or Config(key=k);
+            c.value = val;
+            db.session.add(c)
+        db.session.commit()
+        if 'api_token' in data:
+            tk = str(data['api_token']).strip()
+            if re.match(r'^[a-zA-Z0-9_\-]+$', tk):
+                try:
+                    open(os.path.join(os.path.dirname(__file__), '.token_secret'), 'w').write(tk)
+                except:
+                    pass
+        return jsonify({"code": 200})
+    c = get_final_config(None);
+    c['model_exists'] = check_local_models_exist();
+    c['username'] = current_user.id
+    c['app_version'] = APP_VERSION
+    return jsonify(c)
+
+
+@app.route('/api/settings/backup', methods=['GET'])
+@login_required
+def export_settings_backup():
+    configs = {
+        k: v
+        for k, v in get_final_config(None).items()
+        if not str(k).startswith('sys_')
+    }
+    keywords = [
+        {'type': k.type, 'content': k.content, 'enabled': bool(k.enabled)}
+        for k in Keyword.query.order_by(Keyword.type.asc(), Keyword.id.asc()).all()
+    ]
+    return jsonify({
+        'schema_version': 1,
+        'app_version': APP_VERSION,
+        'exported_at': datetime.now().isoformat(timespec='seconds'),
+        'config': configs,
+        'keywords': keywords
+    })
+
+
+@app.route('/api/settings/restore', methods=['POST'])
+@login_required
+def restore_settings_backup():
+    data = request.json or {}
+    configs = data.get('config') or data.get('configs') or {}
+    keywords = data.get('keywords')
+
+    if not isinstance(configs, dict):
+        return jsonify({'code': 400, 'msg': '配置备份格式无效'}), 400
+
+    configs = normalize_cloud_api_key_config(dict(configs))
+
+    for k, v in configs.items():
+        key = str(k).strip()
+        if not key or key.startswith('sys_'):
+            continue
+        c = Config.query.get(key) or Config(key=key)
+        c.value = str(v)
+        db.session.add(c)
+
+    if isinstance(keywords, list):
+        Keyword.query.delete()
+        for item in keywords:
+            if not isinstance(item, dict):
+                continue
+            kw_type = str(item.get('type', '')).strip()
+            content = str(item.get('content', '')).strip()
+            if kw_type not in ['audio', 'subtitle', 'meta'] or not content:
+                continue
+            enabled = item.get('enabled', True)
+            db.session.add(Keyword(type=kw_type, content=content, enabled=(enabled is True or str(enabled).lower() == 'true')))
+
+    db.session.commit()
+    token = configs.get('api_token') if isinstance(configs, dict) else None
+    if token:
+        tk = str(token).strip()
+        if re.match(r'^[a-zA-Z0-9_\-]+$', tk):
+            try:
+                open(os.path.join(os.path.dirname(__file__), '.token_secret'), 'w').write(tk)
+            except:
+                pass
+
+    return jsonify({'code': 200})
+
+
+@app.route('/api/account/update', methods=['POST'])
+@login_required
+def update_account():
+    d = request.json;
+    op = d.get('old_password');
+    np = d.get('new_password');
+    nu = d.get('new_username')
+    if not op: return jsonify({"code": 400, "msg": "需旧密码"})
+    if not check_password_hash(current_user.password_hash, op): return jsonify({"code": 403, "msg": "密码错误"})
+    if np: current_user.password_hash = generate_password_hash(np)
+    if nu and nu != current_user.id:
+        if User.query.get(nu): return jsonify({"code": 409, "msg": "用户名已存在"})
+        db.session.execute(db.update(User).where(User.id == current_user.id).values(id=nu))
+    db.session.commit();
+    return jsonify({"code": 200})
+
+
+SYSTEM_LOG_PREFIX_RE = re.compile(
+    r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:[\.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?\s+\S+\s+\S+(?:\[\d+\])?:\s+(.*)$'
+)
+
+SYSTEM_LOG_HIDE_MARKERS = (
+    '🎚️ 动态抽样开启',
+    '🚦 同任务音频并发',
+    '✂️ 提取音频',
+    '↩️ 音频片尾为空',
+    '☁️ ASR 音频源',
+    '⏳ 等待前序音频任务释放云端槽',
+    '⏳ 等待云端模型并发槽',
+    '♻️ 复用 FLAC 音频',
+)
+
+
+def format_system_log_line(line):
+    line = (line or '').rstrip('\n')
+    match = SYSTEM_LOG_PREFIX_RE.match(line)
+    if match:
+        return f"{match.group(1)} {match.group(2)}"
+    return line
+
+
+def should_hide_system_log_line(line):
+    return any(marker in line for marker in SYSTEM_LOG_HIDE_MARKERS)
+
+
+def format_system_logs(raw_text):
+    lines = []
+    for raw_line in (raw_text or '').splitlines():
+        line = format_system_log_line(raw_line)
+        if not line.strip() or should_hide_system_log_line(line):
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+@app.route('/api/system_logs', methods=['GET'])
+@login_required
+def get_system_logs():
+    try:
+        r = subprocess.run(
+            ['journalctl', '-t', 'arup', '-n', str(request.args.get('lines', 9999)), '--no-pager', '--output',
+             'short-iso'], capture_output=True, text=True)
+        raw = str(request.args.get('raw', '')).lower() in ['1', 'true', 'yes']
+        return jsonify({"code": 200, "data": r.stdout if raw else format_system_logs(r.stdout)})
+    except Exception as e:
+        return jsonify({"code": 500, "msg": str(e)})
+
+
+@app.route('/api/system_logs/clear', methods=['POST'])
+@login_required
+def clear_system_logs():
+    try:
+        subprocess.run(['journalctl', '--rotate'], check=True);
+        subprocess.run(['journalctl', '--vacuum-time=1s'], check=True)
+        return jsonify({"code": 200, "msg": "已清理"})
+    except Exception as e:
+        return jsonify({"code": 500, "msg": str(e)})
+
+
+@app.route('/api/keywords', methods=['GET', 'POST'])
+@login_required
+def manage_keywords():
+    if request.method == 'GET': return jsonify(
+        [{'id': k.id, 'type': k.type, 'content': k.content, 'enabled': k.enabled} for k in Keyword.query.all()])
+    d = request.json;
+    for i in [x.strip() for x in d.get('content', '').split('|') if x.strip()]:
+        if not Keyword.query.filter_by(type=d.get('type', 'audio'), content=i).first(): db.session.add(
+            Keyword(type=d.get('type', 'audio'), content=i, enabled=True))
+    db.session.commit();
+    return jsonify({"code": 200})
+
+
+@app.route('/api/keyword/<int:kid>', methods=['DELETE', 'PUT'])
+@login_required
+def update_keyword(kid):
+    k = Keyword.query.get(kid)
+    if k:
+        if request.method == 'DELETE':
+            db.session.delete(k)
+        else:
+            k.enabled = request.json.get('enabled', k.enabled)
+        db.session.commit()
+    return jsonify({"code": 200})
+
+
+@app.route('/api/tasks/clear', methods=['POST'])
+@login_required
+def clear_tasks():
+    cleanup_config = get_final_config(None)
+    scanner_statuses = [
+        status for key, status in [
+            ('cleanup_scanner_uploaded', 'uploaded'),
+            ('cleanup_scanner_dirty', 'dirty'),
+            ('cleanup_scanner_error', 'error'),
+            ('cleanup_scanner_cancelled', 'cancelled'),
+        ]
+        if cleanup_config.get(key, True)
+    ]
+    clean_aria2 = cleanup_config.get('cleanup_aria2_completed', True)
+    if not scanner_statuses and not clean_aria2:
+        return jsonify({"code": 200, "msg": "未启用清理项目，请在设置 > 清理中开启后重试"})
+
+    deleted = 0
+    skipped = 0
+    if scanner_statuses:
+        protected_ids = get_active_task_ids()
+        q = Task.query.filter(Task.status.in_(scanner_statuses))
+        if protected_ids:
+            q = q.filter(~Task.id.in_(protected_ids))
+        deleted = q.delete(synchronize_session=False)
+        db.session.commit()
+        skipped = len(protected_ids)
+
+    aria2_result = {'cleaned': 0, 'failed': 0, 'error': ''}
+    if clean_aria2:
+        aria2_result = clear_aria2_completed_results()
+
+    parts = []
+    if scanner_statuses:
+        parts.append(f"Scanner {deleted} 条记录")
+    if clean_aria2:
+        parts.append(f"Aria2 已完成记录 {aria2_result['cleaned']} 条")
+    msg = "已清理 " + "，".join(parts)
+    if skipped:
+        msg += f"，已跳过 {skipped} 个运行中任务"
+    if aria2_result['failed']:
+        msg += f"，Aria2 {aria2_result['failed']} 条未清理"
+    if aria2_result['error']:
+        msg += "，Aria2 清理未完成"
+    return jsonify({"code": 200, "msg": msg, "aria2": aria2_result})
+
+
+@app.route('/api/update_task_config/<int:tid>', methods=['POST'])
+@login_required
+def update_task_config(tid):
+    t = Task.query.get(tid);
+    if t:
+        replace_public_task_overrides(t, request.json or {})
+        db.session.commit()
+    return jsonify({"code": 200})
+
+
+@app.route('/api/restart', methods=['POST'])
+@login_required
+def restart_service():
+    def _restart(): time.sleep(1); os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    threading.Thread(target=_restart).start();
+    return jsonify({"code": 200, "msg": "重启中..."})
+
+
+if __name__ == '__main__':
+    with app.app_context():
+        db.create_all()
+        if not User.query.first():
+            initial_username = os.environ.get("SCANNER_ADMIN_USERNAME") or f"admin_{secrets.token_hex(4)}"
+            initial_password = os.environ.get("SCANNER_ADMIN_PASSWORD") or secrets.token_urlsafe(18)
+            db.session.add(User(id=initial_username, password_hash=generate_password_hash(initial_password)))
+            db.session.commit()
+            try:
+                credentials_path = os.path.join(APP_ROOT, '.initial_admin_credentials')
+                descriptor = os.open(credentials_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(descriptor, 'w', encoding='utf-8') as credentials_file:
+                    credentials_file.write(f"username={initial_username}\npassword={initial_password}\n")
+                os.chmod(credentials_path, 0o600)
+            except OSError:
+                pass
+
+        # 🔥 开启 WAL 模式 (大幅优化 I/O)
+        try:
+            db.session.execute(text("PRAGMA journal_mode=WAL"));
+            db.session.commit();
+            print("🚀 SQLite WAL Enabled")
+        except:
+            pass
+
+        # 🔥 Startup Recovery
+        print("🔎 正在恢复中断的任务队列...")
+        recover_d = 0;
+        recover_u = 0
+        for t in Task.query.filter(Task.status.in_(['processing', 'pending'])).all():
+            t.status = 'pending';
+            detect_queue.put(t.id);
+            recover_d += 1
+            if t.status == 'processing': t.log += "\n=== 系统重启：恢复检测 ===\n"
+        for t in Task.query.filter(Task.status.in_(['uploading', 'pending_upload'])).all():
+            t.status = 'pending_upload';
+            upload_queue.put(t.id);
+            recover_u += 1
+            if t.status == 'uploading': t.log += "\n=== 系统重启：恢复上传 ===\n"
+        db.session.commit()
+        print(f"🔄 已重新排队: {recover_d} 检测, {recover_u} 上传")
+
+        orphan_count = reconcile_orphan_downloads()
+        if orphan_count:
+            print(f"🔎 启动补偿扫描已入队 {orphan_count} 个遗漏下载")
+
+        c = get_final_config(None);
+        n_d = max(1, c.get('concurrency_detect', 2));
+        n_u = max(1, c.get('concurrency_upload', 9))
+        print(f"🚀 启动检测: {n_d} | 上传: {n_u}")
+
+    for _ in range(n_d): threading.Thread(target=detection_worker, daemon=True).start()
+    for _ in range(n_u): threading.Thread(target=upload_worker, daemon=True).start()
+    threading.Thread(target=orphan_reconcile_worker, daemon=True).start()
+    app.run(host='0.0.0.0', port=int(os.environ.get('SCANNER_PORT', '5000')))

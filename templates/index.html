@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Scanner Pro Dashboard</title>
+
+    <link rel="icon" href="{{ url_for('static', filename='favicon.png') }}" type="image/png">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.8.0/font/bootstrap-icons.css">
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <style>
+        .task-log-box {
+            height: 50px; overflow-y: hidden; background: #212529; color: #28a745;
+            font-family: 'Consolas', monospace; font-size: 11px; padding: 5px 8px;
+            border-radius: 3px; cursor: zoom-in; position: relative; line-height: 1.3;
+        }
+        .task-log-box:hover { background: #2c3034; }
+        .sys-log-box {
+            background-color: #1e1e1e; color: #d4d4d4; font-family: 'Consolas', monospace;
+            font-size: 13px; padding: 15px; border-radius: 4px; height: calc(100vh - 380px);
+            min-height: 500px; overflow-y: auto; white-space: pre-wrap; line-height: 1.5; border: 1px solid #343a40;
+        }
+        .config-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; transition: all 0.3s; }
+        .dot-on { background-color: #198754; box-shadow: 0 0 4px #198754; }
+        .dot-processing { background-color: #0d6efd; animation: pulse 1s infinite; }
+        .dot-dirty { background-color: #dc3545; box-shadow: 0 0 4px #dc3545; }
+        .dot-off { background-color: #adb5bd; opacity: 0.3; }
+        @keyframes pulse { 0% { opacity: 0.5; } 50% { opacity: 1; } 100% { opacity: 0.5; } }
+        .nav-tabs .nav-link { color: #495057; font-weight: 500; border-radius: 4px 4px 0 0; }
+        .nav-tabs .nav-link.active { font-weight: bold; color: #0d6efd; border-top: 3px solid #0d6efd; background: #fff; border-bottom-color: transparent; }
+        .full-log-content { background: #0d1117; color: #e6edf3; font-family: 'Consolas', monospace; font-size: 13px; padding: 20px; height: 75vh; overflow-y: auto; white-space: pre-wrap; }
+        .progress-bar { transition: width 0.5s ease; }
+        .aria-ng-frame { display: block; width: 100%; height: calc(100vh - 225px); min-height: 640px; border: 1px solid #dee2e6; border-radius: 5px; background: #fff; }
+        .aria-ng-options-import summary { cursor: pointer; }
+        .aria-ng-options-import textarea { min-height: 64px; resize: vertical; font-size: .78rem; }
+        .mb-4 { margin-bottom: 0 !important; }
+        .dashboard-header-main, .dashboard-top-controls { min-width: 0; }
+        .dashboard-header-main { gap: .35rem !important; }
+        .dashboard-top-controls { gap: .25rem !important; }
+        .dashboard-header .btn { border-radius: .5rem; padding-left: .5rem !important; padding-right: .5rem !important; }
+        .batch-upload-remote { width: 230px !important; }
+        .upload-hijack-remote { width: 180px !important; }
+        .dashboard-header .input-group > .form-control { border-radius: .5rem 0 0 .5rem; }
+        .dashboard-header .input-group > .btn { border-radius: 0 .5rem .5rem 0; }
+        .dashboard-actions .btn { padding-top: 0; padding-bottom: 0; }
+        .dashboard-actions { display: flex; flex: 0 0 100%; align-items: center; justify-content: flex-end; flex-wrap: nowrap; gap: .5rem; }
+        .dashboard-tabs { flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
+        .dashboard-tabs .nav-item { flex: 0 0 auto; }
+        @media (max-width: 767.98px) {
+            #app { padding: .75rem !important; }
+            .dashboard-header { align-items: stretch !important; gap: .5rem !important; }
+            .dashboard-header-main, .dashboard-top-controls, .dashboard-actions { width: 100%; }
+            .dashboard-header-main { align-items: stretch !important; }
+            .dashboard-title { width: 100%; margin-right: 0 !important; font-size: 1.1rem; }
+            .dashboard-top-controls .badge { display: block; width: 100% !important; }
+            .dashboard-top-controls .input-group { width: 100% !important; }
+            .dashboard-top-controls .form-check { min-height: 30px; padding-left: 2.5em; }
+            .dashboard-actions { justify-content: flex-end; flex-wrap: nowrap; }
+            .dashboard-actions .clear-history { margin-right: 0 !important; }
+            .dashboard-actions .settings-link { margin-right: 0 !important; text-align: center; }
+            .dashboard-actions .logout-link { width: 48px; text-align: center; }
+            .card-header { padding-left: .5rem !important; padding-right: .5rem !important; }
+            .dashboard-tabs .nav-link { padding: .65rem .75rem; font-size: .86rem; white-space: nowrap; }
+            .queue-toolbar { padding: .65rem !important; }
+            .queue-toolbar .btn { flex: 1 1 auto; }
+            .queue-toolbar .small { width: 100%; }
+            .queue-table { min-width: 760px; font-size: 11px; }
+            .queue-table > :not(caption) > * > * { padding: .38rem .3rem; }
+            .task-file-name { max-width: 118px !important; }
+            .upload-file-name { max-width: 118px !important; }
+            .upload-remote-name { max-width: 88px !important; }
+            .task-log-cell { width: auto !important; min-width: 150px; }
+            .task-log-box { height: 38px; font-size: 10px; padding: 4px 6px; }
+            .config-dot { width: 7px; height: 7px; }
+            .queue-table .btn-group-sm > .btn { padding: .18rem .3rem; font-size: .75rem; }
+            .aria-ng-toolbar { flex-wrap: wrap; gap: .5rem; }
+            .aria-ng-frame { height: calc(100vh - 180px); min-height: 480px; }
+            .aria-ng-options-import { padding: .65rem !important; }
+            .sys-log-box { height: calc(100vh - 250px); min-height: 420px; padding: 10px; font-size: 12px; }
+        }
+    </style>
+</head>
+<body class="bg-light">
+<div id="app" class="container-fluid px-4 py-4">
+
+    <div class="dashboard-header d-flex flex-wrap justify-content-between align-items-center gap-1 mb-4 bg-white p-1 rounded shadow-sm border">
+        <div class="dashboard-header-main d-flex flex-wrap align-items-center gap-3">
+            <h4 class="dashboard-title mb-0 fw-bold text-primary me-2">
+                <img src="{{ url_for('static', filename='favicon.png') }}" width="24" height="24" class="me-2" style="border-radius: 4px;">
+                Scanner Pro Dashboard
+            </h4>
+            <div class="dashboard-top-controls d-flex flex-wrap align-items-center gap-2">
+                <span class="badge bg-light text-muted border px-2 py-1 font-monospace" title="服务器出口 IP 已隐匿"><i class="bi bi-hdd-network text-secondary"></i> 节点: {{ server_ip }}</span>
+                <div class="batch-upload-remote input-group input-group-sm">
+                    <input class="form-control font-monospace" v-model.trim="batchUploadRemote" placeholder="remote" title="一次性修改 remote">
+                    <button class="btn btn-outline-success" :disabled="!batchUploadRemote" @click="updateBatchUploadRemote"><i class="bi bi-folder-symlink me-1"></i>修改remote</button>
+                </div>
+                <div class="upload-hijack-remote input-group input-group-sm">
+                    <input class="form-control font-monospace" v-model.trim="uploadHijackRemote" placeholder="remote" title="劫持目标 remote">
+                    <button class="btn btn-outline-primary" @click="saveUploadRemoteHijack">保存劫持</button>
+                </div>
+                <div class="form-check form-switch mb-0" title="仅劫持检测通过后新进入上传队列或上传重试的任务">
+                    <input class="form-check-input" type="checkbox" id="uploadHijackEnabled" v-model="uploadHijackEnabled" @change="saveUploadRemoteHijack">
+                    <label class="form-check-label small fw-bold" for="uploadHijackEnabled">开启</label>
+                </div>
+            </div>
+        </div>
+        <div class="dashboard-actions">
+            <button class="clear-history btn btn-outline-danger me-2 px-3" @click="confirmAction('确定按“设置 > 清理”中已启用的项目清空历史吗？\n下载器异常记录和本地文件会保留，此操作不可恢复。', () => clearHistory())"><i class="bi bi-trash"></i> 清空历史</button>
+            <a href="/settings_page" class="settings-link btn btn-outline-secondary me-2 px-3"><i class="bi bi-gear-fill"></i> 设置</a>
+            <a href="/logout" class="logout-link btn btn-outline-danger px-3"><i class="bi bi-box-arrow-right"></i></a>
+        </div>
+    </div>
+
+    <div class="card shadow-sm border-0">
+        <div class="card-header bg-light pt-3 pb-0 border-bottom-0">
+            <ul class="dashboard-tabs nav nav-tabs card-header-tabs">
+                <li class="nav-item"><button class="nav-link" :class="{active: view==='aria2'}" @click="view='aria2'">⬇️ 下载器 <span class="badge bg-primary rounded-pill ms-1" v-if="aria2Stats.active + aria2Stats.waiting > 0">[[ aria2Stats.active + aria2Stats.waiting ]]</span></button></li>
+                <li class="nav-item"><button class="nav-link" :class="{active: view==='detect'}" @click="view='detect'">🔍 检测队列 <span class="badge bg-secondary rounded-pill ms-1" v-if="detectTasks.length > 0">[[ detectTasks.length ]]</span></button></li>
+                <li class="nav-item"><button class="nav-link" :class="{active: view==='upload'}" @click="view='upload'">☁️ 上传队列 <span class="badge bg-secondary rounded-pill ms-1" v-if="uploadTasks.length > 0">[[ uploadTasks.length ]]</span></button></li>
+                <li class="nav-item"><button class="nav-link" :class="{active: view==='syslog'}" @click="view='syslog'">📜 系统日志</button></li>
+            </ul>
+        </div>
+
+        <div class="card-body p-0 border-top bg-white">
+
+            <div v-if="view==='detect'">
+                    <div class="queue-toolbar p-2 border-bottom d-flex flex-wrap gap-2 bg-light bg-opacity-50 ps-3">
+                        <button class="btn btn-sm btn-outline-primary" @click="batchAction('detect', 'retry')"><i class="bi bi-arrow-repeat me-1"></i>[[ batchActionLabel('detect', 'retry') ]]</button>
+                        <button class="btn btn-sm btn-outline-danger" @click="batchAction('detect', 'stop')"><i class="bi bi-stop-circle me-1"></i>[[ batchActionLabel('detect', 'stop') ]]</button>
+                        <button class="btn btn-sm btn-outline-danger" :disabled="!selectedCount('detect')" @click="batchDelete('detect')"><i class="bi bi-trash-fill me-1"></i>批量删除</button>
+                        <span v-if="selectedCount('detect')" class="small text-primary align-self-center ms-1">已选 [[ selectedCount('detect') ]] 项 <button class="btn btn-link btn-sm p-0 ms-1" @click="clearSelection('detect')">清除</button></span>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="queue-table table table-hover align-middle mb-0">
+                            <thead class="table-light"><tr><th class="text-center" style="width:42px"><input class="form-check-input" type="checkbox" :checked="allSelected('detect')" @change="toggleAll('detect', $event.target.checked)" title="全选"></th><th class="text-center">ID</th><th>文件信息</th><th class="text-center">状态指示</th><th class="text-center">结果</th><th>实时日志 (双击全屏)</th><th class="text-end pe-4">操作</th></tr></thead>
+                            <tbody>
+                                <tr v-for="t in detectTasks" :key="t.id">
+                                    <td class="text-center"><input class="form-check-input" type="checkbox" v-model="selectedTaskIds" :value="t.id" :aria-label="`选择任务 ${t.id}`"></td>
+                                    <td class="text-center fw-bold text-muted">[[ t.id ]]</td>
+                                    <td><div class="task-file-name text-truncate fw-bold text-dark" style="max-width:280px" :title="t.filename"><i class="bi bi-file-earmark-play me-1"></i>[[ t.filename ]]</div><div class="small text-muted mt-1"><i class="bi bi-clock"></i> [[ t.created_at ]]</div></td>
+                                    <td class="text-center"><div class="d-flex justify-content-center bg-light rounded-pill py-1 px-2 border" style="width: fit-content; margin: 0 auto; gap:3px"><span v-for="i in audioDotCount(t)" :class="['config-dot', getDotClass('audio', t, i)]"></span><span style="border-right:1px solid #ccc; margin:0 2px"></span><span :class="['config-dot', getDotClass('subtitle', t)]"></span><span :class="['config-dot', getDotClass('meta', t)]"></span></div></td>
+                                    <td class="text-center"><span class="badge rounded-pill" :class="bg(t.status)">[[ statusText[t.status]||t.status ]]</span></td>
+                                    <td class="task-log-cell" style="width: 35%;"><div class="task-log-box" @dblclick="showFullLog(t)" v-html="fmt(t.log)"></div></td>
+                                    <td class="text-end pe-3">
+                                        <div class="btn-group btn-group-sm">
+                                            <button v-if="canControl(t)" class="btn btn-outline-primary" @click="openConfig(t)" title="调整"><i class="bi bi-sliders"></i></button>
+                                            <button v-if="canDoubleSample(t)" class="btn btn-outline-warning" @click="confirmAction('确定让该任务使用动态抽样并重新检测吗？', () => doubleSample(t.id))" title="动态抽样"><i class="bi bi-soundwave"></i></button>
+                                            <button v-if="canControl(t)" class="btn btn-outline-success" @click="confirmAction('确定跳过检测直接上传吗？', () => directUpload(t.id))" title="直传"><i class="bi bi-forward-fill"></i></button>
+                                            <button v-if="canStop(t)" class="btn btn-outline-danger" @click="confirmAction('确定停止该任务吗？', () => cancel(t.id))" title="停止"><i class="bi bi-stop-circle-fill"></i></button>
+                                            <button v-if="isError(t)" class="btn btn-outline-secondary" @click="retry(t.id)" title="重试"><i class="bi bi-arrow-clockwise"></i></button>
+                                            <button class="btn btn-outline-danger" @click="confirmAction('⚠️ 警告：确定要删除此任务吗？', () => deleteTask(t.id))" title="删除"><i class="bi bi-trash-fill"></i></button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr v-if="detectTasks.length===0"><td colspan="7" class="text-center py-5 text-muted">当前没有等待检测的任务</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+            </div>
+
+            <div v-show="view==='aria2'" class="p-3 bg-light">
+                <div class="aria-ng-toolbar d-flex justify-content-between align-items-center mb-2"><div class="d-flex align-items-center gap-2"><span class="fw-bold text-primary"><i class="bi bi-download me-1"></i>Aria2 下载器</span><span class="badge bg-warning text-dark">等待 [[ aria2Stats.waiting ]]</span><span class="badge bg-secondary">已停止 [[ aria2Stats.stopped ]]</span></div><a href="{{ url_for('aria_ng_launcher') }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">新窗口</a></div>
+                {% if aria_ng_available %}
+                <iframe id="ariaNgFrame" class="aria-ng-frame" src="{{ url_for('aria_ng_launcher') }}" title="AriaNg 下载器"></iframe>
+                <details class="aria-ng-options-import mt-2 border rounded bg-white">
+                    <summary class="small fw-bold px-2 py-1"><i class="bi bi-box-arrow-in-down me-1"></i>导入 AriaNg 设置</summary>
+                    <div class="p-2 border-top">
+                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                            <label for="ariaNgOptionsImport" class="small text-muted mb-0">AriaNg.Options JSON</label>
+                            <div class="d-flex gap-1">
+                                <button class="btn btn-sm btn-outline-secondary" @click="exportAriaNgOptions"><i class="bi bi-clipboard me-1"></i>导出到剪贴板</button>
+                                <button class="btn btn-sm btn-outline-danger" @click="clearAriaNgOptions"><i class="bi bi-eraser me-1"></i>清空配置</button>
+                                <button class="btn btn-sm btn-outline-primary" :disabled="!ariaNgOptionsImport.trim()" @click="importAriaNgOptions"><i class="bi bi-arrow-repeat me-1"></i>导入并刷新</button>
+                            </div>
+                        </div>
+                        <textarea id="ariaNgOptionsImport" class="form-control font-monospace" v-model="ariaNgOptionsImport" placeholder='粘贴 localStorage 中 AriaNg.Options 的完整 JSON 值，例如 {"language":"zh_Hans"}'></textarea>
+                        <div class="form-text">仅写入当前浏览器的 <code>AriaNg.Options</code>；导入后会刷新下载器，内置下载器的本机 Aria2 RPC 连接由 Scanner 自动管理。</div>
+                    </div>
+                </details>
+                {% else %}
+                <div class="alert alert-warning mb-0">AriaNg 资源未安装。请运行安装脚本后重试。</div>
+                {% endif %}
+            </div>
+
+            <div v-if="view==='upload'">
+                <div class="queue-toolbar p-2 border-bottom d-flex flex-wrap gap-2 align-items-center bg-light bg-opacity-50 ps-3">
+                    <button class="btn btn-sm btn-outline-primary" @click="batchAction('upload', 'retry')"><i class="bi bi-arrow-repeat me-1"></i>[[ batchActionLabel('upload', 'retry') ]]</button>
+                    <button class="btn btn-sm btn-outline-danger" @click="batchAction('upload', 'stop')"><i class="bi bi-stop-circle me-1"></i>[[ batchActionLabel('upload', 'stop') ]]</button>
+                    <button class="btn btn-sm btn-outline-danger" :disabled="!selectedCount('upload')" @click="batchDelete('upload')"><i class="bi bi-trash-fill me-1"></i>批量删除</button>
+                    <span v-if="selectedCount('upload')" class="small text-primary align-self-center ms-1">已选 [[ selectedCount('upload') ]] 项 <button class="btn btn-link btn-sm p-0 ms-1" @click="clearSelection('upload')">清除</button></span>
+                </div>
+                <div class="table-responsive">
+                    <table class="queue-table table table-hover align-middle mb-0">
+                        <thead class="table-light"><tr><th class="text-center" style="width:42px"><input class="form-check-input" type="checkbox" :checked="allSelected('upload')" @change="toggleAll('upload', $event.target.checked)" title="全选"></th><th class="text-center">ID</th><th>文件信息</th><th>上传目标</th><th>传输进度</th><th>速度 / ETA</th><th>结束时间</th><th class="text-center">状态</th><th class="text-end pe-4">操作</th></tr></thead>
+                        <tbody>
+                            <tr v-for="t in uploadTasks" :key="t.id">
+                                <td class="text-center"><input class="form-check-input" type="checkbox" v-model="selectedTaskIds" :value="t.id" :aria-label="`选择任务 ${t.id}`"></td>
+                                <td class="text-center fw-bold text-muted">[[ t.id ]]</td>
+                                <td class="upload-file-name text-truncate" style="max-width:250px" :title="t.filename"><i class="bi bi-file-earmark-arrow-up me-1"></i>[[ t.filename ]]</td>
+                                <td class="upload-remote-name font-monospace small text-truncate" style="max-width:160px" :title="uploadRemote(t.upload_target)">[[ uploadRemote(t.upload_target) ]]</td>
+                                <td><div class="progress bg-secondary bg-opacity-10" style="height: 12px; border-radius: 6px;"><div class="progress-bar progress-bar-striped progress-bar-animated" :style="{width: t.progress + '%'}" :class="t.status==='uploaded'?'bg-success':'bg-primary'"></div></div><div class="small text-end text-muted mt-1">[[ t.progress ]]%</div></td>
+                                <td><div v-if="t.status==='uploading'" class="small"><div class="fw-bold text-dark">🚀 [[ t.upload_speed ]]</div><div class="text-muted">⏱ [[ t.upload_eta ]]</div></div><div v-else class="text-muted small">-</div></td>
+                                <td class="small text-muted">[[ t.finished_at || '-' ]]</td>
+                                <td class="text-center"><span class="badge rounded-pill" :class="bg(t.status)">[[ statusText[t.status]||t.status ]]</span></td>
+                                <td class="text-end pe-3"><div class="btn-group btn-group-sm"><button v-if="canStop(t)" class="btn btn-outline-danger" @click="confirmAction('确定停止上传？', () => cancel(t.id))"><i class="bi bi-stop-fill"></i></button><button v-if="t.status==='error' || t.status==='cancelled'" class="btn btn-outline-secondary" @click="retry(t.id)"><i class="bi bi-arrow-repeat"></i></button><button class="btn btn-outline-danger" @click="confirmAction('⚠️ 确定删除此记录吗？', () => deleteTask(t.id))"><i class="bi bi-trash-fill"></i></button></div></td>
+                            </tr>
+                            <tr v-if="uploadTasks.length===0"><td colspan="9" class="text-center py-5 text-muted">暂无上传任务</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div v-if="view==='syslog'" class="p-0">
+                <div class="bg-white p-2 border-bottom d-flex justify-content-between align-items-center px-4">
+                    <div class="d-flex align-items-center gap-3">
+                        <span class="fw-bold text-dark"><i class="bi bi-terminal-fill me-2 text-secondary"></i>System Logs</span>
+                        <div class="input-group input-group-sm" style="width: 250px;"><span class="input-group-text bg-light"><i class="bi bi-funnel"></i></span><input type="text" class="form-control" v-model="sysLogFilter" placeholder="关键词过滤..."><button class="btn btn-outline-secondary" v-if="sysLogFilter" @click="sysLogFilter=''">×</button></div>
+                        <div class="form-check form-switch mb-0"><input class="form-check-input" type="checkbox" v-model="autoRefreshLogs" id="autoRef"><label class="form-check-label small text-muted" for="autoRef">自动</label></div>
+                    </div>
+                    <div class="btn-group btn-group-sm"><button class="btn btn-outline-secondary" @click="loadSysLogs"><i class="bi bi-arrow-clockwise"></i></button><button class="btn btn-outline-danger" @click="confirmAction('确定清空系统日志(journalctl)吗？', () => clearSysLogs())"><i class="bi bi-eraser-fill"></i></button></div>
+                </div>
+                <div class="sys-log-box m-0 border-0 rounded-0" id="sysLogBox">
+                    <div v-for="(line, idx) in filteredSystemLogs" :key="idx" :class="getLogClass(line)" style="padding-left:5px">[[ line ]]</div>
+                    <div v-if="!sysLogs" class="text-muted p-3">正在读取系统日志...</div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <div class="toast-container position-fixed bottom-0 end-0 p-3" style="z-index: 1100"><div id="liveToast" class="toast align-items-center text-white border-0" :class="toastClass" role="alert"><div class="d-flex"><div class="toast-body fs-6"><i :class="toastIcon" class="me-2 fs-5" style="vertical-align: middle;"></i> [[ toastMsg ]]</div><button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button></div></div></div>
+    <div class="modal fade" id="confirmModal" tabindex="-1"><div class="modal-dialog modal-sm modal-dialog-centered"><div class="modal-content shadow"><div class="modal-header border-0 pb-0"><h6 class="modal-title fw-bold text-danger"><i class="bi bi-exclamation-triangle-fill me-1"></i> 确认操作</h6></div><div class="modal-body text-center py-3" style="white-space: pre-line;">[[ confirmMsg ]]</div><div class="modal-footer border-0 pt-0 justify-content-center"><button type="button" class="btn btn-sm btn-light border px-3" data-bs-dismiss="modal">取消</button><button type="button" class="btn btn-sm btn-danger px-3" @click="executeConfirm">确定执行</button></div></div></div></div>
+    <div class="modal fade" id="fullLogModal" tabindex="-1"><div class="modal-dialog modal-xl modal-dialog-scrollable"><div class="modal-content bg-dark border-secondary"><div class="modal-header border-secondary py-2"><h6 class="modal-title text-light font-monospace text-truncate w-75"><i class="bi bi-file-text me-2"></i>[[ currentLogTitle ]]</h6><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body p-0"><div class="full-log-content">[[ currentLogContent ]]</div></div></div></div></div>
+    <div class="modal fade" id="configModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content"><div class="modal-header bg-light"><h5 class="modal-title">🔧 调整检测策略</h5><button class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body" v-if="curTask.config"><div class="alert alert-info small mb-3">任务 <b>#[[ curTask.id ]]</b> 独立设置。</div><div class="form-check form-switch mb-3 ps-5"><input class="form-check-input" type="checkbox" v-model="curTask.config.check_audio" style="scale: 1.3;"><label class="form-check-label ms-2">音频检测</label></div><div class="form-check form-switch mb-3 ps-5"><input class="form-check-input" type="checkbox" v-model="curTask.config.audio_double_sample" style="scale: 1.3;"><label class="form-check-label ms-2">动态抽样</label><div class="small text-muted ms-2 mt-1">开启后该任务按片段长度动态抽样，短视频全片扫描。</div></div><div class="form-check form-switch mb-3 ps-5"><input class="form-check-input" type="checkbox" v-model="curTask.config.check_subtitles" style="scale: 1.3;"><label class="form-check-label ms-2">字幕清洗</label></div><div class="form-check form-switch ps-5"><input class="form-check-input" type="checkbox" v-model="curTask.config.sanitize_metadata" style="scale: 1.3;"><label class="form-check-label ms-2">元数据清除</label></div></div><div class="modal-footer bg-light"><button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button><button class="btn btn-primary btn-sm" @click="saveAndRetry">重试</button></div></div></div></div>
+
+</div>
+
+<script>
+let modalConfig, modalLog, modalConfirm, toastInstance;
+Vue.createApp({
+    delimiters: ['[[', ']]'],
+    data(){ return { tasks:[], view:'detect', curTask:{}, sysLogs:'', sysLogFilter:'', autoRefreshLogs:true, currentLogTitle:'', currentLogContent:'', batchUploadRemote:'', uploadHijackRemote:'', uploadHijackEnabled:false, ariaNgOptionsImport:'', selectedTaskIds:[], aria2Stats:{active:0, waiting:0, stopped:0}, statusText:{'pending':'⏳ 等待中','processing':'🔄 检测中','pending_upload':'✅ 待上传','uploading':'☁️ 上传中','uploaded':'🎉 已完成','dirty':'🚫 已拦截','error':'❌ 出错了','cancelled':'⏹ 已停止'}, toastMsg:'', toastClass:'bg-primary', toastIcon:'bi-info-circle', confirmMsg:'', confirmCallback:null, pollTimer: null }},
+    computed: {
+        filteredSystemLogs() { if(!this.sysLogs)return[]; const l=this.sysLogs.split('\n'); if(!this.sysLogFilter.trim())return l; const k=this.sysLogFilter.toLowerCase(); return l.filter(x=>x.toLowerCase().includes(k)) },
+        detectTasks() { return this.tasks.filter(t => !this.isUploadTask(t)) },
+        uploadTasks() { return this.tasks.filter(t => this.isUploadTask(t)) },
+        activeDetectCount() { return this.tasks.filter(t => t.status === 'processing').length },
+        activeUploadCount() { return this.tasks.filter(t => t.status === 'uploading').length }
+    },
+    mounted(){
+        this.load();
+        this.loadAria2Stats();
+        this.loadUploadRemoteHijack();
+        this.startPolling();
+        setInterval(()=>{if(this.view==='syslog'&&this.autoRefreshLogs)this.loadSysLogs(true)}, 5000);
+        setInterval(()=>this.loadAria2Stats(), 3000);
+        modalConfig=new bootstrap.Modal(document.getElementById('configModal'));
+        modalLog=new bootstrap.Modal(document.getElementById('fullLogModal'));
+        modalConfirm=new bootstrap.Modal(document.getElementById('confirmModal'));
+        toastInstance=new bootstrap.Toast(document.getElementById('liveToast'))
+    },
+    watch: { view(n) { if(n==='syslog') { if(!this.sysLogs)this.loadSysLogs(); this.$nextTick(()=>{ const b=document.getElementById('sysLogBox'); if(b)b.scrollTop=b.scrollHeight }) } if(n==='aria2')this.loadAria2Stats() } },
+    methods:{
+        isUploadTask(t) {
+            if(['pending_upload', 'uploading', 'uploaded'].includes(t.status)) return true;
+            if(['error', 'cancelled', 'dirty'].includes(t.status)) {
+                if(t.config && t.config.direct_upload) return true;
+                if(t.upload_speed || (t.upload_eta && t.upload_eta !== '-')) return true;
+                const log = t.log || '';
+                const markers = ['☁️ 上传:', '=== 批量重传 ===', '=== 直传 ===', '❌ 上传失败', '上传异常', '上传中断', '上传已停止', '✅ 上传成功', '🎉 上传成功', '目录任务上传完成', '文件上传成功'];
+                if(markers.some(m => log.includes(m))) return true;
+            }
+            return false;
+        },
+        getLogClass(l) { if(l.includes('Error')||l.includes('❌')||l.includes('Fail'))return 'text-danger fw-bold'; if(l.includes('✅')||l.includes('Success'))return 'text-success'; if(l.includes('Warning')||l.includes('⚠️'))return 'text-warning'; if(l.includes('Task-'))return 'text-info'; return '' },
+
+        load(){
+            if(!document.getElementById('configModal').classList.contains('show')) {
+                return axios.get('/api/tasks').then(r=>{
+                    this.tasks=r.data;
+                    const ids=new Set(this.tasks.map(t=>t.id));
+                    this.selectedTaskIds=this.selectedTaskIds.filter(id=>ids.has(id));
+                })
+            }
+            return Promise.resolve();
+        },
+
+        loadAria2Stats(){
+            return axios.post('/api/aria2/jsonrpc', {jsonrpc:'2.0', id:'scanner-stats', method:'aria2.getGlobalStat', params:[]}).then(r=>{
+                const stat=r.data && r.data.result || {};
+                this.aria2Stats={active:Number(stat.numActive||0), waiting:Number(stat.numWaiting||0), stopped:Number(stat.numStopped||0)};
+            }).catch(()=>{});
+        },
+
+        importAriaNgOptions(){
+            const value=this.ariaNgOptionsImport.trim();
+            try {
+                const options=JSON.parse(value);
+                if(!options || typeof options!=='object' || Array.isArray(options)) throw new Error('not an object');
+            } catch (_) {
+                this.showToast('AriaNg.Options 必须是有效的 JSON 对象','error');
+                return;
+            }
+            this.confirmAction('确定导入 AriaNg 设置吗？\n当前浏览器的 AriaNg 设置将被覆盖，下载器会立即刷新。', () => {
+                localStorage.setItem('AriaNg.Options', value);
+                const frame=document.getElementById('ariaNgFrame');
+                if(frame) frame.src=frame.getAttribute('src') || frame.src;
+                this.showToast('AriaNg 设置已导入，下载器正在刷新');
+            });
+        },
+
+        clearAriaNgOptions(){
+            this.confirmAction('确定清空当前浏览器的 AriaNg 配置吗？\n不会修改服务器 Aria2 设置或下载任务，下载器将恢复 Scanner 默认连接。', () => {
+                localStorage.removeItem('AriaNg.Options');
+                this.ariaNgOptionsImport='';
+                const frame=document.getElementById('ariaNgFrame');
+                if(frame) frame.src=frame.getAttribute('src') || frame.src;
+                this.showToast('AriaNg 配置已清空，下载器正在恢复默认连接');
+            });
+        },
+
+        async exportAriaNgOptions(){
+            const value=localStorage.getItem('AriaNg.Options');
+            if(!value) {
+                this.showToast('当前浏览器没有 AriaNg.Options 设置','error');
+                return;
+            }
+            try {
+                if(navigator.clipboard && window.isSecureContext) {
+                    await navigator.clipboard.writeText(value);
+                } else {
+                    const field=document.createElement('textarea');
+                    field.value=value;
+                    field.setAttribute('readonly','');
+                    field.style.cssText='position:fixed;opacity:0;pointer-events:none';
+                    document.body.appendChild(field);
+                    field.select();
+                    const copied=document.execCommand('copy');
+                    field.remove();
+                    if(!copied) throw new Error('copy failed');
+                }
+                this.showToast('AriaNg 设置已复制到剪贴板');
+            } catch (_) {
+                this.showToast('无法写入剪贴板，请检查浏览器权限','error');
+            }
+        },
+
+        loadUploadRemoteHijack(){
+            return axios.get('/api/upload_remote_hijack').then(r=>{
+                this.uploadHijackEnabled=Boolean(r.data.enabled);
+                this.uploadHijackRemote=String(r.data.remote||'');
+            });
+        },
+
+        saveUploadRemoteHijack(){
+            const remote=this.uploadHijackRemote.replace(/:$/, '').trim();
+            return axios.post('/api/upload_remote_hijack', {enabled:this.uploadHijackEnabled, remote}).then(r=>{
+                this.uploadHijackRemote=remote;
+                this.showToast(r.data.msg);
+            }).catch(e=>{
+                this.showToast(e.response?.data?.msg || '远端劫持保存失败','error');
+                this.loadUploadRemoteHijack();
+            });
+        },
+
+        startPolling() {
+            const step = () => {
+                this.load().finally(() => {
+                    const busy = this.activeDetectCount > 0 || this.activeUploadCount > 0;
+                    const delay = busy ? 1000 : 3000;
+                    this.pollTimer = setTimeout(step, delay);
+                });
+            };
+            step();
+        },
+
+        bg(s){ return {'uploaded':'bg-success','dirty':'bg-danger','processing':'bg-primary','pending_upload':'bg-success text-white','uploading':'bg-info text-dark'}[s]||'bg-secondary' },
+        fmt(l){ return l?l.replace(/\n/g,'<br>'):'' },
+        audioDotCount(t) {
+            const states = t.config && t.config._audio_segments;
+            let planned = 3;
+            if(!t.config || !t.config.audio_double_sample) planned = 3;
+            else {
+                const m = String(t.log || '').match(/动态抽样开启:\s*(?:全片|(\d+)段)/);
+                planned = m ? (m[1] ? Number(m[1]) : 1) : Math.max(1, Math.min(24, Number(t.config.audio_max_segments || 8)));
+            }
+            if(states && typeof states === 'object') return Math.max(planned, Object.keys(states).length);
+            return planned;
+        },
+        audioSegmentNames(t) {
+            const log = String(t.log || '');
+            const full = log.match(/动态抽样开启:\s*全片/);
+            if(full) return ['01全片'];
+            const ordered = log.match(/动态抽样开启:\s*\d+段[^，]*，顺序\s*([^\n]+)/);
+            if(ordered) return ordered[1].split(/\s*->\s*/).map(x => x.trim()).filter(Boolean);
+            const states = t.config && t.config._audio_segments;
+            return states && typeof states === 'object' ? Object.keys(states).sort() : [];
+        },
+        audioSegmentStatus(t, idx) {
+            const states = t.config && t.config._audio_segments;
+            if(!states || typeof states !== 'object') return null;
+            const names = this.audioSegmentNames(t);
+            const name = names[idx - 1] || Object.keys(states).sort()[idx - 1];
+            const state = name ? states[name] : null;
+            return state && state.status ? state.status : null;
+        },
+        canDoubleSample(t) { return this.canControl(t) && t.config && !t.config.audio_double_sample },
+        getDotClass(type,t,idx) {
+            let p=t.progress||0;
+            if(type==='audio'&&!t.config.check_audio)return 'dot-off'; if(type==='subtitle'&&!t.config.check_subtitles)return 'dot-off'; if(type==='meta'&&!t.config.sanitize_metadata)return 'dot-off';
+            if(type==='audio'){ const status=this.audioSegmentStatus(t, idx); if(status==='passed')return 'dot-on'; if(status==='failed')return 'dot-dirty'; }
+            if(['pending_upload','uploading','uploaded'].includes(t.status))return 'dot-on'; if(t.status==='dirty')return 'dot-dirty';
+            if(t.status==='processing'){ if(type==='meta')return p>=10?'dot-on':'dot-processing'; if(type==='subtitle')return p>=30?'dot-on':(p>=10?'dot-processing':'dot-off'); if(type==='audio'){ const count=this.audioDotCount(t); const step=45/count; const start=Math.floor(50+(idx-1)*step); const done=Math.floor(50+idx*step); if(p>=done)return 'dot-on'; if(p>=start)return 'dot-processing'; return 'dot-off' } } return 'dot-off';
+        },
+        showToast(m,t='success'){ this.toastMsg=m; this.toastClass=t==='success'?'bg-success':'bg-danger'; this.toastIcon=t==='success'?'bi-check-circle-fill':'bi-exclamation-triangle-fill'; toastInstance.show() },
+        confirmAction(m,a){ this.confirmMsg=m; this.confirmCallback=a; modalConfirm.show() },
+        executeConfirm(){ if(this.confirmCallback)this.confirmCallback(); modalConfirm.hide() },
+        loadSysLogs(s=false){ if(!s)this.sysLogs='读取中...'; axios.get('/api/system_logs?lines=9999&t='+Date.now()).then(r=>{ this.sysLogs=r.data.data; const b=document.getElementById('sysLogBox'); if(b&&(b.scrollHeight-b.scrollTop-b.clientHeight<100||!s))this.$nextTick(()=>b.scrollTop=b.scrollHeight) }) },
+        clearSysLogs(){ axios.post('/api/system_logs/clear').then(r=>{ this.loadSysLogs(); this.showToast(r.data.msg) }) },
+        showFullLog(t){ this.currentLogTitle=t.filename; this.currentLogContent=t.log; modalLog.show() },
+        uploadRemote(target){ const value=String(target || ''); const pos=value.indexOf(':'); return pos >= 0 ? value.slice(0, pos + 1) : (value || '-') },
+        queueTasks(type){ return type==='upload' ? this.uploadTasks : this.detectTasks },
+        selectedIds(type){ const ids=new Set(this.queueTasks(type).map(t=>t.id)); return this.selectedTaskIds.filter(id=>ids.has(id)) },
+        selectedCount(type){ return this.selectedIds(type).length },
+        allSelected(type){ const tasks=this.queueTasks(type); return tasks.length>0 && tasks.every(t=>this.selectedTaskIds.includes(t.id)) },
+        toggleAll(type, checked){ const ids=this.queueTasks(type).map(t=>t.id); this.selectedTaskIds=checked ? [...new Set([...this.selectedTaskIds,...ids])] : this.selectedTaskIds.filter(id=>!ids.includes(id)) },
+        clearSelection(type){ const ids=new Set(this.queueTasks(type).map(t=>t.id)); this.selectedTaskIds=this.selectedTaskIds.filter(id=>!ids.has(id)) },
+        batchActionLabel(type, action){ const count=this.selectedCount(type); if(count)return `${action==='retry'?'重试':'停止'}选中 (${count})`; return action==='retry'?'全部重试 (错误/取消)':'全部停止' },
+        isRunning(t){ return ['processing','uploading'].includes(t.status) }, isError(t){ return ['error','cancelled','dirty'].includes(t.status) }, canControl(t){ return ['pending','dirty','error','cancelled'].includes(t.status) }, canStop(t){ return ['pending','processing','pending_upload','uploading'].includes(t.status) },
+        cancel(id){ axios.post('/api/cancel/'+id).then(()=>{ this.load(); this.showToast('任务已停止','error') }) },
+        retry(id){ axios.post('/api/retry/'+id, {type:this.view}).then(r=>{ this.showToast(r.data.msg || '已重新入队'); this.load() }).catch(e=>this.showToast(e.response?.data?.msg || '重试请求失败','error')) },
+        doubleSample(id){ axios.post(`/api/task/${id}/double_sample`).then(()=>{ this.load(); this.showToast('已切换动态抽样') }).catch(e=>this.showToast(e.response?.data?.msg || '切换失败','error')) },
+        directUpload(id){ axios.post(`/api/task/${id}/direct_upload`).then(()=>{ this.load(); this.showToast('切换直传') }) },
+        deleteTask(id){ axios.post(`/api/task/${id}/delete`).then(r=>{ this.showToast(r.data.msg); this.load() }) },
+        clearHistory(){ axios.post('/api/tasks/clear').then(r=>{ this.showToast(r.data.msg); this.load(); this.loadAria2Stats() }).catch(e=>this.showToast(e.response?.data?.msg || '清空历史失败','error')) },
+        openConfig(t){ this.curTask=JSON.parse(JSON.stringify(t)); modalConfig.show() },
+        saveAndRetry(){ axios.post(`/api/task/${this.curTask.id}/save_and_retry`,this.curTask.config).then(()=>{ modalConfig.hide(); this.load(); this.showToast('策略更新') }) },
+
+        updateBatchUploadRemote() {
+            const remote = this.batchUploadRemote.replace(/:$/, '').trim();
+            if(!remote) return;
+            const ids = this.selectedIds('upload');
+            const scope = ids.length ? `选中的 ${ids.length} 个` : '全部';
+            this.confirmAction(`确定一次性将${scope}未完成上传任务的 remote 修改为【${remote}:】吗？\n上传中的任务不会中断，将在下次重试时切换。`, () => {
+                axios.post('/api/tasks/batch_upload_remote', {remote, ...(ids.length ? {ids} : {})}).then(res => {
+                    this.batchUploadRemote = remote;
+                    this.clearSelection('upload');
+                    this.showToast(res.data.msg);
+                    this.load();
+                }).catch(e => this.showToast(e.response?.data?.msg || '修改失败', 'error'));
+            });
+        },
+
+        batchAction(type, action) {
+            const actName = action==='retry'?'重试':'停止';
+            const ids = this.selectedIds(type);
+            const scope = ids.length ? `选中的 ${ids.length} 个任务` : '当前列表全部任务';
+            this.confirmAction(`确定要对${scope}执行【${actName}】吗？`, () => {
+                axios.post('/api/tasks/batch', {type, action, ...(ids.length ? {ids} : {})}).then(res => {
+                    this.clearSelection(type);
+                    this.showToast(res.data.msg);
+                    this.load();
+                });
+            });
+        },
+        batchDelete(type) {
+            const ids = this.selectedIds(type);
+            if(!ids.length) return;
+            this.confirmAction(`⚠️ 确定删除选中的 ${ids.length} 个任务及其本地媒体文件吗？此操作不可恢复。运行中的任务将先停止，结束后可再次删除。`, () => {
+                axios.post('/api/tasks/batch_delete', {ids}).then(res => {
+                    this.clearSelection(type);
+                    this.showToast(res.data.msg);
+                    this.load();
+                }).catch(e => this.showToast(e.response?.data?.msg || '批量删除失败', 'error'));
+            });
+        }
+    }
+}).mount('#app')
+</script>
+</body>
+</html>

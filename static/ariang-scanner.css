@@ -1,0 +1,115 @@
+:root {
+    --scanner-violet: #7c5ce0;
+    --scanner-violet-dark: #5b3fb3;
+    --scanner-violet-soft: #f3f0ff;
+    --scanner-ink: #1f2937;
+    --scanner-muted: #64748b;
+    --scanner-surface: #f6f8f4;
+    --scanner-border: #ded8f2;
+}
+
+body.skin-aria-ng {
+    background: var(--scanner-surface);
+    color: var(--scanner-ink);
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.skin-aria-ng .main-header .logo,
+.skin-aria-ng .main-header .navbar {
+    background: linear-gradient(110deg, var(--scanner-violet-dark), var(--scanner-violet));
+}
+
+.skin-aria-ng .main-header .logo,
+.skin-aria-ng .main-header .navbar a {
+    color: #fff;
+}
+
+.skin-aria-ng .main-sidebar {
+    background: var(--scanner-ink);
+}
+
+.skin-aria-ng .sidebar-menu > li.header {
+    color: #9fb0c4;
+    background: #182231;
+    font-size: 11px;
+    letter-spacing: .08em;
+}
+
+.skin-aria-ng .sidebar-menu > li > a {
+    color: #d7e0eb;
+    border-left: 3px solid transparent;
+}
+
+.skin-aria-ng .sidebar-menu > li.active > a,
+.skin-aria-ng .sidebar-menu > li:hover > a {
+    color: #fff;
+    background: rgba(124, 92, 224, .2);
+    border-left-color: #b59cff;
+}
+
+.skin-aria-ng .content-wrapper {
+    background: var(--scanner-surface);
+}
+
+.skin-aria-ng .box,
+.skin-aria-ng .nav-tabs-custom,
+.skin-aria-ng .main-footer {
+    border-color: var(--scanner-border);
+    box-shadow: 0 2px 10px rgba(31, 41, 55, .05);
+}
+
+.skin-aria-ng .box.box-primary,
+.skin-aria-ng .nav-tabs-custom > .nav-tabs > li.active {
+    border-top-color: var(--scanner-violet);
+}
+
+.skin-aria-ng .btn-primary,
+.skin-aria-ng .label-primary,
+.skin-aria-ng .bg-primary,
+.skin-aria-ng .progress-bar-primary {
+    background-color: var(--scanner-violet) !important;
+    border-color: var(--scanner-violet-dark) !important;
+}
+
+.skin-aria-ng .btn-primary:hover,
+.skin-aria-ng .btn-primary:focus {
+    background-color: var(--scanner-violet-dark) !important;
+}
+
+.skin-aria-ng a,
+.skin-aria-ng .text-primary {
+    color: var(--scanner-violet-dark);
+}
+
+.skin-aria-ng .table > thead > tr > th {
+    color: #405067;
+    background: #f0f4ed;
+    border-bottom-color: var(--scanner-border);
+}
+
+.skin-aria-ng .form-control:focus {
+    border-color: var(--scanner-violet);
+    box-shadow: 0 0 0 3px rgba(124, 92, 224, .16);
+}
+
+/* Scanner owns the embedded Aria2 RPC connection. */
+.skin-aria-ng .nav-tab-title-rpcname,
+.skin-aria-ng .nav-tabs > li.slim {
+    display: none !important;
+}
+
+.skin-aria-ng .pagination > .active > a,
+.skin-aria-ng .pagination > .active > span {
+    background-color: var(--scanner-violet);
+    border-color: var(--scanner-violet-dark);
+}
+
+@media (max-width: 767.98px) {
+    .skin-aria-ng .main-header .navbar {
+        min-height: 50px;
+    }
+
+    .skin-aria-ng .content-wrapper {
+        min-height: calc(100vh - 100px);
+    }
+}
