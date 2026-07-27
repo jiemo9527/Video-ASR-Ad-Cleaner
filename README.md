@@ -38,12 +38,35 @@
 
 ![img.png](img.png)
 ![img_1.png](img_1.png)
-### 📦 安装部署
-在 Linux VPS 以 root 运行以下一行命令；无需预先下载项目 ZIP、安装 Aria2 或安装 rclone：
+## 快速开始
+
+### 安装
+在 Linux VPS 上运行以下一行命令；无需预先下载项目 ZIP、安装 Aria2 或安装 rclone：
 ```Shell
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/jiemo9527/Video-ASR-Ad-Cleaner/main/install/install.sh)
+sudo bash -c 'bash <(curl -fsSL https://raw.githubusercontent.com/jiemo9527/Video-ASR-Ad-Cleaner/main/install/install.sh)'
 ```
-安装器会下载项目、安装依赖并进行交互式网络、Aria2 和 Nginx 配置。
+安装器会下载项目、安装依赖，初始化 Scanner 管理的 Aria2 配置，并进行网络与可选 Nginx HTTPS/WSS 配置。
+
+### 首次登录
+安装完成后，终端会一次性显示随机 Dashboard 用户名与密码。忘记密码时，在项目目录运行 `install/install.sh`，选择 `3. 重置 Dashboard 密码`；工具会生成并打印新的随机密码。
+
+### 基本配置
+登录后进入 `设置`：
+
+1. 在 `基础` 中确认 Aria2 下载根目录与默认 Rclone Remote。
+2. 在 `模型` 中配置云端 ASR API，或下载 SenseVoice GGUF 本地模型。
+3. 在右侧维护音频、字幕和元数据关键词；关键词会影响后续扫描任务。
+4. 保存设置。检测与上传并发数修改后，需要使用 `保存并重启服务`。
+
+### 下载与清洗
+
+1. 在 Dashboard `下载器` 标签中添加下载任务。嵌入 AriaNg 自动连接本机 Aria2，不能改为远程 RPC。
+2. Aria2 下载完成后，通过 `trigger.sh` 将文件加入 Scanner 队列。使用自定义 Aria2 配置时，请自行设置 `on-download-complete=<项目目录>/trigger.sh`。
+3. Scanner 按设置检查元数据、字幕和音频；干净文件进入上传队列，命中关键词的文件标记为违规。
+4. 外部 Aria2 客户端使用 `https://<域名>/jsonrpc` 或 `wss://<域名>/jsonrpc`，并自行配置安装时显示的 `rpc-secret`。
+
+### 配置备份与恢复
+`设置` -> `账户` 中可导出或恢复备份。备份包含全局设置和关键词，且含 API Key、通知 Token 等敏感项；不包含 Aria2 配置、下载任务、AriaNg 浏览器设置和账户密码。迁移服务器时，先导出备份，重新安装后再恢复。
 
 
 ### ⚖️ 免责声明

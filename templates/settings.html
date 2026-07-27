@@ -228,7 +228,7 @@
                             <hr class="my-4 text-muted opacity-25">
 
                             <h6 class="border-bottom pb-2 mb-4 text-muted small fw-bold">💾 配置备份与恢复</h6>
-                            <div class="alert alert-light border small mb-3"><i class="bi bi-info-circle me-1"></i> 备份包含设置项和关键词，也会包含 API Key/通知 Token 等敏感配置。</div>
+                            <div class="alert alert-light border small mb-3"><i class="bi bi-info-circle me-1"></i> 备份包含全局设置和关键词，也会包含 API Key/通知 Token 等敏感配置；不包含 Aria2 配置、下载任务、AriaNg 浏览器设置或账户密码。</div>
                             <div class="row g-2 mb-4">
                                 <div class="col-6"><button class="btn btn-outline-primary w-100" @click="exportBackup"><i class="bi bi-download me-1"></i>导出备份</button></div>
                                 <div class="col-6"><button class="btn btn-outline-warning w-100" @click="$refs.backupFile.click()"><i class="bi bi-upload me-1"></i>恢复备份</button></div>
@@ -402,7 +402,8 @@ Vue.createApp({
                 const a = document.createElement('a');
                 const ts = new Date().toISOString().replace(/[:.]/g, '-');
                 a.href = url;
-                a.download = `scanner-settings-${ts}.json`;
+                const serverIp = String(r.data.server_ip || location.hostname || 'scanner').replace(/[^0-9A-Za-z._-]/g, '_');
+                a.download = `${serverIp}-settings-${ts}.json`;
                 a.click();
                 URL.revokeObjectURL(url);
                 this.showToast('备份已导出');

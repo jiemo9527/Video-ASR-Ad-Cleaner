@@ -176,11 +176,11 @@ AUDIO_BLACKLIST_INIT = ["加群", "交流群", "TG群", "Telegram", "QQ群", "Q�
 SUBTITLE_BLACKLIST_INIT = ["加群", "交流群", "微信号", "微信群", "QQ", "qq", "q群", "公众号", "网址", ".com", "Q群","http",
                            "www", "link3.cc", "ysepan.com", "Tacit0924", "资源群"]
 SUB_META_BLACKLIST_INIT = ["http", "www", "weixin", "Telegram", "TG@", "TG频道@", "群：", "群:", "资源群", "加群",
-                           "微信号", "微信群", "QQ", "qq", "q群", "公众号", "微博", "b站", "资源站", "资源网", "发布页",
-                           "荣誉出品", "link3.cc", "ysepan.com", "GyWEB", "Qqun", "hehehe", ".com", "PTerWEB",
-                           "panclub", "BT之家", "CMCT", "Byakuya", "ed3000", "yunpantv", "KKYY", "盘酱酱", "TREX",
-                           "£yhq@tv", "1000fr", "HDCTV", "HHWEB", "ADWeb", "PanWEB", "BestWEB", "hanWEB", "it.com",
-                           "Mandarin", "HDSky", "HDsky", "Feibanyama"]
+                            "微信号", "微信群", "QQ", "qq", "q群", "公众号", "微博", "b站", "资源站", "资源网", "发布页",
+                            "荣誉出品", "link3.cc", "ysepan.com", "GyWEB", "Qqun", "hehehe", ".com", "PTerWEB",
+                            "panclub", "BT之家", "CMCT", "Byakuya", "ed3000", "yunpantv", "KKYY", "盘酱酱", "TREX",
+                            "£yhq@tv", "1000fr", "HDCTV", "HHWEB", "ADWeb", "PanWEB", "BestWEB", "hanWEB", "it.com",
+                            "Mandarin", "HDSky", "HDsky", "Feibanyama", "==無雙==", "Cxuan", "HiveWeb", "禁止转载"]
 
 
 def seed_default_keywords():
@@ -466,15 +466,19 @@ def get_task_upload_target(task, config=None):
     return f"{remote_prefix}:{filename}" if remote_prefix else filename
 
 
-def get_masked_server_ip():
+def get_server_ip():
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.connect(('8.8.8.8', 80))
-            parts = sock.getsockname()[0].split('.')
-        if len(parts) == 4:
-            return f"{parts[0]}.{parts[1]}.***.***"
+            return sock.getsockname()[0]
     except:
-        pass
+        return ''
+
+
+def get_masked_server_ip():
+    parts = get_server_ip().split('.')
+    if len(parts) == 4:
+        return f"{parts[0]}.{parts[1]}.***.***"
     return '***.***.***.***'
 
 
@@ -1898,6 +1902,7 @@ def export_settings_backup():
         'schema_version': 1,
         'app_version': APP_VERSION,
         'exported_at': datetime.now().isoformat(timespec='seconds'),
+        'server_ip': get_server_ip(),
         'config': configs,
         'keywords': keywords
     })
