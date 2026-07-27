@@ -118,7 +118,7 @@
     <div class="card shadow-sm border-0">
         <div class="card-header bg-light pt-3 pb-0 border-bottom-0">
             <ul class="dashboard-tabs nav nav-tabs card-header-tabs">
-                <li class="nav-item"><button class="nav-link" :class="{active: view==='aria2'}" @click="view='aria2'">⬇️ 下载器 <span class="badge bg-primary rounded-pill ms-1" v-if="aria2Stats.active + aria2Stats.waiting > 0">[[ aria2Stats.active + aria2Stats.waiting ]]</span></button></li>
+                <li class="nav-item"><button class="nav-link" :class="{active: view==='aria2'}" @click="view='aria2'">⬇️ 下载器 <span class="badge bg-success rounded-pill ms-1" title="Aria2 总下载速度">[[ formatAria2DownloadSpeed() ]]</span><span class="badge bg-primary rounded-pill ms-1" v-if="aria2Stats.active + aria2Stats.waiting > 0">[[ aria2Stats.active + aria2Stats.waiting ]]</span></button></li>
                 <li class="nav-item"><button class="nav-link" :class="{active: view==='detect'}" @click="view='detect'">🔍 检测队列 <span class="badge bg-secondary rounded-pill ms-1" v-if="detectTasks.length > 0">[[ detectTasks.length ]]</span></button></li>
                 <li class="nav-item"><button class="nav-link" :class="{active: view==='upload'}" @click="view='upload'">☁️ 上传队列 <span class="badge bg-secondary rounded-pill ms-1" v-if="uploadTasks.length > 0">[[ uploadTasks.length ]]</span></button></li>
                 <li class="nav-item"><button class="nav-link" :class="{active: view==='syslog'}" @click="view='syslog'">📜 系统日志</button></li>
@@ -242,7 +242,7 @@
 let modalConfig, modalLog, modalConfirm, toastInstance;
 Vue.createApp({
     delimiters: ['[[', ']]'],
-    data(){ return { tasks:[], view:'detect', curTask:{}, sysLogs:'', sysLogFilter:'', autoRefreshLogs:true, currentLogTitle:'', currentLogContent:'', batchUploadRemote:'', uploadHijackRemote:'', uploadHijackEnabled:false, ariaNgOptionsImport:'', selectedTaskIds:[], aria2Stats:{active:0, waiting:0, stopped:0}, statusText:{'pending':'⏳ 等待中','processing':'🔄 检测中','pending_upload':'✅ 待上传','uploading':'☁️ 上传中','uploaded':'🎉 已完成','dirty':'🚫 已拦截','error':'❌ 出错了','cancelled':'⏹ 已停止'}, toastMsg:'', toastClass:'bg-primary', toastIcon:'bi-info-circle', confirmMsg:'', confirmCallback:null, pollTimer: null }},
+    data(){ return { tasks:[], view:'detect', curTask:{}, sysLogs:'', sysLogFilter:'', autoRefreshLogs:true, currentLogTitle:'', currentLogContent:'', batchUploadRemote:'', uploadHijackRemote:'', uploadHijackEnabled:false, ariaNgOptionsImport:'', selectedTaskIds:[], aria2Stats:{active:0, waiting:0, stopped:0, downloadSpeed:0}, statusText:{'pending':'⏳ 等待中','processing':'🔄 检测中','pending_upload':'✅ 待上传','uploading':'☁️ 上传中','uploaded':'🎉 已完成','dirty':'🚫 已拦截','error':'❌ 出错了','cancelled':'⏹ 已停止'}, toastMsg:'', toastClass:'bg-primary', toastIcon:'bi-info-circle', confirmMsg:'', confirmCallback:null, pollTimer: null }},
     computed: {
         filteredSystemLogs() { if(!this.sysLogs)return[]; const l=this.sysLogs.split('\n'); if(!this.sysLogFilter.trim())return l; const k=this.sysLogFilter.toLowerCase(); return l.filter(x=>x.toLowerCase().includes(k)) },
         detectTasks() { return this.tasks.filter(t => !this.isUploadTask(t)) },
@@ -291,8 +291,17 @@ Vue.createApp({
         loadAria2Stats(){
             return axios.post('/api/aria2/jsonrpc', {jsonrpc:'2.0', id:'scanner-stats', method:'aria2.getGlobalStat', params:[]}).then(r=>{
                 const stat=r.data && r.data.result || {};
-                this.aria2Stats={active:Number(stat.numActive||0), waiting:Number(stat.numWaiting||0), stopped:Number(stat.numStopped||0)};
+                this.aria2Stats={active:Number(stat.numActive||0), waiting:Number(stat.numWaiting||0), stopped:Number(stat.numStopped||0), downloadSpeed:Number(stat.downloadSpeed||0)};
             }).catch(()=>{});
+        },
+
+        formatAria2DownloadSpeed(){
+            let speed=Number(this.aria2Stats.downloadSpeed)||0;
+            const units=['B/s','KB/s','MB/s','GB/s'];
+            let unit=0;
+            while(speed>=1024&&unit<units.length-1){speed/=1024;unit++}
+            const digits=unit===0||speed>=100?0:(speed>=10?1:2);
+            return `${speed.toFixed(digits)} ${units[unit]}`;
         },
 
         importAriaNgOptions(){

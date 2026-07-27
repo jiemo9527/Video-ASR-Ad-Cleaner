@@ -476,6 +476,17 @@ python3 -c "import app; ctx=app.app.app_context(); ctx.push(); print(app.get_fin
 systemctl status scanner --no-pager -l | sed -n '1,10p'
 ```
 
+### Netcup Aria2 Next Test
+
+`netcup` was used to test `aria2-next v2.5.2` on ARM64. The binary, HTTPS download, JSON-RPC, Scanner RPC, global-option writes, and configured completion-hook setting all worked. It was restored to the existing `aria2 1.36.0` afterward; do not treat aria2-next as an installer default yet.
+
+- Only switch when `aria2.getGlobalStat` reports zero active and waiting tasks.
+- Back up both `/usr/local/bin/aria2c` and `/root/.aria2c/aria2.conf` before replacing anything. Keep the timestamped paths for rollback.
+- Download the official `aria2-next-<version>-linux-aarch64` release and verify it against the matching `checksums.sha256` before installation.
+- The current P3TERX configuration needs these aria2-next compatibility changes: set `console-log-level=info`; comment out unsupported `bt-detach-seed-only` and `retry-on-400`, `retry-on-403`, `retry-on-406`, `retry-on-unknown` keys. These changes alter retry behavior, so they are test-only until deliberately adopted.
+- Keep `/usr/local/bin/aria2-next` as the downloaded binary and replace `/usr/local/bin/aria2c` only for the systemd unit. Then run `systemctl restart aria2c.service` and verify `aria2.getVersion`, `aria2.getGlobalOption`, and `aria2.getGlobalStat` through `app.call_aria2_rpc()`.
+- Roll back by restoring the saved binary and config, then run `systemctl restart aria2c.service`. Never print `rpc-secret` while testing.
+
 ## Versioning
 
 Version naming currently uses compact dates:
