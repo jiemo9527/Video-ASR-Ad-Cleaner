@@ -226,7 +226,7 @@ def get_final_config(overrides_json=None):
     }
     db_configs = {c.key: c.value for c in Config.query.all()}
     for k, v in db_configs.items():
-        if k == "download_proxy":
+        if k in ["download_proxy", "cleanup_upload_dirty"]:
             continue
         if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "cloud_asr_proxy_enabled", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample", "upload_remote_hijack_enabled",
                    "notify_upload_success", "notify_errors", "cleanup_scanner_history", "cleanup_scanner_uploaded", "cleanup_scanner_dirty", "cleanup_scanner_error", "cleanup_scanner_cancelled",
