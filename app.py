@@ -218,6 +218,9 @@ def get_final_config(overrides_json=None):
         "cleanup_scanner_history": True,
         "cleanup_scanner_uploaded": True, "cleanup_scanner_dirty": True,
         "cleanup_scanner_error": True, "cleanup_scanner_cancelled": True,
+        "cleanup_detect_dirty": True, "cleanup_detect_error": True, "cleanup_detect_cancelled": True,
+        "cleanup_upload_uploaded": True, "cleanup_upload_dirty": True,
+        "cleanup_upload_error": True, "cleanup_upload_cancelled": True,
         "cleanup_aria2_completed": True,
         "concurrency_detect": 2, "concurrency_upload": 9, "detect_retry_limit": 3,
         "local_model_concurrency": 2
@@ -227,7 +230,8 @@ def get_final_config(overrides_json=None):
         if k == "download_proxy":
             continue
         if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "cloud_asr_proxy_enabled", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample", "upload_remote_hijack_enabled",
-                  "notify_upload_success", "notify_errors", "cleanup_scanner_history", "cleanup_scanner_uploaded", "cleanup_scanner_dirty", "cleanup_scanner_error", "cleanup_scanner_cancelled", "cleanup_aria2_completed"]:
+                   "notify_upload_success", "notify_errors", "cleanup_scanner_history", "cleanup_scanner_uploaded", "cleanup_scanner_dirty", "cleanup_scanner_error", "cleanup_scanner_cancelled",
+                   "cleanup_detect_dirty", "cleanup_detect_error", "cleanup_detect_cancelled", "cleanup_upload_uploaded", "cleanup_upload_dirty", "cleanup_upload_error", "cleanup_upload_cancelled", "cleanup_aria2_completed"]:
             final_conf[k] = (str(v).lower() == 'true')
         elif k in ["audio_threshold_multi", "audio_threshold_long", "audio_len_head", "audio_len_mid", "audio_len_tail",
                    "audio_len_tail_long", "audio_segment_len", "audio_max_segments", "cloud_asr_max_duration", "cloud_asr_concurrency", "cloud_asr_upload_timeout", "cloud_asr_read_timeout", "cloud_asr_long_read_timeout", "concurrency_detect", "concurrency_upload", "detect_retry_limit",
@@ -238,11 +242,27 @@ def get_final_config(overrides_json=None):
                 pass
         else:
             final_conf[k] = v
-    cleanup_status_keys = ['cleanup_scanner_uploaded', 'cleanup_scanner_dirty', 'cleanup_scanner_error', 'cleanup_scanner_cancelled']
-    if 'cleanup_scanner_history' in db_configs and not any(key in db_configs for key in cleanup_status_keys):
-        legacy_cleanup_enabled = str(db_configs['cleanup_scanner_history']).lower() == 'true'
-        for key in cleanup_status_keys:
-            final_conf[key] = legacy_cleanup_enabled
+    cleanup_queue_status_keys = [
+        'cleanup_detect_dirty', 'cleanup_detect_error', 'cleanup_detect_cancelled',
+        'cleanup_upload_uploaded', 'cleanup_upload_dirty', 'cleanup_upload_error', 'cleanup_upload_cancelled',
+    ]
+    legacy_cleanup_key_targets = {
+        'cleanup_scanner_uploaded': ['cleanup_upload_uploaded'],
+        'cleanup_scanner_dirty': ['cleanup_detect_dirty', 'cleanup_upload_dirty'],
+        'cleanup_scanner_error': ['cleanup_detect_error', 'cleanup_upload_error'],
+        'cleanup_scanner_cancelled': ['cleanup_detect_cancelled', 'cleanup_upload_cancelled'],
+    }
+    # Migrate persisted global cleanup choices only until the granular choices are saved.
+    if not any(key in db_configs for key in cleanup_queue_status_keys):
+        if 'cleanup_scanner_history' in db_configs and not any(key in db_configs for key in legacy_cleanup_key_targets):
+            legacy_cleanup_enabled = str(db_configs['cleanup_scanner_history']).lower() == 'true'
+            for key in cleanup_queue_status_keys:
+                final_conf[key] = legacy_cleanup_enabled
+        for legacy_key, target_keys in legacy_cleanup_key_targets.items():
+            if legacy_key in db_configs:
+                legacy_cleanup_enabled = str(db_configs[legacy_key]).lower() == 'true'
+                for key in target_keys:
+                    final_conf[key] = legacy_cleanup_enabled
     if overrides_json:
         try:
             ov = json.loads(overrides_json)
@@ -1871,7 +1891,8 @@ def settings():
         normalize_cloud_api_key_config(data)
         for k, v in data.items():
             if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "cloud_asr_proxy_enabled", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample",
-                     "notify_upload_success", "notify_errors", "cleanup_scanner_history", "cleanup_scanner_uploaded", "cleanup_scanner_dirty", "cleanup_scanner_error", "cleanup_scanner_cancelled", "cleanup_aria2_completed"]:
+                      "notify_upload_success", "notify_errors", "cleanup_scanner_history", "cleanup_scanner_uploaded", "cleanup_scanner_dirty", "cleanup_scanner_error", "cleanup_scanner_cancelled",
+                      "cleanup_detect_dirty", "cleanup_detect_error", "cleanup_detect_cancelled", "cleanup_upload_uploaded", "cleanup_upload_dirty", "cleanup_upload_error", "cleanup_upload_cancelled", "cleanup_aria2_completed"]:
                 val = "true" if (v is True or str(v).lower() == 'true') else "false"
             else:
                 val = str(v)
@@ -2070,36 +2091,41 @@ def update_keyword(kid):
 @login_required
 def clear_tasks():
     cleanup_config = get_final_config(None)
-    scanner_statuses = [
-        status for key, status in [
-            ('cleanup_scanner_uploaded', 'uploaded'),
-            ('cleanup_scanner_dirty', 'dirty'),
-            ('cleanup_scanner_error', 'error'),
-            ('cleanup_scanner_cancelled', 'cancelled'),
-        ]
-        if cleanup_config.get(key, True)
-    ]
+    scanner_cleanup_rules = {
+        ('detect', 'dirty'): cleanup_config.get('cleanup_detect_dirty', True),
+        ('detect', 'error'): cleanup_config.get('cleanup_detect_error', True),
+        ('detect', 'cancelled'): cleanup_config.get('cleanup_detect_cancelled', True),
+        ('upload', 'uploaded'): cleanup_config.get('cleanup_upload_uploaded', True),
+        ('upload', 'dirty'): cleanup_config.get('cleanup_upload_dirty', True),
+        ('upload', 'error'): cleanup_config.get('cleanup_upload_error', True),
+        ('upload', 'cancelled'): cleanup_config.get('cleanup_upload_cancelled', True),
+    }
     clean_aria2 = cleanup_config.get('cleanup_aria2_completed', True)
-    if not scanner_statuses and not clean_aria2:
+    if not any(scanner_cleanup_rules.values()) and not clean_aria2:
         return jsonify({"code": 200, "msg": "未启用清理项目，请在设置 > 清理中开启后重试"})
 
     deleted = 0
     skipped = 0
-    if scanner_statuses:
+    if any(scanner_cleanup_rules.values()):
         protected_ids = get_active_task_ids()
-        q = Task.query.filter(Task.status.in_(scanner_statuses))
-        if protected_ids:
-            q = q.filter(~Task.id.in_(protected_ids))
-        deleted = q.delete(synchronize_session=False)
+        terminal_statuses = {status for _, status in scanner_cleanup_rules}
+        for task in Task.query.filter(Task.status.in_(terminal_statuses)).all():
+            queue = 'upload' if is_upload_task(task) else 'detect'
+            if not scanner_cleanup_rules.get((queue, task.status), False):
+                continue
+            if task.id in protected_ids:
+                skipped += 1
+                continue
+            db.session.delete(task)
+            deleted += 1
         db.session.commit()
-        skipped = len(protected_ids)
 
     aria2_result = {'cleaned': 0, 'failed': 0, 'error': ''}
     if clean_aria2:
         aria2_result = clear_aria2_completed_results()
 
     parts = []
-    if scanner_statuses:
+    if any(scanner_cleanup_rules.values()):
         parts.append(f"Scanner {deleted} 条记录")
     if clean_aria2:
         parts.append(f"Aria2 已完成记录 {aria2_result['cleaned']} 条")

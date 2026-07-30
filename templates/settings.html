@@ -180,25 +180,20 @@
                             <h6 class="border-bottom pb-2 mb-3 text-muted small fw-bold">清空历史范围</h6>
                             <div class="alert alert-light border small mb-3"><i class="bi bi-info-circle me-1"></i> 控制 Dashboard“清空历史”按钮处理的项目。保存后立即生效，无需重启服务。</div>
                             <div class="row g-2">
-                                <div class="col-md-6"><div class="form-check form-switch h-100 p-3 bg-light rounded border">
-                                    <input class="form-check-input" type="checkbox" v-model="settings.cleanup_scanner_uploaded" id="sw_cleanup_uploaded">
-                                    <label class="form-check-label fw-bold" for="sw_cleanup_uploaded">Scanner 已上传记录</label>
-                                    <div class="small text-muted mt-1" style="font-size: 11px">清理 status 为 uploaded 的任务记录。</div>
+                                <div class="col-md-6"><div class="h-100 p-3 bg-light rounded border">
+                                    <div class="fw-bold mb-2"><i class="bi bi-search me-1"></i>检测队列</div>
+                                    <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" v-model="settings.cleanup_detect_dirty" id="sw_cleanup_detect_dirty"><label class="form-check-label" for="sw_cleanup_detect_dirty">已拦截记录</label></div>
+                                    <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" v-model="settings.cleanup_detect_error" id="sw_cleanup_detect_error"><label class="form-check-label" for="sw_cleanup_detect_error">出错记录</label></div>
+                                    <div class="form-check form-switch"><input class="form-check-input" type="checkbox" v-model="settings.cleanup_detect_cancelled" id="sw_cleanup_detect_cancelled"><label class="form-check-label" for="sw_cleanup_detect_cancelled">已停止记录</label></div>
+                                    <div class="small text-muted mt-2" style="font-size: 11px">仅清理检测队列中的对应终态记录。</div>
                                 </div></div>
-                                <div class="col-md-6"><div class="form-check form-switch h-100 p-3 bg-light rounded border">
-                                    <input class="form-check-input" type="checkbox" v-model="settings.cleanup_scanner_dirty" id="sw_cleanup_dirty">
-                                    <label class="form-check-label fw-bold" for="sw_cleanup_dirty">Scanner 违规记录</label>
-                                    <div class="small text-muted mt-1" style="font-size: 11px">清理 status 为 dirty 的任务记录。</div>
-                                </div></div>
-                                <div class="col-md-6"><div class="form-check form-switch h-100 p-3 bg-light rounded border">
-                                    <input class="form-check-input" type="checkbox" v-model="settings.cleanup_scanner_error" id="sw_cleanup_error">
-                                    <label class="form-check-label fw-bold" for="sw_cleanup_error">Scanner 错误记录</label>
-                                    <div class="small text-muted mt-1" style="font-size: 11px">清理 status 为 error 的任务记录。</div>
-                                </div></div>
-                                <div class="col-md-6"><div class="form-check form-switch h-100 p-3 bg-light rounded border">
-                                    <input class="form-check-input" type="checkbox" v-model="settings.cleanup_scanner_cancelled" id="sw_cleanup_cancelled">
-                                    <label class="form-check-label fw-bold" for="sw_cleanup_cancelled">Scanner 已取消记录</label>
-                                    <div class="small text-muted mt-1" style="font-size: 11px">清理 status 为 cancelled 的任务记录。</div>
+                                <div class="col-md-6"><div class="h-100 p-3 bg-light rounded border">
+                                    <div class="fw-bold mb-2"><i class="bi bi-cloud-arrow-up me-1"></i>上传队列</div>
+                                    <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" v-model="settings.cleanup_upload_uploaded" id="sw_cleanup_upload_uploaded"><label class="form-check-label" for="sw_cleanup_upload_uploaded">上传完成记录</label></div>
+                                    <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" v-model="settings.cleanup_upload_dirty" id="sw_cleanup_upload_dirty"><label class="form-check-label" for="sw_cleanup_upload_dirty">已拦截记录</label></div>
+                                    <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" v-model="settings.cleanup_upload_error" id="sw_cleanup_upload_error"><label class="form-check-label" for="sw_cleanup_upload_error">出错记录</label></div>
+                                    <div class="form-check form-switch"><input class="form-check-input" type="checkbox" v-model="settings.cleanup_upload_cancelled" id="sw_cleanup_upload_cancelled"><label class="form-check-label" for="sw_cleanup_upload_cancelled">已停止记录</label></div>
+                                    <div class="small text-muted mt-2" style="font-size: 11px">仅清理上传队列中的对应终态记录。</div>
                                 </div></div>
                                 <div class="col-12"><div class="form-check form-switch p-3 bg-light rounded border">
                                     <input class="form-check-input" type="checkbox" v-model="settings.cleanup_aria2_completed" id="sw_cleanup_aria2">
@@ -294,7 +289,8 @@ Vue.createApp({
             settings: {
                 check_audio: true, check_subtitles: true, sanitize_metadata: true, enable_cloud_asr: true, cloud_asr_proxy_enabled: false,
                 enable_local_model: false, detailed_mode: false, asr_use_flac: false, audio_double_sample: false,
-                cleanup_scanner_uploaded: true, cleanup_scanner_dirty: true, cleanup_scanner_error: true, cleanup_scanner_cancelled: true,
+                cleanup_detect_dirty: true, cleanup_detect_error: true, cleanup_detect_cancelled: true,
+                cleanup_upload_uploaded: true, cleanup_upload_dirty: true, cleanup_upload_error: true, cleanup_upload_cancelled: true,
                 cleanup_aria2_completed: true,
                 tg_bot_token: '', tg_chat_id: '',
                 audio_segment_len: 360, audio_max_segments: 8,
@@ -336,7 +332,7 @@ Vue.createApp({
         loadSettings(){
             axios.get('/api/settings').then(r=>{
                 const d = r.data;
-                ['check_audio','check_subtitles','sanitize_metadata', 'enable_cloud_asr', 'cloud_asr_proxy_enabled', 'enable_local_model', 'detailed_mode', 'asr_use_flac', 'audio_double_sample', 'notify_upload_success', 'notify_errors', 'cleanup_scanner_uploaded', 'cleanup_scanner_dirty', 'cleanup_scanner_error', 'cleanup_scanner_cancelled', 'cleanup_aria2_completed'].forEach(k => this.settings[k] = (d[k]===true || d[k]==='true'));
+                ['check_audio','check_subtitles','sanitize_metadata', 'enable_cloud_asr', 'cloud_asr_proxy_enabled', 'enable_local_model', 'detailed_mode', 'asr_use_flac', 'audio_double_sample', 'notify_upload_success', 'notify_errors', 'cleanup_detect_dirty', 'cleanup_detect_error', 'cleanup_detect_cancelled', 'cleanup_upload_uploaded', 'cleanup_upload_dirty', 'cleanup_upload_error', 'cleanup_upload_cancelled', 'cleanup_aria2_completed'].forEach(k => this.settings[k] = (d[k]===true || d[k]==='true'));
                 this.settings.tg_bot_token = d.tg_bot_token||'';
                 this.settings.tg_chat_id = d.tg_chat_id||'';
                 const numKeys = ['audio_segment_len', 'audio_max_segments', 'cloud_asr_max_duration', 'cloud_asr_concurrency', 'cloud_asr_upload_timeout', 'cloud_asr_read_timeout', 'cloud_asr_long_read_timeout', 'concurrency_detect', 'concurrency_upload', 'detect_retry_limit', 'local_model_concurrency'];
