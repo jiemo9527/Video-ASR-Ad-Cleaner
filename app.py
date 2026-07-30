@@ -219,8 +219,7 @@ def get_final_config(overrides_json=None):
         "cleanup_scanner_uploaded": True, "cleanup_scanner_dirty": True,
         "cleanup_scanner_error": True, "cleanup_scanner_cancelled": True,
         "cleanup_detect_dirty": True, "cleanup_detect_error": True, "cleanup_detect_cancelled": True,
-        "cleanup_upload_uploaded": True, "cleanup_upload_dirty": True,
-        "cleanup_upload_error": True, "cleanup_upload_cancelled": True,
+        "cleanup_upload_uploaded": True, "cleanup_upload_error": True, "cleanup_upload_cancelled": True,
         "cleanup_aria2_completed": True,
         "concurrency_detect": 2, "concurrency_upload": 9, "detect_retry_limit": 3,
         "local_model_concurrency": 2
@@ -231,7 +230,7 @@ def get_final_config(overrides_json=None):
             continue
         if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "cloud_asr_proxy_enabled", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample", "upload_remote_hijack_enabled",
                    "notify_upload_success", "notify_errors", "cleanup_scanner_history", "cleanup_scanner_uploaded", "cleanup_scanner_dirty", "cleanup_scanner_error", "cleanup_scanner_cancelled",
-                   "cleanup_detect_dirty", "cleanup_detect_error", "cleanup_detect_cancelled", "cleanup_upload_uploaded", "cleanup_upload_dirty", "cleanup_upload_error", "cleanup_upload_cancelled", "cleanup_aria2_completed"]:
+                   "cleanup_detect_dirty", "cleanup_detect_error", "cleanup_detect_cancelled", "cleanup_upload_uploaded", "cleanup_upload_error", "cleanup_upload_cancelled", "cleanup_aria2_completed"]:
             final_conf[k] = (str(v).lower() == 'true')
         elif k in ["audio_threshold_multi", "audio_threshold_long", "audio_len_head", "audio_len_mid", "audio_len_tail",
                    "audio_len_tail_long", "audio_segment_len", "audio_max_segments", "cloud_asr_max_duration", "cloud_asr_concurrency", "cloud_asr_upload_timeout", "cloud_asr_read_timeout", "cloud_asr_long_read_timeout", "concurrency_detect", "concurrency_upload", "detect_retry_limit",
@@ -244,11 +243,11 @@ def get_final_config(overrides_json=None):
             final_conf[k] = v
     cleanup_queue_status_keys = [
         'cleanup_detect_dirty', 'cleanup_detect_error', 'cleanup_detect_cancelled',
-        'cleanup_upload_uploaded', 'cleanup_upload_dirty', 'cleanup_upload_error', 'cleanup_upload_cancelled',
+        'cleanup_upload_uploaded', 'cleanup_upload_error', 'cleanup_upload_cancelled',
     ]
     legacy_cleanup_key_targets = {
         'cleanup_scanner_uploaded': ['cleanup_upload_uploaded'],
-        'cleanup_scanner_dirty': ['cleanup_detect_dirty', 'cleanup_upload_dirty'],
+        'cleanup_scanner_dirty': ['cleanup_detect_dirty'],
         'cleanup_scanner_error': ['cleanup_detect_error', 'cleanup_upload_error'],
         'cleanup_scanner_cancelled': ['cleanup_detect_cancelled', 'cleanup_upload_cancelled'],
     }
@@ -1892,7 +1891,7 @@ def settings():
         for k, v in data.items():
             if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "cloud_asr_proxy_enabled", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample",
                       "notify_upload_success", "notify_errors", "cleanup_scanner_history", "cleanup_scanner_uploaded", "cleanup_scanner_dirty", "cleanup_scanner_error", "cleanup_scanner_cancelled",
-                      "cleanup_detect_dirty", "cleanup_detect_error", "cleanup_detect_cancelled", "cleanup_upload_uploaded", "cleanup_upload_dirty", "cleanup_upload_error", "cleanup_upload_cancelled", "cleanup_aria2_completed"]:
+                      "cleanup_detect_dirty", "cleanup_detect_error", "cleanup_detect_cancelled", "cleanup_upload_uploaded", "cleanup_upload_error", "cleanup_upload_cancelled", "cleanup_aria2_completed"]:
                 val = "true" if (v is True or str(v).lower() == 'true') else "false"
             else:
                 val = str(v)
@@ -2096,7 +2095,6 @@ def clear_tasks():
         ('detect', 'error'): cleanup_config.get('cleanup_detect_error', True),
         ('detect', 'cancelled'): cleanup_config.get('cleanup_detect_cancelled', True),
         ('upload', 'uploaded'): cleanup_config.get('cleanup_upload_uploaded', True),
-        ('upload', 'dirty'): cleanup_config.get('cleanup_upload_dirty', True),
         ('upload', 'error'): cleanup_config.get('cleanup_upload_error', True),
         ('upload', 'cancelled'): cleanup_config.get('cleanup_upload_cancelled', True),
     }
