@@ -881,7 +881,7 @@ class ScannerCore:
                    '-metadata', 'title=', '-metadata', 'comment=',
                    '-metadata', 'description=', '-metadata', 'synopsis=',
                    '-metadata', 'artist=', '-metadata', 'album=', '-metadata', 'copyright=',
-                   '-metadata:s', 'title=', '-metadata:s', 'language=und', '-metadata:s', 'handler_name=',
+                   '-metadata:s', 'title=', '-metadata:s', 'handler_name=',
                    '-y', output])
             res = self.run_cmd(cmd, timeout=300)
             if res and res.returncode == 0 and self.verify_integrity(output):
