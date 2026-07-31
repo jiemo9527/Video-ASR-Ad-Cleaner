@@ -979,8 +979,10 @@ def detection_worker():
                             db_logger(f"🚫 命中文件: {os.path.basename(current_process_path)}")
                         elif os.path.exists(task.filepath):
                             os.remove(task.filepath)
-                        if final_settings.get('notify_errors', True): core.send_tg_msg(final_settings,
-                                                                                      f"🚫 拦截: {task.filename}\n原因: {res['msg']}")
+                        if final_settings.get('notify_errors', True): core.send_tg_msg(
+                            final_settings,
+                            f"🚫 拦截: {task.filename}\n原因: {res['msg']}\n处理服务器 IP: {get_server_ip() or '未知'}\n任务 ID: {task.id}"
+                        )
                     elif res['status'] == 'ready_to_upload':
                         if dir_task:
                             current_upload_path = res.get('new_filepath') or get_task_overrides(task).get('_current_item') or current_process_path
