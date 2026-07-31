@@ -494,6 +494,13 @@ def get_server_ip():
         return ''
 
 
+def send_task_tg_msg(core, config, task, message):
+    core.send_tg_msg(
+        config,
+        f"{message}\n处理服务器 IP: {get_server_ip() or '未知'}\n任务 ID: {task.id}"
+    )
+
+
 def get_masked_server_ip():
     parts = get_server_ip().split('.')
     if len(parts) == 4:
@@ -979,9 +986,8 @@ def detection_worker():
                             db_logger(f"🚫 命中文件: {os.path.basename(current_process_path)}")
                         elif os.path.exists(task.filepath):
                             os.remove(task.filepath)
-                        if final_settings.get('notify_errors', True): core.send_tg_msg(
-                            final_settings,
-                            f"🚫 拦截: {task.filename}\n原因: {res['msg']}\n处理服务器 IP: {get_server_ip() or '未知'}\n任务 ID: {task.id}"
+                        if final_settings.get('notify_errors', True): send_task_tg_msg(
+                            core, final_settings, task, f"🚫 拦截: {task.filename}\n原因: {res['msg']}"
                         )
                     elif res['status'] == 'ready_to_upload':
                         if dir_task:
@@ -1015,8 +1021,9 @@ def detection_worker():
                             task.status = 'error';
                             task.finished_at = datetime.now();
                             db_logger(f"❌ 最终失败: 本地模型也无法处理 (或未启用)")
-                            if final_settings.get('notify_errors', True): core.send_tg_msg(final_settings,
-                                                                                           f"❌ 任务出错: {task.filename}\n原因: {res.get('msg')}")
+                            if final_settings.get('notify_errors', True): send_task_tg_msg(
+                                core, final_settings, task, f"❌ 任务出错: {task.filename}\n原因: {res.get('msg')}"
+                            )
 
                 except Exception as e:
                     safe_db_rollback(f"detect exception {task_id}")
@@ -1033,8 +1040,9 @@ def detection_worker():
                         task.status = 'error';
                         task.finished_at = datetime.now();
                         db_logger(f"❌ 最终异常: {e}")
-                        if final_settings.get('notify_errors', True): core.send_tg_msg(final_settings,
-                                                                                       f"❌ 系统异常: {task.filename}")
+                        if final_settings.get('notify_errors', True): send_task_tg_msg(
+                            core, final_settings, task, f"❌ 系统异常: {task.filename}"
+                        )
                 finally:
                     clear_running_task(task_id, core)
                     release_task_stage(task_id, 'detect')
@@ -1164,9 +1172,8 @@ def upload_worker():
                                 db_logger("✅ 目录任务上传完成")
                                 if os.path.isdir(task.filepath):
                                     shutil.rmtree(task.filepath, ignore_errors=True)
-                                if final_settings.get('notify_upload_success', False): core.send_tg_msg(
-                                    final_settings,
-                                    f"🎉 上传成功: {task.filename}\n☁️ 节点: {dest_remote}"
+                                if final_settings.get('notify_upload_success', False): send_task_tg_msg(
+                                    core, final_settings, task, f"🎉 上传成功: {task.filename}\n☁️ 节点: {dest_remote}"
                                 )
                             else:
                                 task.status = 'pending'
@@ -1183,8 +1190,9 @@ def upload_worker():
                             task.finished_at = datetime.now();
                             db_logger("✅ 上传成功");
                             core.cleanup_empty_dirs(task.filepath)
-                            if final_settings.get('notify_upload_success', False): core.send_tg_msg(final_settings,
-                                                                                                    f"🎉 上传成功: {task.filename}\n☁️ 节点: {dest_remote}")
+                            if final_settings.get('notify_upload_success', False): send_task_tg_msg(
+                                core, final_settings, task, f"🎉 上传成功: {task.filename}\n☁️ 节点: {dest_remote}"
+                            )
                     else:
                         # 🔥🔥🔥 修复逻辑：检查是“失败”还是“手动停止”
                         if core._stopped:
@@ -1194,8 +1202,9 @@ def upload_worker():
                             task.status = 'error';
                             task.finished_at = datetime.now();
                             db_logger(f"❌ 上传失败{': ' + os.path.basename(current_upload_path) if dir_task and current_upload_path else ''}")
-                            if final_settings.get('notify_errors', True): core.send_tg_msg(final_settings,
-                                                                                           f"❌ 上传失败: {task.filename}")
+                            if final_settings.get('notify_errors', True): send_task_tg_msg(
+                                core, final_settings, task, f"❌ 上传失败: {task.filename}"
+                            )
                 except Exception as e:
                     safe_db_rollback(f"upload exception {task_id}")
                     task = Task.query.get(task_id)
@@ -1206,8 +1215,9 @@ def upload_worker():
                     else:
                         task.status = 'error';
                         db_logger(f"上传异常: {e}")
-                        if final_settings.get('notify_errors', True): core.send_tg_msg(final_settings,
-                                                                                       f"❌ 上传异常: {task.filename}")
+                        if final_settings.get('notify_errors', True): send_task_tg_msg(
+                            core, final_settings, task, f"❌ 上传异常: {task.filename}"
+                        )
                 finally:
                     clear_running_task(task_id, core)
                     release_task_stage(task_id, 'upload')
