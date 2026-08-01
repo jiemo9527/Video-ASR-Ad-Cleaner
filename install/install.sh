@@ -105,7 +105,7 @@ function install_p3terx_aria2() {
 }
 
 function install_rclone() {
-    local installer
+    local installer installer_status
 
     echo -e "${CYAN}>>> 使用 rclone 官方安装脚本安装/更新 rclone...${NC}"
     installer=$(mktemp)
@@ -114,7 +114,9 @@ function install_rclone() {
         echo -e "${RED}❌ rclone 官方安装脚本下载失败。${NC}"
         return 1
     fi
-    if ! bash "$installer"; then
+    installer_status=0
+    bash "$installer" || installer_status=$?
+    if [ "$installer_status" -ne 0 ] && [ "$installer_status" -ne 3 ]; then
         echo -e "${YELLOW}⚠️ rclone 官方安装脚本返回非零，继续检查实际安装结果。${NC}"
     fi
     rm -f "$installer"
