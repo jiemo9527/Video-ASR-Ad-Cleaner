@@ -1469,8 +1469,22 @@ class ScannerCore:
                             trans = st.get('transferring', [{}])[0]
                             pct = int((trans.get('bytes', 0) / trans.get('size', 1)) * 100)
 
-                            eta_val = int(st.get('eta', 0))
-                            if eta_val > 60:
+                            eta_raw = trans.get('eta') or st.get('eta', 0)
+                            try:
+                                eta_val = max(0, int(float(eta_raw)))
+                            except (TypeError, ValueError):
+                                eta_val = 0
+                            if eta_val <= 0:
+                                try:
+                                    remaining = max(0, float(trans.get('size', 0)) - float(trans.get('bytes', 0)))
+                                    speed = float(trans.get('speedAvg') or trans.get('speed') or st.get('speed') or 0)
+                                    if remaining > 0 and speed > 0:
+                                        eta_val = max(1, math.ceil(remaining / speed))
+                                except (TypeError, ValueError):
+                                    pass
+                            if eta_val <= 0:
+                                eta_str = "估算中"
+                            elif eta_val > 60:
                                 h = eta_val // 3600
                                 m = (eta_val % 3600) // 60
                                 s = eta_val % 60
