@@ -20,6 +20,19 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
+# Run a temporary copy so an update can safely replace the installed script itself.
+if [ -z "${SCANNER_INSTALLER_REEXEC:-}" ] && [ -f "$0" ]; then
+    installer_copy=$(mktemp) || exit 1
+    if ! cp "$0" "$installer_copy"; then
+        rm -f "$installer_copy"
+        exit 1
+    fi
+    SCANNER_INSTALLER_REEXEC=1 bash "$installer_copy" "$@"
+    installer_status=$?
+    rm -f "$installer_copy"
+    exit "$installer_status"
+fi
+
 function tcp_port_in_use() {
     local port="$1"
     if command -v ss >/dev/null 2>&1; then
@@ -96,11 +109,13 @@ function install_rclone() {
 
     echo -e "${CYAN}>>> 使用 rclone 官方安装脚本安装/更新 rclone...${NC}"
     installer=$(mktemp)
-    if ! curl -fL --retry 3 -o "$installer" "https://rclone.org/install.sh" \
-        || ! bash "$installer"; then
+    if ! curl -fL --retry 3 -o "$installer" "https://rclone.org/install.sh"; then
         rm -f "$installer"
-        echo -e "${RED}❌ rclone 官方安装失败。${NC}"
+        echo -e "${RED}❌ rclone 官方安装脚本下载失败。${NC}"
         return 1
+    fi
+    if ! bash "$installer"; then
+        echo -e "${YELLOW}⚠️ rclone 官方安装脚本返回非零，继续检查实际安装结果。${NC}"
     fi
     rm -f "$installer"
     hash -r
