@@ -91,18 +91,39 @@ function install_p3terx_aria2() {
     echo -e "${GREEN}✅ P3TERX Aria2 已安装: /usr/local/bin/aria2c ($release)${NC}"
 }
 
+function install_rclone() {
+    local installer
+
+    echo -e "${CYAN}>>> 使用 rclone 官方安装脚本安装/更新 rclone...${NC}"
+    installer=$(mktemp)
+    if ! curl -fL --retry 3 -o "$installer" "https://rclone.org/install.sh" \
+        || ! bash "$installer"; then
+        rm -f "$installer"
+        echo -e "${RED}❌ rclone 官方安装失败。${NC}"
+        return 1
+    fi
+    rm -f "$installer"
+    hash -r
+    if ! command -v rclone >/dev/null 2>&1; then
+        echo -e "${RED}❌ 未找到 rclone，请检查官方安装脚本输出。${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}✅ rclone 已就绪: $(command -v rclone)${NC}"
+}
+
 function install_system_dependencies() {
     apt-get update -qq || return 1
     apt-get install -y \
         ffmpeg python3 python3-pip unzip curl ca-certificates libsndfile1 net-tools \
-        git cmake build-essential rclone tar gzip openssl > /dev/null || return 1
+        git cmake build-essential tar gzip openssl > /dev/null || return 1
 
-    for REQUIRED_CMD in ffmpeg ffprobe python3 pip3 git cmake rclone; do
+    for REQUIRED_CMD in ffmpeg ffprobe python3 pip3 git cmake; do
         if ! command -v "$REQUIRED_CMD" >/dev/null 2>&1; then
             echo -e "${YELLOW}⚠️  未检测到 $REQUIRED_CMD，请确认系统依赖安装是否成功。${NC}"
         fi
     done
-    install_p3terx_aria2
+    install_p3terx_aria2 || return 1
+    install_rclone
 }
 
 function deploy_project_archive() {
@@ -843,15 +864,21 @@ function update_app() {
     echo -e "${YELLOW}>>> 更新目录: $project_root${NC}"
     echo -e "${YELLOW}>>> 保留数据库、scanner.env、Aria2 配置/rpc-secret、Nginx、模型和 AriaNg 数据。${NC}"
 
-    echo -e "${GREEN}>>> [1/3] 检查系统依赖...${NC}"
+    echo -e "${GREEN}>>> [1/4] 检查系统依赖...${NC}"
     install_system_dependencies || return
 
-    echo -e "${GREEN}>>> [2/3] 下载并更新代码...${NC}"
+    echo -e "${GREEN}>>> [2/4] 下载并更新代码...${NC}"
     deploy_project_archive "$project_root" || return
     chmod +x "$PROJECT_ROOT/trigger.sh"
     ensure_ariang_assets "$PROJECT_ROOT"
 
-    echo -e "${GREEN}>>> [3/3] 更新 Python 依赖并重启服务...${NC}"
+    echo -e "${GREEN}>>> [3/4] 更新 rclone...${NC}"
+    if ! rclone selfupdate; then
+        echo -e "${RED}❌ rclone selfupdate 失败。${NC}"
+        return 1
+    fi
+
+    echo -e "${GREEN}>>> [4/4] 更新 Python 依赖并重启服务...${NC}"
     install_python_dependencies "$PROJECT_ROOT" || return
     if ! systemctl restart "$SERVICE_NAME"; then
         echo -e "${RED}❌ Scanner 重启失败，请检查: systemctl status $SERVICE_NAME${NC}"
