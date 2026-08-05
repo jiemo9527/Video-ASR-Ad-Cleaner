@@ -120,7 +120,7 @@
             <ul class="dashboard-tabs nav nav-tabs card-header-tabs">
                 <li class="nav-item"><button class="nav-link" :class="{active: view==='aria2'}" @click="view='aria2'">⬇️ 下载器 <span class="badge bg-success rounded-pill ms-1" title="Aria2 总下载速度">[[ formatAria2DownloadSpeed() ]]</span><span class="badge bg-primary rounded-pill ms-1" v-if="aria2Stats.active + aria2Stats.waiting > 0">[[ aria2Stats.active + aria2Stats.waiting ]]</span></button></li>
                 <li class="nav-item"><button class="nav-link" :class="{active: view==='detect'}" @click="view='detect'">🔍 检测队列 <span class="badge bg-secondary rounded-pill ms-1" v-if="detectTasks.length > 0">[[ detectTasks.length ]]</span></button></li>
-                <li class="nav-item"><button class="nav-link" :class="{active: view==='upload'}" @click="view='upload'">☁️ 上传队列 <span class="badge bg-secondary rounded-pill ms-1" v-if="uploadTasks.length > 0">[[ uploadTasks.length ]]</span></button></li>
+                <li class="nav-item"><button class="nav-link" :class="{active: view==='upload'}" @click="view='upload'">☁️ 上传队列 <span class="badge bg-info text-dark rounded-pill ms-1" v-if="activeUploadCount > 0" title="Scanner 总上传速度">[[ formatUploadSpeed() ]]</span><span class="badge bg-secondary rounded-pill ms-1" v-if="uploadTasks.length > 0">[[ uploadTasks.length ]]</span></button></li>
                 <li class="nav-item"><button class="nav-link" :class="{active: view==='syslog'}" @click="view='syslog'">📜 系统日志</button></li>
             </ul>
         </div>
@@ -248,7 +248,8 @@ Vue.createApp({
         detectTasks() { return this.tasks.filter(t => !this.isUploadTask(t)) },
         uploadTasks() { return this.tasks.filter(t => this.isUploadTask(t)) },
         activeDetectCount() { return this.tasks.filter(t => t.status === 'processing').length },
-        activeUploadCount() { return this.tasks.filter(t => t.status === 'uploading').length }
+        activeUploadCount() { return this.tasks.filter(t => t.status === 'uploading').length },
+        activeUploadSpeed() { return this.uploadTasks.filter(t => t.status === 'uploading').reduce((total, t) => total + this.uploadSpeedBytes(t.upload_speed), 0) }
     },
     mounted(){
         this.load();
@@ -297,6 +298,21 @@ Vue.createApp({
 
         formatAria2DownloadSpeed(){
             let speed=Number(this.aria2Stats.downloadSpeed)||0;
+            const units=['B/s','KB/s','MB/s','GB/s'];
+            let unit=0;
+            while(speed>=1024&&unit<units.length-1){speed/=1024;unit++}
+            const digits=unit===0||speed>=100?0:(speed>=10?1:2);
+            return `${speed.toFixed(digits)} ${units[unit]}`;
+        },
+
+        uploadSpeedBytes(value){
+            const match=String(value||'').trim().match(/^(\d+(?:\.\d+)?)\s*(B|KB|MB|GB)\/s$/i);
+            if(!match)return 0;
+            return Number(match[1])*({B:1,KB:1024,MB:1048576,GB:1073741824}[match[2].toUpperCase()]||0);
+        },
+
+        formatUploadSpeed(){
+            let speed=this.activeUploadSpeed||0;
             const units=['B/s','KB/s','MB/s','GB/s'];
             let unit=0;
             while(speed>=1024&&unit<units.length-1){speed/=1024;unit++}
