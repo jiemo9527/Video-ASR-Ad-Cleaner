@@ -1442,7 +1442,33 @@ class ScannerCore:
                 self.log(f"❌ 流程中断: {e}")
             return {"status": "error", "msg": err_str}
 
+    UPLOAD_WATCHDOG_MIN_FILE_SIZE = 500 * 1024 * 1024
+    UPLOAD_WATCHDOG_MIN_SPEED = 1024 * 1024
+    UPLOAD_WATCHDOG_GRACE_SECONDS = 90
+    UPLOAD_WATCHDOG_MAX_RETRIES = 3
+
+    @classmethod
+    def can_retry_slow_upload(cls, retry_count):
+        return retry_count < cls.UPLOAD_WATCHDOG_MAX_RETRIES
+
+    def get_upload_rclone_cmd(self, local_path, remote_path):
+        return [
+            'rclone', 'moveto', local_path, remote_path,
+            '--use-json-log', '--stats', '1s', '-v', '--ignore-size', '--no-traverse',
+            '--drive-chunk-size', '128M',
+            '--timeout', '60s', '--low-level-retries', '20', '--drive-stop-on-upload-limit'
+        ]
+
+    @classmethod
+    def should_restart_slow_upload(cls, file_size, speed_bytes, low_speed_started_at, now=None):
+        if file_size < cls.UPLOAD_WATCHDOG_MIN_FILE_SIZE or speed_bytes >= cls.UPLOAD_WATCHDOG_MIN_SPEED:
+            return False
+        if low_speed_started_at is None:
+            return False
+        return (time.monotonic() if now is None else now) - low_speed_started_at >= cls.UPLOAD_WATCHDOG_GRACE_SECONDS
+
     def upload_with_progress(self, local_path, remote_path=None):
+        self.upload_restart_requested = False
         if self._stopped: return False
         if not remote_path:
             filename = os.path.basename(local_path)
@@ -1452,38 +1478,66 @@ class ScannerCore:
             remote_path = f"{remote_prefix}:{filename}"
 
         self.log(f"☁️ 上传: {remote_path}")
-        cmd = ['rclone', 'moveto', local_path, remote_path, '--use-json-log', '--stats', '1s', '-v', '--ignore-size','--no-traverse','--drive-chunk-size', '64M']
+        cmd = self.get_upload_rclone_cmd(local_path, remote_path)
+        file_size = os.path.getsize(local_path)
+        low_speed_started_at = None
 
         try:
             self.current_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                                  encoding='utf-8', errors='ignore', **self._popen_group_kwargs())
             while True:
-                if self._stopped: self._kill_current_proc(); return False
+                if self._stopped:
+                    self._kill_current_proc()
+                    return False
                 line = self.current_proc.stderr.readline()
-                if not line and self.current_proc.poll() is not None: break
-                if line:
-                    try:
-                        data = json.loads(line)
-                        if 'stats' in data:
-                            st = data['stats'];
-                            trans = st.get('transferring', [{}])[0]
-                            pct = int((trans.get('bytes', 0) / trans.get('size', 1)) * 100)
+                if not line and self.current_proc.poll() is not None:
+                    break
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
 
-                            eta_val = int(st.get('eta', 0))
-                            if eta_val > 60:
-                                h = eta_val // 3600
-                                m = (eta_val % 3600) // 60
-                                s = eta_val % 60
-                                eta_str = f"{h}h {m}m {s}s" if h > 0 else f"{m}m {s}s"
-                            else:
-                                eta_str = f"{eta_val}s"
+                level = str(data.get('level', '')).lower()
+                message = str(data.get('msg', '')).strip()
+                if level in ('warning', 'error') and message:
+                    self.log(f"rclone {level}: {message}")
 
-                            self.prog_cb(pct, f"{st.get('speed', 0) / 1048576:.1f} MB/s", eta_str)
-                    except:
-                        pass
+                if 'stats' not in data:
+                    continue
+                st = data['stats']
+                trans = st.get('transferring', [{}])[0]
+                transferred = trans.get('bytes', 0)
+                transfer_size = trans.get('size', file_size) or file_size
+                pct = int((transferred / max(1, transfer_size)) * 100)
+                speed_bytes = float(st.get('speed', 0) or 0)
+                now = time.monotonic()
+                if file_size >= self.UPLOAD_WATCHDOG_MIN_FILE_SIZE and speed_bytes < self.UPLOAD_WATCHDOG_MIN_SPEED:
+                    low_speed_started_at = low_speed_started_at or now
+                    if self.should_restart_slow_upload(file_size, speed_bytes, low_speed_started_at, now):
+                        self.upload_restart_requested = True
+                        self.log(
+                            f"⚠️ 上传持续低速 {speed_bytes / 1048576:.2f} MB/s 已达 "
+                            f"{self.UPLOAD_WATCHDOG_GRACE_SECONDS}s，自动重试上传"
+                        )
+                        self._kill_current_proc()
+                        return False
+                else:
+                    low_speed_started_at = None
+
+                eta_val = int(st.get('eta', 0) or 0)
+                if eta_val > 60:
+                    h = eta_val // 3600
+                    m = (eta_val % 3600) // 60
+                    s = eta_val % 60
+                    eta_str = f"{h}h {m}m {s}s" if h > 0 else f"{m}m {s}s"
+                else:
+                    eta_str = f"{eta_val}s"
+                self.prog_cb(pct, f"{speed_bytes / 1048576:.1f} MB/s", eta_str)
             return self.current_proc.returncode == 0
         except Exception as e:
-            self.log(f"上传出错: {e}");
+            self.log(f"上传出错: {e}")
             return False
         finally:
             self.current_proc = None

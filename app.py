@@ -1194,8 +1194,30 @@ def upload_worker():
                                 core, final_settings, task, f"🎉 上传成功: {task.filename}\n☁️ 节点: {dest_remote}"
                             )
                     else:
+                        # 低速看门狗主动结束当前 rclone 进程后，重新入队建立一条新连接。
+                        if core.upload_restart_requested and not core._stopped and task.status != 'cancelled':
+                            if core.can_retry_slow_upload(task.retry_count or 0):
+                                task.retry_count = (task.retry_count or 0) + 1
+                                task.status = 'pending_upload'
+                                task.progress = 0
+                                task.upload_speed = ''
+                                task.upload_eta = '自动重试中'
+                                task.finished_at = None
+                                db_logger(
+                                    f"🔄 上传低速自动重试 ({task.retry_count}/{core.UPLOAD_WATCHDOG_MAX_RETRIES})："
+                                    "已重新加入上传队列"
+                                )
+                                if safe_db_commit(f"upload slow retry {task_id}"):
+                                    upload_queue.put(task_id)
+                            else:
+                                task.status = 'error'
+                                task.finished_at = datetime.now()
+                                db_logger("❌ 上传持续低速，自动重试次数已用尽")
+                                if final_settings.get('notify_errors', True): send_task_tg_msg(
+                                    core, final_settings, task, f"❌ 上传持续低速: {task.filename}"
+                                )
                         # 🔥🔥🔥 修复逻辑：检查是“失败”还是“手动停止”
-                        if core._stopped:
+                        elif core._stopped:
                             # 仅仅记录停止日志，不要报错，不要发通知
                             db_logger("⏹ 上传已停止/删除")
                         elif task.status != 'cancelled':
