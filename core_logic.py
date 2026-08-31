@@ -46,6 +46,28 @@ MODELS_ROOT = os.path.join(BASE_DIR, "models")
 SCAN_IGNORED_CHARS_RE = re.compile(r'[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]')
 IMAGE_SUBTITLE_CODECS = {'hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle', 'xsub'}
 
+
+def normalize_keyword_identity(value):
+    return SCAN_IGNORED_CHARS_RE.sub('', str(value or '')).strip().casefold()
+
+
+def deduplicate_keyword_values(values):
+    unique_values = []
+    duplicate_values = []
+    seen = set()
+    for value in values:
+        value = str(value or '').strip()
+        identity = normalize_keyword_identity(value)
+        if not identity:
+            continue
+        if identity in seen:
+            duplicate_values.append(value)
+            continue
+        seen.add(identity)
+        unique_values.append(value)
+    return unique_values, duplicate_values
+
+
 VIDEO_EXTENSIONS = {
     '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm',
     '.m4v', '.ts', '.mts', '.m2ts', '.vob', '.mpg', '.mpeg',

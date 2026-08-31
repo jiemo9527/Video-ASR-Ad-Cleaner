@@ -17,7 +17,7 @@ from flask import Flask, request, jsonify, render_template, redirect, url_for, s
 from flask_login import LoginManager, login_user, login_required, logout_user, current_user
 from werkzeug.security import check_password_hash, generate_password_hash
 from database import db, Task, Config, Keyword, User
-from core_logic import ScannerCore, sensevoice_gguf_ready, VIDEO_EXTENSIONS
+from core_logic import ScannerCore, sensevoice_gguf_ready, VIDEO_EXTENSIONS, deduplicate_keyword_values, normalize_keyword_identity
 from sqlalchemy import text
 
 app = Flask(__name__)
@@ -171,8 +171,9 @@ def reset_login_fail(ip):
 def load_user(user_id): return User.query.get(user_id)
 
 
-AUDIO_BLACKLIST_INIT = ["加群", "交流群", "TG群", "Telegram", "QQ群", "Q群", "资源群", "微信号", "微信群", "微信公众号","加群","关注公众号",
+AUDIO_BLACKLIST_INIT = ["加群", "交流群", "TG群", "QQ群", "Q群", "资源群", "微信号", "微信群", "微信公众号", "关注公众号",
                         "群36", "资源区"]
+AUDIO_KEYWORDS_TO_REMOVE = {normalize_keyword_identity("Telegram")}
 SUBTITLE_BLACKLIST_INIT = ["加群", "交流群", "微信号", "微信群", "QQ", "qq", "q群", "公众号", "网址", ".com", "Q群","http",
                            "www", "link3.cc", "ysepan.com", "Tacit0924", "资源群"]
 SUB_META_BLACKLIST_INIT = ["http", "www", "weixin", "Telegram", "TG@", "TG频道@", "群：", "群:", "资源群", "加群",
@@ -183,19 +184,43 @@ SUB_META_BLACKLIST_INIT = ["http", "www", "weixin", "Telegram", "TG@", "TG频道
                             "Mandarin", "HDSky", "HDsky", "Feibanyama", "==無雙==", "Cxuan", "HiveWeb", "禁止转载"]
 
 
+def normalize_keyword_records():
+    seen = set()
+    removed = 0
+    for row in Keyword.query.order_by(Keyword.id.asc()).all():
+        identity = normalize_keyword_identity(row.content)
+        key = (row.type, identity)
+        if row.type == 'audio' and identity in AUDIO_KEYWORDS_TO_REMOVE:
+            db.session.delete(row)
+            removed += 1
+        elif not identity or key in seen:
+            db.session.delete(row)
+            removed += 1
+        else:
+            seen.add(key)
+    return removed
+
+
 def seed_default_keywords():
     try:
-        for kw in AUDIO_BLACKLIST_INIT:
-            if not Keyword.query.filter_by(type='audio', content=kw).first(): db.session.add(
-                Keyword(type='audio', content=kw, enabled=True))
-        for kw in SUBTITLE_BLACKLIST_INIT:
-            if not Keyword.query.filter_by(type='subtitle', content=kw).first(): db.session.add(
-                Keyword(type='subtitle', content=kw, enabled=True))
-        for kw in SUB_META_BLACKLIST_INIT:
-            if not Keyword.query.filter_by(type='meta', content=kw).first(): db.session.add(
-                Keyword(type='meta', content=kw, enabled=True))
+        normalize_keyword_records()
+        for keyword_type, defaults in [
+            ('audio', AUDIO_BLACKLIST_INIT),
+            ('subtitle', SUBTITLE_BLACKLIST_INIT),
+            ('meta', SUB_META_BLACKLIST_INIT),
+        ]:
+            existing = {
+                normalize_keyword_identity(row.content)
+                for row in Keyword.query.filter_by(type=keyword_type).all()
+            }
+            for kw in defaults:
+                identity = normalize_keyword_identity(kw)
+                if identity not in existing:
+                    db.session.add(Keyword(type=keyword_type, content=kw, enabled=True))
+                    existing.add(identity)
         db.session.commit()
     except:
+        db.session.rollback()
         pass
 
 
@@ -771,7 +796,6 @@ def orphan_reconcile_worker():
 # ----------------- Worker Functions -----------------
 def detection_worker():
     with app.app_context():
-        seed_default_keywords()
         while True:
             task_id = None
             try:
@@ -1992,13 +2016,21 @@ def restore_settings_backup():
 
     if isinstance(keywords, list):
         Keyword.query.delete()
+        seen_keywords = set()
         for item in keywords:
             if not isinstance(item, dict):
                 continue
             kw_type = str(item.get('type', '')).strip()
             content = str(item.get('content', '')).strip()
-            if kw_type not in ['audio', 'subtitle', 'meta'] or not content:
+            identity = normalize_keyword_identity(content)
+            if kw_type not in ['audio', 'subtitle', 'meta'] or not identity:
                 continue
+            if kw_type == 'audio' and identity in AUDIO_KEYWORDS_TO_REMOVE:
+                continue
+            key = (kw_type, identity)
+            if key in seen_keywords:
+                continue
+            seen_keywords.add(key)
             enabled = item.get('enabled', True)
             db.session.add(Keyword(type=kw_type, content=content, enabled=(enabled is True or str(enabled).lower() == 'true')))
 
@@ -2099,12 +2131,33 @@ def clear_system_logs():
 def manage_keywords():
     if request.method == 'GET': return jsonify(
         [{'id': k.id, 'type': k.type, 'content': k.content, 'enabled': k.enabled} for k in Keyword.query.all()])
-    d = request.json;
-    for i in [x.strip() for x in d.get('content', '').split('|') if x.strip()]:
-        if not Keyword.query.filter_by(type=d.get('type', 'audio'), content=i).first(): db.session.add(
-            Keyword(type=d.get('type', 'audio'), content=i, enabled=True))
-    db.session.commit();
-    return jsonify({"code": 200})
+    d = request.json or {}
+    keyword_type = str(d.get('type', 'audio')).strip()
+    if keyword_type not in ['audio', 'subtitle', 'meta']:
+        return jsonify({'code': 400, 'msg': '无效的关键词类型'}), 400
+
+    values, input_duplicates = deduplicate_keyword_values(str(d.get('content', '')).split('|'))
+    existing = {
+        normalize_keyword_identity(row.content)
+        for row in Keyword.query.filter_by(type=keyword_type).all()
+    }
+    added = 0
+    duplicates = list(input_duplicates)
+    for value in values:
+        identity = normalize_keyword_identity(value)
+        if identity in existing:
+            duplicates.append(value)
+            continue
+        db.session.add(Keyword(type=keyword_type, content=value, enabled=True))
+        existing.add(identity)
+        added += 1
+    db.session.commit()
+    return jsonify({
+        'code': 200,
+        'added': added,
+        'skipped': len(duplicates),
+        'msg': f'已添加 {added} 个关键词' + (f'，跳过 {len(duplicates)} 个重复关键词' if duplicates else '')
+    })
 
 
 @app.route('/api/keyword/<int:kid>', methods=['DELETE', 'PUT'])
@@ -2206,6 +2259,8 @@ if __name__ == '__main__':
                 os.chmod(credentials_path, 0o600)
             except OSError:
                 pass
+
+        seed_default_keywords()
 
         # 🔥 开启 WAL 模式 (大幅优化 I/O)
         try:
