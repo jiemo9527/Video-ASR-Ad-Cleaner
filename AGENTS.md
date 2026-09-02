@@ -92,6 +92,17 @@ Important statuses:
 - `error`: failed after retry policy.
 - `cancelled`: manually stopped.
 
+Status probe endpoint:
+
+- `GET /api/status` is a read-only busy/idle probe for external orchestration
+  (multi-server automation, media organizers, dashboards). It authenticates with
+  the same `X-API-Token` header as `/api/trigger` and requires no login session.
+- It never mutates state. It reports `detect_pending`, `upload_pending`,
+  `in_memory_active`, `queue_depth`, and the Aria2 `numActive`/`numWaiting`
+  counters, plus a single `busy`/`idle` verdict.
+- The verdict is fail-safe: when the database or Aria2 RPC cannot be read, the
+  endpoint reports `busy`. A caller must never treat an unknown state as idle.
+
 ## Settings And Defaults
 
 Global settings are stored in the `Config` table and merged by `get_final_config()` in `app.py`.

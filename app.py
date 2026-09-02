@@ -1608,6 +1608,63 @@ def trigger():
     return jsonify({"code": 200, "task_id": task.id, "duplicate": not created})
 
 
+@app.route('/api/status', methods=['GET'])
+def scanner_status():
+    # Read-only busy/idle probe for external orchestration (multi-server
+    # automation, media organizers, dashboards). Auth matches /api/trigger:
+    # shared X-API-Token, no login session. Never mutates state.
+    if request.headers.get('X-API-Token') != get_scanner_api_token():
+        return jsonify({"code": 403}), 403
+
+    detect_states = ('pending', 'processing')
+    upload_states = ('pending_upload', 'uploading')
+    detect_pending = 0
+    upload_pending = 0
+    db_ok = True
+    try:
+        detect_pending = Task.query.filter(Task.status.in_(detect_states)).count()
+        upload_pending = Task.query.filter(Task.status.in_(upload_states)).count()
+    except Exception:
+        db_ok = False
+        safe_db_rollback('scanner_status')
+
+    try:
+        in_memory_active = len(get_active_task_ids())
+    except Exception:
+        in_memory_active = 0
+
+    aria2_ok = False
+    aria2_active = None
+    aria2_waiting = None
+    try:
+        stat = call_aria2_rpc('aria2.getGlobalStat', [])
+        aria2_active = int(stat.get('numActive', 0))
+        aria2_waiting = int(stat.get('numWaiting', 0))
+        aria2_ok = True
+    except Exception:
+        aria2_ok = False
+
+    scanner_busy = (detect_pending + upload_pending + in_memory_active) > 0
+    # Fail-safe: if aria2 or the DB cannot be read we cannot PROVE idleness, so
+    # report busy. A caller must never act on an unknown state.
+    aria2_busy = (not aria2_ok) or (aria2_active or 0) > 0 or (aria2_waiting or 0) > 0
+    busy = bool(scanner_busy or aria2_busy or (not db_ok))
+
+    return jsonify({
+        "code": 200,
+        "busy": busy,
+        "idle": (not busy),
+        "db_ok": db_ok,
+        "detect_pending": detect_pending,
+        "upload_pending": upload_pending,
+        "in_memory_active": in_memory_active,
+        "queue_depth": detect_pending + upload_pending,
+        "aria2_ok": aria2_ok,
+        "aria2_active": aria2_active,
+        "aria2_waiting": aria2_waiting,
+    })
+
+
 @app.route('/api/tasks')
 @login_required
 def get_tasks():
