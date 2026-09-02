@@ -28,21 +28,21 @@ class UploadWatchdogTests(unittest.TestCase):
         ))
         self.assertFalse(core.should_restart_slow_upload(
             file_size=1024 * 1024 * 1024,
-            speed_bytes=1024 * 1024,
+            speed_bytes=3 * 1024 * 1024,
             low_speed_started_at=0,
             now=100,
         ))
         self.assertFalse(core.should_restart_slow_upload(
             file_size=1024 * 1024 * 1024,
-            speed_bytes=100 * 1024,
-            low_speed_started_at=20,
+            speed_bytes=2 * 1024 * 1024,
+            low_speed_started_at=66,
             now=100,
         ))
         self.assertTrue(core.should_restart_slow_upload(
             file_size=1024 * 1024 * 1024,
-            speed_bytes=100 * 1024,
+            speed_bytes=2 * 1024 * 1024,
             low_speed_started_at=0,
-            now=90,
+            now=35,
         ))
 
     def test_slow_upload_retry_is_bounded(self):

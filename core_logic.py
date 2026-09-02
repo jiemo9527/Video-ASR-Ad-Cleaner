@@ -1465,8 +1465,8 @@ class ScannerCore:
             return {"status": "error", "msg": err_str}
 
     UPLOAD_WATCHDOG_MIN_FILE_SIZE = 500 * 1024 * 1024
-    UPLOAD_WATCHDOG_MIN_SPEED = 1024 * 1024
-    UPLOAD_WATCHDOG_GRACE_SECONDS = 90
+    UPLOAD_WATCHDOG_MIN_SPEED = 3 * 1024 * 1024
+    UPLOAD_WATCHDOG_GRACE_SECONDS = 35
     UPLOAD_WATCHDOG_MAX_RETRIES = 3
 
     @classmethod
