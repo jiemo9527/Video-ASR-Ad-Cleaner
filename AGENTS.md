@@ -40,6 +40,7 @@ The app starts from `app.py` and launches two worker pools:
 - Detection workers consume `detect_queue`.
 - Upload workers consume `upload_queue`.
 - Detection retries are priority requeues: automatic detection retry, manual detect retry, dynamic-sample retry, and save-and-retry go to the front of `detect_queue`. New `/api/trigger` tasks still go to the back. This ensures a task that already started detection gets retried before never-started tasks.
+- 插队 (`POST /api/tasks/prioritize`) only reorders `detect_queue`: it moves already-queued `pending` detection tasks to the front via `FrontQueue.move_to_front()` without touching status, `retry_count`, or overrides, and without re-running detection. Selection order is preserved (the first selected task ends up first). Non-`pending` tasks and upload tasks are rejected/skipped. A `pending` task that is no longer in the in-memory queue is re-enqueued at the front. The dashboard exposes it as a per-row button and a detect-queue toolbar batch button driven by the shared checkbox selection.
 
 Task lifecycle:
 

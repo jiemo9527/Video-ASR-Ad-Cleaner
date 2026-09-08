@@ -77,6 +77,20 @@ class FrontQueue(queue.Queue):
             self.unfinished_tasks += 1
             self.not_empty.notify()
 
+    def move_to_front(self, item):
+        """把已经排队的元素提到队首，不改变未完成计数。不在队列中时返回 False。"""
+        with self.mutex:
+            try:
+                self.queue.remove(item)
+            except ValueError:
+                return False
+            self.queue.appendleft(item)
+            return True
+
+    def snapshot(self):
+        with self.mutex:
+            return list(self.queue)
+
 
 detect_queue = FrontQueue()
 upload_queue = queue.Queue()
@@ -1749,6 +1763,57 @@ def batch_tasks():
     for i in upload_ids: upload_queue.put(i)
 
     return jsonify({"code": 200, "msg": f"操作了 {count} 个任务"})
+
+
+@app.route('/api/tasks/prioritize', methods=['POST'])
+@login_required
+def prioritize_tasks():
+    """插队：只把待处理(pending)的检测任务提到检测队列最前面，不改状态、不重试。"""
+    data = request.json or {}
+    requested_ids = data.get('ids') if isinstance(data.get('ids'), list) else None
+    if not requested_ids:
+        return jsonify({"code": 400, "msg": "请先选择要插队的任务"}), 400
+
+    tasks = get_batch_task_list(data)
+    task_map = {t.id: t for t in tasks}
+
+    ordered_ids = []
+    skipped = 0
+    for raw_id in requested_ids:
+        try:
+            task_id = int(raw_id)
+        except:
+            continue
+        task = task_map.get(task_id)
+        if not task:
+            continue
+        if task.status != 'pending' or is_upload_task(task):
+            skipped += 1
+            continue
+        if task_id not in ordered_ids:
+            ordered_ids.append(task_id)
+
+    if not ordered_ids:
+        return jsonify({"code": 400, "msg": "没有可插队的任务（仅“等待中”的检测任务可插队）"}), 400
+
+    # 倒序处理，使第一个被选中的任务最终排在队首。
+    moved = []
+    for task_id in reversed(ordered_ids):
+        if detect_queue.move_to_front(task_id):
+            moved.append(task_id)
+        else:
+            # 任务是 pending 但已不在内存队列里（例如重启恢复漏排），补一次队首入队。
+            enqueue_detect_task(task_id, priority=True)
+            moved.append(task_id)
+        task = task_map.get(task_id)
+        if task:
+            task.log = (task.log or '') + "\n=== 插队: 已提到检测队列最前 ===\n"
+
+    db.session.commit()
+    msg = f"已将 {len(moved)} 个任务插队到检测队列最前"
+    if skipped:
+        msg += f"；{skipped} 个不是等待中的检测任务已跳过"
+    return jsonify({"code": 200, "msg": msg, "count": len(moved)})
 
 
 @app.route('/api/upload_remote_hijack', methods=['GET', 'POST'])

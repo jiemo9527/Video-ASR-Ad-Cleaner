@@ -131,6 +131,7 @@
                     <div class="queue-toolbar p-2 border-bottom d-flex flex-wrap gap-2 bg-light bg-opacity-50 ps-3">
                         <button class="btn btn-sm btn-outline-primary" @click="batchAction('detect', 'retry')"><i class="bi bi-arrow-repeat me-1"></i>[[ batchActionLabel('detect', 'retry') ]]</button>
                         <button class="btn btn-sm btn-outline-danger" @click="batchAction('detect', 'stop')"><i class="bi bi-stop-circle me-1"></i>[[ batchActionLabel('detect', 'stop') ]]</button>
+                        <button class="btn btn-sm btn-outline-warning" :disabled="!prioritizableCount" @click="batchPrioritize()" title="把选中的等待中任务提到检测队列最前"><i class="bi bi-arrow-bar-up me-1"></i>插队[[ prioritizableCount ? ` (${prioritizableCount})` : '' ]]</button>
                         <button class="btn btn-sm btn-outline-danger" :disabled="!selectedCount('detect')" @click="batchDelete('detect')"><i class="bi bi-trash-fill me-1"></i>批量删除</button>
                         <span v-if="selectedCount('detect')" class="small text-primary align-self-center ms-1">已选 [[ selectedCount('detect') ]] 项 <button class="btn btn-link btn-sm p-0 ms-1" @click="clearSelection('detect')">清除</button></span>
                     </div>
@@ -148,6 +149,7 @@
                                     <td class="text-end pe-3">
                                         <div class="btn-group btn-group-sm">
                                             <button v-if="canControl(t)" class="btn btn-outline-primary" @click="openConfig(t)" title="调整"><i class="bi bi-sliders"></i></button>
+                                            <button v-if="canPrioritize(t)" class="btn btn-outline-warning" @click="prioritize(t.id)" title="插队(提到检测队列最前)"><i class="bi bi-arrow-bar-up"></i></button>
                                             <button v-if="canDoubleSample(t)" class="btn btn-outline-warning" @click="confirmAction('确定让该任务使用动态抽样并重新检测吗？', () => doubleSample(t.id))" title="动态抽样"><i class="bi bi-soundwave"></i></button>
                                             <button v-if="canControl(t)" class="btn btn-outline-success" @click="confirmAction('确定跳过检测直接上传吗？', () => directUpload(t.id))" title="直传"><i class="bi bi-forward-fill"></i></button>
                                             <button v-if="canStop(t)" class="btn btn-outline-danger" @click="confirmAction('确定停止该任务吗？', () => cancel(t.id))" title="停止"><i class="bi bi-stop-circle-fill"></i></button>
@@ -249,7 +251,8 @@ Vue.createApp({
         uploadTasks() { return this.tasks.filter(t => this.isUploadTask(t)) },
         activeDetectCount() { return this.tasks.filter(t => t.status === 'processing').length },
         activeUploadCount() { return this.tasks.filter(t => t.status === 'uploading').length },
-        activeUploadSpeed() { return this.uploadTasks.filter(t => t.status === 'uploading').reduce((total, t) => total + this.uploadSpeedBytes(t.upload_speed), 0) }
+        activeUploadSpeed() { return this.uploadTasks.filter(t => t.status === 'uploading').reduce((total, t) => total + this.uploadSpeedBytes(t.upload_speed), 0) },
+        prioritizableCount() { return this.selectedIds('detect').filter(id => { const t = this.tasks.find(x => x.id === id); return t && t.status === 'pending' }).length }
     },
     mounted(){
         this.load();
@@ -444,6 +447,19 @@ Vue.createApp({
         toggleAll(type, checked){ const ids=this.queueTasks(type).map(t=>t.id); this.selectedTaskIds=checked ? [...new Set([...this.selectedTaskIds,...ids])] : this.selectedTaskIds.filter(id=>!ids.includes(id)) },
         clearSelection(type){ const ids=new Set(this.queueTasks(type).map(t=>t.id)); this.selectedTaskIds=this.selectedTaskIds.filter(id=>!ids.has(id)) },
         batchActionLabel(type, action){ const count=this.selectedCount(type); if(count)return `${action==='retry'?'重试':'停止'}选中 (${count})`; return action==='retry'?'全部重试 (错误/取消)':'全部停止' },
+        canPrioritize(t){ return t.status==='pending' && !this.isUploadTask(t) },
+        prioritize(id){ axios.post('/api/tasks/prioritize', {ids:[id]}).then(r=>{ this.showToast(r.data.msg); this.load() }).catch(e=>this.showToast(e.response?.data?.msg || '插队失败','error')) },
+        batchPrioritize(){
+            const ids = this.selectedIds('detect').filter(id => { const t=this.tasks.find(x=>x.id===id); return t && t.status==='pending' });
+            if(!ids.length) return;
+            this.confirmAction(`确定把选中的 ${ids.length} 个待处理任务插队到检测队列最前吗？\n只调整排队顺序，不会改变任务状态或重新检测。`, () => {
+                axios.post('/api/tasks/prioritize', {ids}).then(r=>{
+                    this.clearSelection('detect');
+                    this.showToast(r.data.msg);
+                    this.load();
+                }).catch(e=>this.showToast(e.response?.data?.msg || '插队失败','error'));
+            });
+        },
         isRunning(t){ return ['processing','uploading'].includes(t.status) }, isError(t){ return ['error','cancelled','dirty'].includes(t.status) }, canControl(t){ return ['pending','dirty','error','cancelled'].includes(t.status) }, canStop(t){ return ['pending','processing','pending_upload','uploading'].includes(t.status) },
         cancel(id){ axios.post('/api/cancel/'+id).then(()=>{ this.load(); this.showToast('任务已停止','error') }) },
         retry(id){ axios.post('/api/retry/'+id, {type:this.view}).then(r=>{ this.showToast(r.data.msg || '已重新入队'); this.load() }).catch(e=>this.showToast(e.response?.data?.msg || '重试请求失败','error')) },
