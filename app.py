@@ -236,6 +236,7 @@ def get_final_config(overrides_json=None):
         "api_url": "https://api.siliconflow.cn/v1/audio/transcriptions",
         "api_key": "", "cloud_asr_api_keys": "", "cloud_asr_proxy": "",
         "api_model": "FunAudioLLM/SenseVoiceSmall", "cloud_asr_max_duration": 60, "cloud_asr_concurrency": 3,
+        "cloud_asr_per_key_concurrency": 3,
         "cloud_asr_upload_timeout": 20, "cloud_asr_read_timeout": 120, "cloud_asr_long_read_timeout": 180,
         "scan_path": "/root/downloads", "rclone_remote": "s25", "upload_remote_hijack_enabled": False,
         "upload_remote_hijack_remote": "", "api_token": "8pUoqOTHhEAhRnacl3c19",
@@ -258,7 +259,7 @@ def get_final_config(overrides_json=None):
                    "cleanup_detect_dirty", "cleanup_detect_error", "cleanup_detect_cancelled", "cleanup_upload_uploaded", "cleanup_upload_error", "cleanup_upload_cancelled", "cleanup_aria2_completed"]:
             final_conf[k] = (str(v).lower() == 'true')
         elif k in ["audio_threshold_multi", "audio_threshold_long", "audio_len_head", "audio_len_mid", "audio_len_tail",
-                   "audio_len_tail_long", "audio_segment_len", "audio_max_segments", "cloud_asr_max_duration", "cloud_asr_concurrency", "cloud_asr_upload_timeout", "cloud_asr_read_timeout", "cloud_asr_long_read_timeout", "concurrency_detect", "concurrency_upload", "detect_retry_limit",
+                   "audio_len_tail_long", "audio_segment_len", "audio_max_segments", "cloud_asr_max_duration", "cloud_asr_concurrency", "cloud_asr_per_key_concurrency", "cloud_asr_upload_timeout", "cloud_asr_read_timeout", "cloud_asr_long_read_timeout", "concurrency_detect", "concurrency_upload", "detect_retry_limit",
                    "local_model_concurrency"]:
             try:
                 final_conf[k] = int(v)

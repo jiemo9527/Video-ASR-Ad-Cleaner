@@ -124,6 +124,7 @@ Common settings:
 - `api_url`, `api_key`, `api_model`: cloud ASR config.
 - `cloud_asr_api_keys`: newline-separated cloud ASR API key pool. The settings page edits it as one key per row and keeps `api_key` as the first key for compatibility.
 - `cloud_asr_concurrency`: maximum simultaneous cloud ASR requests in the current Flask process. Default is `3`.
+- `cloud_asr_per_key_concurrency`: maximum simultaneous cloud ASR requests per individual API key. Default is `3`. Key pool capacity is `key count x this value`; when that capacity is below `cloud_asr_concurrency`, the effective global limit is degraded to the capacity and the task log records it.
 - `cloud_asr_max_duration`: maximum cloud chunk duration to send to cloud ASR. Default is `60`; longer ASR samples are split into multiple cloud chunks. Set to `0` to disable cloud chunking.
 - `cloud_asr_upload_timeout`: cloud ASR audio upload/connect timeout. Default is `20`.
 - `cloud_asr_read_timeout`: cloud ASR normal recognition read timeout. Default is `120`.
@@ -215,7 +216,7 @@ Segment planning:
 Segment scheduling:
 
 - Metadata and subtitle checks remain synchronous because they are fast and can rename/remux the file before audio starts.
-- Pending audio segments for the same task run concurrently up to available ASR capacity. With cloud ASR enabled, same-task segment workers are capped by `cloud_asr_concurrency`; with cloud disabled, they are capped by `local_model_concurrency`.
+- Pending audio segments for the same task run concurrently up to available ASR capacity. With cloud ASR enabled, same-task segment workers are capped by the effective cloud limit (`min(cloud_asr_concurrency, key count x cloud_asr_per_key_concurrency)`); with cloud disabled, they are capped by `local_model_concurrency`.
 - Local GGUF slots use the same task-priority semantics as cloud slots: earlier audio tasks with waiting local fallback requests get priority for newly freed local inference slots.
 - Cloud ASR slots are task-prioritized. A task that entered audio detection earlier gets priority for newly freed API slots while it has waiting segment requests; later video tasks only use slots that are not currently needed by earlier audio tasks.
 - Segment completion can be out of order. Each passed segment is checkpointed by name and logged as a green light; the task only succeeds after every planned segment is green.
@@ -236,7 +237,7 @@ The log includes the timeout value:
 
 Cloud failure policy:
 
-- Cloud ASR requests are gated by a process-local global limiter. `cloud_asr_concurrency` defaults to `3`. There is no per-key concurrency cap; requests choose keys from `cloud_asr_api_keys` round-robin, falling back to legacy `api_key` when the key pool is empty.
+- Cloud ASR requests are gated by a process-local global limiter. `cloud_asr_concurrency` defaults to `3`. Each individual key is additionally capped by `cloud_asr_per_key_concurrency` (default `3`); requests choose keys from `cloud_asr_api_keys` round-robin while skipping keys already at their per-key cap, falling back to legacy `api_key` when the key pool is empty. When `key count x per-key cap` is below the global limit, the effective limit degrades to that capacity so workers do not park on slots that can never open.
 - Historical SiliconFlow behavior on netcup: real speech FLAC segments above `60s` once returned empty-body `500`, while `60s` returned `200`. A later direct endpoint test on 2026-07-06 showed `61s`, `90s`, `120s`, and `180s` real samples all returned `200`; keep chunking as a stability fallback unless deliberately retuning.
 - `cloud_asr_max_duration` defaults to `60`. Longer ASR samples are split into overlapping cloud chunks of at most this duration; the current overlap is `2s`, implemented by moving the next chunk start earlier, not by exceeding the max chunk duration. Chinese logs should use `云端切块识别`, `块`, and `每块≤60s`. The sample passes cloud detection only after every chunk succeeds and no chunk hits an audio keyword.
 - `detect_retry_limit` is the number of automatic retries after the first attempt, not total attempts. For example, `detect_retry_limit = 1` means two total attempts and logs should show `第1/2次` then `第2/2次`.

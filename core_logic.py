@@ -188,6 +188,25 @@ class ScannerCore:
         except:
             return 3
 
+    def get_cloud_asr_per_key_concurrency(self, config):
+        try:
+            return max(1, int(config.get('cloud_asr_per_key_concurrency', 3)))
+        except:
+            return 3
+
+    def resolve_cloud_asr_limits(self, config, api_keys):
+        # Per-key cap x key count is the real ceiling. Asking for a higher global
+        # limit can never be reached, so degrade the global limit to the true
+        # capacity instead of leaving workers blocked on slots that never open.
+        global_limit = self.get_cloud_asr_concurrency(config)
+        per_key_limit = self.get_cloud_asr_per_key_concurrency(config)
+        key_count = len(api_keys or [])
+        if key_count <= 0:
+            return global_limit, per_key_limit, global_limit
+        capacity = per_key_limit * key_count
+        effective_limit = min(global_limit, capacity)
+        return global_limit, per_key_limit, effective_limit
+
     def get_cloud_api_keys(self, config):
         raw_keys = config.get('cloud_asr_api_keys') or ''
         if isinstance(raw_keys, (list, tuple)):
@@ -264,10 +283,13 @@ class ScannerCore:
                 return False
         return True
 
-    def acquire_cloud_asr_slot(self, api_keys, global_limit):
+    def acquire_cloud_asr_slot(self, api_keys, global_limit, per_key_limit=None):
         if not api_keys:
             raise RuntimeError("云端 API Key 未配置")
         cls = type(self)
+        if per_key_limit is None:
+            per_key_limit = len(api_keys) + global_limit
+        per_key_limit = max(1, int(per_key_limit))
         session_token = getattr(self, 'cloud_asr_session_token', None)
         waited = False
         counted_wait = False
@@ -279,21 +301,33 @@ class ScannerCore:
                 while not self._stopped:
                     has_priority = cls._cloud_asr_session_has_priority(session_token)
                     if has_priority and cls._cloud_asr_active_total < global_limit:
-                        idx = cls._cloud_asr_next_key % len(api_keys)
-                        key = api_keys[idx]
-                        cls._cloud_asr_next_key = (idx + 1) % len(api_keys)
-                        cls._cloud_asr_active_total += 1
-                        cls._cloud_asr_active_by_key[key] = cls._cloud_asr_active_by_key.get(key, 0) + 1
-                        if counted_wait:
-                            cls._cloud_asr_session_waiting[session_token] = max(0, cls._cloud_asr_session_waiting.get(session_token, 0) - 1)
-                            cls._cloud_asr_session_active[session_token] = cls._cloud_asr_session_active.get(session_token, 0) + 1
-                            counted_wait = False
-                        return key
-                    if not waited:
+                        # Round-robin from the next index, but skip keys already at
+                        # their per-key cap so one key cannot absorb every slot.
+                        key = None
+                        total = len(api_keys)
+                        for offset in range(total):
+                            idx = (cls._cloud_asr_next_key + offset) % total
+                            candidate = api_keys[idx]
+                            if cls._cloud_asr_active_by_key.get(candidate, 0) < per_key_limit:
+                                key = candidate
+                                cls._cloud_asr_next_key = (idx + 1) % total
+                                break
+                        if key is not None:
+                            cls._cloud_asr_active_total += 1
+                            cls._cloud_asr_active_by_key[key] = cls._cloud_asr_active_by_key.get(key, 0) + 1
+                            if counted_wait:
+                                cls._cloud_asr_session_waiting[session_token] = max(0, cls._cloud_asr_session_waiting.get(session_token, 0) - 1)
+                                cls._cloud_asr_session_active[session_token] = cls._cloud_asr_session_active.get(session_token, 0) + 1
+                                counted_wait = False
+                            return key
+                        if not waited:
+                            self.log(f"⏳ 等待单 Key 并发释放... (单 Key 上限 {per_key_limit}, Key数 {total})")
+                            waited = True
+                    elif not waited:
                         if has_priority:
-                            self.log(f"⏳ 等待云端模型并发槽... (全局上限 {global_limit}, Key数 {len(api_keys)})")
+                            self.log(f"⏳ 等待云端模型并发槽... (全局上限 {global_limit}, 单 Key 上限 {per_key_limit}, Key数 {len(api_keys)})")
                         else:
-                            self.log(f"⏳ 等待前序音频任务释放云端槽... (全局上限 {global_limit}, Key数 {len(api_keys)})")
+                            self.log(f"⏳ 等待前序音频任务释放云端槽... (全局上限 {global_limit}, 单 Key 上限 {per_key_limit}, Key数 {len(api_keys)})")
                         waited = True
                     cls._cloud_asr_cond.wait(timeout=1)
             finally:
@@ -1042,7 +1076,13 @@ class ScannerCore:
                 read_timeout = self.get_positive_int_config(config, read_timeout_key, read_timeout_default)
                 data = {"model": config.get('api_model'), "language": "zh", "response_format": "json"}
                 api_keys = self.get_cloud_api_keys(config)
-                cloud_global_limit = self.get_cloud_asr_concurrency(config)
+                cloud_global_limit, cloud_per_key_limit, cloud_effective_limit = self.resolve_cloud_asr_limits(config, api_keys)
+                if cloud_effective_limit < cloud_global_limit:
+                    self.log(
+                        f"⚙️ 云端并发自适应: 全局上限 {cloud_global_limit} 超过 Key 池容量 "
+                        f"({len(api_keys)}Key x 单Key{cloud_per_key_limit}={cloud_effective_limit})，本次按 {cloud_effective_limit} 执行"
+                    )
+                cloud_global_limit = cloud_effective_limit
 
                 def submit_cloud_audio(source_audio, label=None, log_request=True):
                     nonlocal cloud_audio
@@ -1060,7 +1100,7 @@ class ScannerCore:
                         if cloud_proxies:
                             self.log("☁️ 云端音频上传代理已启用")
                         self.log(f"☁️ 云端识别中{label_text}... (source={source_type}, timeout=上传{upload_timeout}s/识别{read_timeout}s, size={cloud_size / 1048576:.1f}MB)")
-                    api_key = self.acquire_cloud_asr_slot(api_keys, cloud_global_limit)
+                    api_key = self.acquire_cloud_asr_slot(api_keys, cloud_global_limit, cloud_per_key_limit)
                     if not api_key:
                         raise RuntimeError("云端识别已停止")
                     try:
@@ -1216,7 +1256,9 @@ class ScannerCore:
     def run_audio_pending_tasks(self, file_path, task_id, audio_map, audio_keywords, enable_local, config,
                                 pending, completed, total_segments, progress_pct, checkpoint_cb):
         if config.get('enable_cloud_asr', True):
-            worker_limit = self.get_cloud_asr_concurrency(config)
+            # Spawning more segment workers than the key pool can serve only
+            # parks them on the slot condition, so use the adaptive ceiling.
+            _, _, worker_limit = self.resolve_cloud_asr_limits(config, self.get_cloud_api_keys(config))
         elif enable_local:
             worker_limit = self.get_local_model_concurrency(config)
         else:
