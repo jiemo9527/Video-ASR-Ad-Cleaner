@@ -481,6 +481,19 @@ class ScannerCore:
             self.log("⚠️ 未发现可复制音频流，输出将不包含音频")
         return args
 
+    def get_container_format_name(self, file_path):
+        res = self.run_cmd([
+            'ffprobe', '-v', 'error', '-show_entries', 'format=format_name', '-of',
+            'default=noprint_wrappers=1:nokey=1', file_path
+        ], timeout=30)
+        return (res.stdout or '').strip() if res and res.returncode == 0 else ''
+
+    def get_metadata_remux_muxer(self, format_name, output_path):
+        formats = {part.strip().lower() for part in str(format_name or '').split(',')}
+        if 'matroska' in formats or 'webm' in formats:
+            return 'matroska'
+        return None
+
     def get_subtitle_streams(self, file_path):
         res = self.run_cmd(
             ['ffprobe', '-v', 'error', '-select_streams', 's', '-show_entries',
@@ -931,20 +944,28 @@ class ScannerCore:
             dir_name = os.path.dirname(source);
             name, ext = os.path.splitext(os.path.basename(source))
             output = os.path.join(dir_name, f"{name}_clean_meta{ext}")
+            container_format = self.get_container_format_name(source)
+            output_muxer = self.get_metadata_remux_muxer(container_format, output)
             cmd = ['ffmpeg', '-err_detect', 'ignore_err', '-i', source, '-map', '0:v:0']
             cmd.extend(self.get_safe_audio_map_args(source))
             cmd.extend(['-map', '0:s?', '-c', 'copy', '-dn', '-ignore_unknown', '-strict', '-2', '-map_metadata', '-1',
                    '-metadata', 'title=', '-metadata', 'comment=',
                    '-metadata', 'description=', '-metadata', 'synopsis=',
                    '-metadata', 'artist=', '-metadata', 'album=', '-metadata', 'copyright=',
-                   '-metadata:s', 'title=', '-metadata:s', 'handler_name=',
-                   '-y', output])
+                   '-metadata:s', 'title=', '-metadata:s', 'handler_name='])
+            if output_muxer:
+                self.log(f"ℹ️ 文件扩展名 {ext} 与实际容器 {container_format} 不一致，按 {output_muxer} 重封装")
+                cmd.extend(['-f', output_muxer])
+            cmd.extend(['-y', output])
             res = self.run_cmd(cmd, timeout=300)
             if res and res.returncode == 0 and self.verify_integrity(output):
                 shutil.move(output, source);
                 self.log("✅ 元数据已清洗")
+                return True
             else:
                 if os.path.exists(output): os.remove(output)
+                self.log("⚠️ 元数据清洗失败，保留原文件继续检测")
+        return False
 
     def check_subtitles(self, source, sub_keywords):
         if not sub_keywords: return None
