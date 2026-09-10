@@ -481,6 +481,32 @@ class ScannerCore:
             self.log("⚠️ 未发现可复制音频流，输出将不包含音频")
         return args
 
+    def get_stream_metadata_scan_text(self, probe_data):
+        values = []
+        for stream in (probe_data or {}).get('streams', []):
+            for value in (stream.get('tags') or {}).values():
+                if value is not None:
+                    values.append(str(value))
+        return "\n".join(values)
+
+    def get_stream_metadata_clear_args(self):
+        return [
+            '-metadata:s', 'title=', '-metadata:s', 'handler_name=',
+            '-metadata:s', 'name='
+        ]
+
+    def get_stream_metadata_scan_text_from_file(self, file_path):
+        res = self.run_cmd([
+            'ffprobe', '-v', 'error', '-show_entries', 'stream_tags', '-of', 'json', file_path
+        ], timeout=30)
+        if not res or res.returncode != 0 or not res.stdout:
+            return ''
+        try:
+            return self.get_stream_metadata_scan_text(json.loads(res.stdout))
+        except Exception as e:
+            self.log(f"⚠️ 流元数据解析失败: {e}")
+            return ''
+
     def get_container_format_name(self, file_path):
         res = self.run_cmd([
             'ffprobe', '-v', 'error', '-show_entries', 'format=format_name', '-of',
@@ -926,17 +952,13 @@ class ScannerCore:
         self.log("🧹 [检测] 检查元数据标签...")
         res_format = self.run_cmd(['ffprobe', '-v', 'error', '-show_entries', 'format_tags', '-of', 'csv=p=0', source],
                                   timeout=30)
-        res_stream = self.run_cmd(
-            ['ffprobe', '-v', 'error', '-show_entries', 'stream_tags=language,title,handler_name', '-of', 'csv=p=0',
-             source],
-            timeout=30
-        )
+        stream_scan_text = self.get_stream_metadata_scan_text_from_file(source)
 
         scan_text = ""
         if res_format and res_format.stdout:
             scan_text += res_format.stdout + "\n"
-        if res_stream and res_stream.stdout:
-            scan_text += res_stream.stdout
+        if stream_scan_text:
+            scan_text += stream_scan_text
         hit_words = self.find_keywords(scan_text, meta_keywords)
 
         if hit_words:
@@ -951,8 +973,8 @@ class ScannerCore:
             cmd.extend(['-map', '0:s?', '-c', 'copy', '-dn', '-ignore_unknown', '-strict', '-2', '-map_metadata', '-1',
                    '-metadata', 'title=', '-metadata', 'comment=',
                    '-metadata', 'description=', '-metadata', 'synopsis=',
-                   '-metadata', 'artist=', '-metadata', 'album=', '-metadata', 'copyright=',
-                   '-metadata:s', 'title=', '-metadata:s', 'handler_name='])
+                   '-metadata', 'artist=', '-metadata', 'album=', '-metadata', 'copyright='])
+            cmd.extend(self.get_stream_metadata_clear_args())
             if output_muxer:
                 self.log(f"ℹ️ 文件扩展名 {ext} 与实际容器 {container_format} 不一致，按 {output_muxer} 重封装")
                 cmd.extend(['-f', output_muxer])
