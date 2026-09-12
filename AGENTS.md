@@ -406,9 +406,28 @@ python3 -m py_compile app.py core_logic.py database.py
 python3 -c "from core_logic import ScannerCore; c=ScannerCore(logger_callback=lambda m: None); print(c.get_retry_attempt_label({'current_retry':1,'retry_limit':1})); print(c.get_retry_attempt_label({'current_retry':2,'retry_limit':1}))"
 python3 -c "from core_logic import sensevoice_gguf_ready; print(sensevoice_gguf_ready())"
 python3 -c "import app; ctx=app.app.app_context(); ctx.push(); conf=app.get_final_config(None); print(conf.get('enable_cloud_asr'), conf.get('local_model_concurrency')); ctx.pop()"
-journalctl -u scanner --since "10 minutes ago" --no-pager | grep -E "本地模型资源槽|本地 GGUF 推理资源已释放|本地 GGUF 推理中" | tail -n 80
+grep -E "本地模型资源槽|本地 GGUF 推理资源已释放|本地 GGUF 推理中" scanner.log | tail -n 80
 systemctl restart scanner
 systemctl is-active scanner
+```
+
+### Where Scanner Logs Go
+
+The installer's systemd unit sets `StandardOutput=append:<project>/scanner.log` and
+`StandardError=append:<project>/scanner_error.log`. Everything the app prints —
+task logs, worker messages, startup banners — lands in those files, not in journald.
+
+- Read application output with `scanner.log` / `scanner_error.log`, not `journalctl -u scanner`.
+- `journalctl -u scanner` still shows systemd's own unit events (start, stop, restart, crash),
+  so use it for service lifecycle questions only.
+- A `grep` against `journalctl` that returns nothing is not evidence the code did not run.
+  Confirm in `scanner.log` before concluding a feature is broken.
+- Both files grow without rotation; check size before dumping them whole.
+
+```bash
+cd /www/wwwroot/scanner_web
+tail -n 100 scanner.log
+grep -F "🚫 已丢弃下载任务" scanner.log | tail -n 20
 ```
 
 Do not commit:
@@ -418,6 +437,7 @@ Do not commit:
 - generated `scanner.env`
 - secrets such as `.token_secret`, `.flask_secret`, or `.initial_admin_credentials`
 - runtime DB files
+- runtime logs `scanner.log` and `scanner_error.log`
 - downloaded media
 - model files
 
