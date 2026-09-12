@@ -45,7 +45,10 @@ else:
 app.permanent_session_lifetime = timedelta(days=30)
 
 # ================= 🔧 基础配置 =================
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///tasks.db'
+# SCANNER_DATABASE_URI lets tests point at a scratch DB. It must be read here,
+# before db.init_app() binds the engine; assigning app.config afterwards is too
+# late and silently keeps using the production database.
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('SCANNER_DATABASE_URI', 'sqlite:///tasks.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
 

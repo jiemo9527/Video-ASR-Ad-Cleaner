@@ -8,6 +8,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 TMP_DB = os.path.join(tempfile.gettempdir(), 'scanner_prioritize_test.db')
 
+# This test calls Task.query.delete(). The scratch DB MUST be selected before
+# importing app, because db.init_app() binds the engine at import time and a
+# later app.config assignment silently keeps using the production database.
+# Set unconditionally so an inherited SCANNER_DATABASE_URI cannot redirect a
+# destructive test at production data.
+os.environ['SCANNER_DATABASE_URI'] = 'sqlite:///' + TMP_DB.replace('\\', '/')
+
 import app as scanner  # noqa: E402
 from database import db, Task  # noqa: E402
 
@@ -32,9 +39,16 @@ class PrioritizeEndpointTests(unittest.TestCase):
             os.remove(TMP_DB)
         scanner.app.config['TESTING'] = True
         scanner.app.config['LOGIN_DISABLED'] = True
-        scanner.app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + TMP_DB.replace('\\', '/')
         cls.ctx = scanner.app.app_context()
         cls.ctx.push()
+        # Last line of defence: assert the live engine really points at the
+        # scratch file before any destructive query runs.
+        engine_url = str(db.engine.url)
+        if TMP_DB.replace('\\', '/') not in engine_url:
+            cls.ctx.pop()
+            raise RuntimeError(
+                'Refusing to run destructive tests against %s' % engine_url
+            )
         db.create_all()
 
     @classmethod

@@ -10,6 +10,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 TMP_DB = os.path.join(tempfile.gettempdir(), 'scanner_discard_test.db')
 
+# Bind the scratch DB before importing app; db.init_app() binds at import time.
+# Set unconditionally so an inherited value cannot point tests at production.
+os.environ['SCANNER_DATABASE_URI'] = 'sqlite:///' + TMP_DB.replace('\\', '/')
+
 import app as scanner  # noqa: E402
 from core_logic import is_discarded_download_name  # noqa: E402
 from database import db  # noqa: E402
@@ -44,7 +48,6 @@ class ProxyFilterTests(unittest.TestCase):
             os.remove(TMP_DB)
         scanner.app.config['TESTING'] = True
         scanner.app.config['LOGIN_DISABLED'] = True
-        scanner.app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + TMP_DB.replace('\\', '/')
         cls.ctx = scanner.app.app_context()
         cls.ctx.push()
         db.create_all()
