@@ -406,27 +406,33 @@ python3 -m py_compile app.py core_logic.py database.py
 python3 -c "from core_logic import ScannerCore; c=ScannerCore(logger_callback=lambda m: None); print(c.get_retry_attempt_label({'current_retry':1,'retry_limit':1})); print(c.get_retry_attempt_label({'current_retry':2,'retry_limit':1}))"
 python3 -c "from core_logic import sensevoice_gguf_ready; print(sensevoice_gguf_ready())"
 python3 -c "import app; ctx=app.app.app_context(); ctx.push(); conf=app.get_final_config(None); print(conf.get('enable_cloud_asr'), conf.get('local_model_concurrency')); ctx.pop()"
-grep -E "本地模型资源槽|本地 GGUF 推理资源已释放|本地 GGUF 推理中" scanner.log | tail -n 80
+journalctl -t arup --since "10 minutes ago" --no-pager | grep -E "本地模型资源槽|本地 GGUF 推理资源已释放|本地 GGUF 推理中" | tail -n 80
 systemctl restart scanner
 systemctl is-active scanner
 ```
 
 ### Where Scanner Logs Go
 
-The installer's systemd unit sets `StandardOutput=append:<project>/scanner.log` and
-`StandardError=append:<project>/scanner_error.log`. Everything the app prints —
-task logs, worker messages, startup banners — lands in those files, not in journald.
+Scanner writes to two separate sinks. Pick by message source, not by habit.
 
-- Read application output with `scanner.log` / `scanner_error.log`, not `journalctl -u scanner`.
-- `journalctl -u scanner` still shows systemd's own unit events (start, stop, restart, crash),
-  so use it for service lifecycle questions only.
-- A `grep` against `journalctl` that returns nothing is not evidence the code did not run.
-  Confirm in `scanner.log` before concluding a feature is broken.
-- Both files grow without rotation; check size before dumping them whole.
+- `ScannerCore.log()` sends every task-level message to syslog under the tag `arup`
+  (`core_logic.py`), so it reaches journald. Both `journalctl -t arup` and
+  `journalctl -u scanner` show these; `-t arup` is the precise filter and is what the
+  dashboard's 系统日志 tab uses through `/api/system_logs`.
+- Plain `print()` from `app.py` — worker startup banners, queue recovery, the image/NFO
+  discard notices — goes to stdout, which the installer's unit redirects to
+  `<project>/scanner.log` (`StandardError` to `scanner_error.log`). **These never reach
+  journald at all.** Grepping any `journalctl` invocation for them returns nothing, which
+  is not evidence that the code did not run; confirm in `scanner.log` instead.
+- Task logs embed recognized ASR text, so a keyword grep over journald can match speech
+  content rather than a real log line. Grep for the full emoji-prefixed message when you
+  need certainty.
+- `scanner.log` and `scanner_error.log` grow without rotation; check size before dumping them whole.
 
 ```bash
 cd /www/wwwroot/scanner_web
-tail -n 100 scanner.log
+journalctl -t arup -n 100 --no-pager           # task/detection/ASR logs
+tail -n 100 scanner.log                         # app.py prints, e.g. discard notices
 grep -F "🚫 已丢弃下载任务" scanner.log | tail -n 20
 ```
 
