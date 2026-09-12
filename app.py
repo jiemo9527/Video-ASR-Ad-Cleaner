@@ -17,7 +17,8 @@ from flask import Flask, request, jsonify, render_template, redirect, url_for, s
 from flask_login import LoginManager, login_user, login_required, logout_user, current_user
 from werkzeug.security import check_password_hash, generate_password_hash
 from database import db, Task, Config, Keyword, User
-from core_logic import ScannerCore, sensevoice_gguf_ready, VIDEO_EXTENSIONS, deduplicate_keyword_values, normalize_keyword_identity
+from core_logic import (ScannerCore, sensevoice_gguf_ready, VIDEO_EXTENSIONS, deduplicate_keyword_values,
+                        normalize_keyword_identity, DISCARD_DOWNLOAD_EXTENSIONS, is_discarded_download_name)
 from sqlalchemy import text
 
 app = Flask(__name__)
@@ -663,6 +664,91 @@ def clear_aria2_completed_results():
         print(f'⚠️ 清理 Aria2 已完成记录失败: {e}')
         return {'cleaned': cleaned, 'failed': failed, 'error': str(e)}
     return {'cleaned': cleaned, 'failed': failed, 'error': ''}
+
+
+def get_aria2_task_discard_name(entry):
+    """返回需要丢弃的图片/NFO 文件名；BT 种子任务一律保留。"""
+    if not isinstance(entry, dict):
+        return ''
+    if entry.get('bittorrent'):
+        return ''
+    files = entry.get('files')
+    if not isinstance(files, list) or len(files) != 1:
+        return ''
+    single = files[0] if isinstance(files[0], dict) else {}
+    candidates = [single.get('path') or '']
+    for uri_entry in (single.get('uris') or []):
+        if isinstance(uri_entry, dict) and uri_entry.get('uri'):
+            candidates.append(uri_entry['uri'])
+    for name in candidates:
+        if is_discarded_download_name(name):
+            return os.path.basename(str(name).replace('\\', '/').rstrip('/')) or str(name)
+    return ''
+
+
+def remove_discarded_aria2_files(entry):
+    files = entry.get('files') if isinstance(entry, dict) else None
+    if not isinstance(files, list):
+        return
+    scan_path = os.path.abspath(str(get_final_config(None).get('scan_path') or ''))
+    if not scan_path:
+        return
+    for item in files:
+        path = str((item or {}).get('path') or '') if isinstance(item, dict) else ''
+        if not path or not is_discarded_download_name(path):
+            continue
+        abs_path = os.path.abspath(path)
+        try:
+            if os.path.commonpath([abs_path, scan_path]) != scan_path:
+                continue
+        except ValueError:
+            continue
+        for target in (abs_path, abs_path + '.aria2'):
+            try:
+                if os.path.isfile(target):
+                    os.remove(target)
+            except OSError:
+                pass
+
+
+def discard_unwanted_aria2_downloads():
+    """兜底清理：直连 Aria2 RPC（绕过 Scanner 代理）添加的图片/NFO 下载。"""
+    keys = ['gid', 'status', 'files', 'bittorrent']
+    entries = []
+    entries.extend(call_aria2_rpc('aria2.tellActive', [keys]) or [])
+    entries.extend(call_aria2_rpc('aria2.tellWaiting', [0, 1000, keys]) or [])
+
+    removed = 0
+    for entry in entries:
+        name = get_aria2_task_discard_name(entry)
+        gid = str((entry or {}).get('gid') or '')
+        if not name or not gid:
+            continue
+        try:
+            call_aria2_rpc('aria2.forceRemove', [gid])
+        except RuntimeError as e:
+            print(f"⚠️ 丢弃下载失败 {name}: {e}")
+            continue
+        remove_discarded_aria2_files(entry)
+        try:
+            call_aria2_rpc('aria2.removeDownloadResult', [gid])
+        except RuntimeError:
+            pass
+        removed += 1
+        print(f"🚫 已丢弃下载任务（图片/NFO）: {name}")
+    return removed
+
+
+def discard_download_worker():
+    while True:
+        try:
+            with app.app_context():
+                discard_unwanted_aria2_downloads()
+        except RuntimeError:
+            pass
+        except Exception as e:
+            print(f"⚠️ 丢弃下载兜底扫描失败: {e}")
+        time.sleep(5)
 
 
 def get_next_persistent_id():
@@ -1578,6 +1664,110 @@ def get_scanner_api_token():
     return str(token or '')
 
 
+def strip_aria2_rpc_token(params):
+    if not isinstance(params, list):
+        return []
+    if params and isinstance(params[0], str) and params[0].startswith('token:'):
+        return params[1:]
+    return params
+
+
+def get_discarded_download_name(method, params):
+    # 只拦截单文件 URI 下载请求；BT/Metalink 种子任务保持原样。
+    if method != 'aria2.addUri':
+        return ''
+    args = strip_aria2_rpc_token(params)
+    uris = next((item for item in args if isinstance(item, list)), [])
+    options = next((item for item in args if isinstance(item, dict)), {})
+    out_name = str(options.get('out') or '').strip()
+    if out_name:
+        return out_name if is_discarded_download_name(out_name) else ''
+    uri_names = [str(uri) for uri in uris if isinstance(uri, str) and uri.strip()]
+    if not uri_names or not all(is_discarded_download_name(uri) for uri in uri_names):
+        return ''
+    return uri_names[0]
+
+
+def make_fake_gid():
+    return secrets.token_hex(8)
+
+
+def plan_aria2_rpc_command(command):
+    """决定单条 RPC 命令是转发、丢弃，还是部分丢弃（system.multicall）。"""
+    plan = {'forward': command, 'gid': '', 'multicall': None}
+    if not isinstance(command, dict):
+        return plan
+
+    method = command.get('method')
+    if method == 'system.multicall':
+        args = strip_aria2_rpc_token(command.get('params'))
+        inner_calls = args[0] if args and isinstance(args[0], list) else None
+        if not inner_calls:
+            return plan
+        kept = []
+        placeholders = {}
+        for index, call in enumerate(inner_calls):
+            if not isinstance(call, dict):
+                kept.append((index, call))
+                continue
+            name = get_discarded_download_name(call.get('methodName'), call.get('params'))
+            if name:
+                placeholders[index] = make_fake_gid()
+                print(f"🚫 已丢弃下载请求（图片/NFO）: {name}")
+            else:
+                kept.append((index, call))
+        if not placeholders:
+            return plan
+        plan['multicall'] = {
+            'total': len(inner_calls),
+            'kept_indices': [index for index, _ in kept],
+            'placeholders': placeholders
+        }
+        if not kept:
+            plan['forward'] = None
+        else:
+            reduced = dict(command)
+            reduced['params'] = [[call for _, call in kept]]
+            plan['forward'] = reduced
+        return plan
+
+    name = get_discarded_download_name(method, command.get('params'))
+    if name:
+        print(f"🚫 已丢弃下载请求（图片/NFO）: {name}")
+        plan['forward'] = None
+        plan['gid'] = make_fake_gid()
+    return plan
+
+
+def build_local_rpc_response(command, plan):
+    command_id = command.get('id') if isinstance(command, dict) else None
+    multicall = plan.get('multicall')
+    if multicall and plan.get('forward') is None:
+        result = [[multicall['placeholders'][index]] for index in range(multicall['total'])]
+    else:
+        result = plan.get('gid') or make_fake_gid()
+    return {'jsonrpc': '2.0', 'id': command_id, 'result': result}
+
+
+def merge_multicall_result(plan, response_item):
+    multicall = plan.get('multicall')
+    if not multicall or not isinstance(response_item, dict) or 'result' not in response_item:
+        return response_item
+    upstream = response_item.get('result')
+    if not isinstance(upstream, list):
+        return response_item
+    merged = []
+    upstream_iter = iter(upstream)
+    for index in range(multicall['total']):
+        if index in multicall['placeholders']:
+            merged.append([multicall['placeholders'][index]])
+        else:
+            merged.append(next(upstream_iter, [None]))
+    response_item = dict(response_item)
+    response_item['result'] = merged
+    return response_item
+
+
 @app.route('/api/aria2/jsonrpc', methods=['POST'])
 @login_required
 def aria2_jsonrpc_proxy():
@@ -1586,19 +1776,60 @@ def aria2_jsonrpc_proxy():
         return jsonify({'code': 400, 'msg': 'Aria2 RPC 请求格式无效'}), 400
 
     port, secret = get_aria2_rpc_config()
-    commands = payload if isinstance(payload, list) else [payload]
-    for command in commands:
+    is_batch = isinstance(payload, list)
+    commands = payload if is_batch else [payload]
+
+    plans = [plan_aria2_rpc_command(command) for command in commands]
+    filtered = any(plan['forward'] is not commands[index] for index, plan in enumerate(plans))
+    forward_commands = [plan['forward'] for plan in plans if plan['forward'] is not None]
+
+    if not forward_commands:
+        responses = [build_local_rpc_response(command, plan) for command, plan in zip(commands, plans)]
+        return jsonify(responses if is_batch else responses[0])
+
+    for command in forward_commands:
         add_aria2_rpc_token(command, secret)
+    forward_payload = forward_commands if is_batch else forward_commands[0]
 
     try:
         response = requests.post(
-            f'http://127.0.0.1:{port}/jsonrpc', json=payload, timeout=(3, 30)
+            f'http://127.0.0.1:{port}/jsonrpc', json=forward_payload, timeout=(3, 30)
         )
     except requests.RequestException:
         return jsonify({'code': 502, 'msg': '无法连接本机 Aria2 RPC'}), 502
-    return response.content, response.status_code, {
-        'Content-Type': response.headers.get('Content-Type', 'application/json')
-    }
+
+    if not filtered:
+        return response.content, response.status_code, {
+            'Content-Type': response.headers.get('Content-Type', 'application/json')
+        }
+
+    try:
+        upstream = response.json()
+    except ValueError:
+        return response.content, response.status_code, {
+            'Content-Type': response.headers.get('Content-Type', 'application/json')
+        }
+
+    upstream_items = upstream if isinstance(upstream, list) else [upstream]
+    by_id = {}
+    for item in upstream_items:
+        if isinstance(item, dict) and item.get('id') is not None:
+            by_id[str(item['id'])] = item
+
+    merged = []
+    position = 0
+    for command, plan in zip(commands, plans):
+        if plan['forward'] is None:
+            merged.append(build_local_rpc_response(command, plan))
+            continue
+        command_id = plan['forward'].get('id') if isinstance(plan['forward'], dict) else None
+        item = by_id.get(str(command_id)) if command_id is not None else None
+        if item is None:
+            item = upstream_items[position] if position < len(upstream_items) else {}
+        position += 1
+        merged.append(merge_multicall_result(plan, item))
+
+    return jsonify(merged if is_batch else merged[0]), response.status_code
 
 
 @app.route('/settings_page')
@@ -2422,4 +2653,5 @@ if __name__ == '__main__':
     for _ in range(n_d): threading.Thread(target=detection_worker, daemon=True).start()
     for _ in range(n_u): threading.Thread(target=upload_worker, daemon=True).start()
     threading.Thread(target=orphan_reconcile_worker, daemon=True).start()
+    threading.Thread(target=discard_download_worker, daemon=True).start()
     app.run(host='0.0.0.0', port=int(os.environ.get('SCANNER_PORT', '5000')))

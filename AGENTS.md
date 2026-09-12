@@ -70,6 +70,14 @@ AriaNg download manager:
 - When the optional Nginx HTTPS configuration finds `enable-rpc=true` and a non-empty `rpc-secret` in the Aria2 config, it exposes direct external RPC at `wss://<domain>/jsonrpc`. It proxies only to local Aria2. The installer prints the generated secret once after installation; never log or otherwise expose it.
 - External clients use the Nginx direct route at `https://<domain>/jsonrpc` or `wss://<domain>/jsonrpc` on port `443` with their existing Aria2 `rpc-secret`. The legacy `/aria2/jsonrpc` route remains accepted. This route must not depend on Scanner login or `X-API-Token`. Never derive, print, or inject the Aria2 secret into browser code.
 
+Image/NFO download rejection:
+
+- `DISCARD_DOWNLOAD_EXTENSIONS` and `is_discarded_download_name()` in `core_logic.py` are the single source of truth (images plus `.nfo`). They are hardcoded constants and must not be exposed on the settings page.
+- `/api/aria2/jsonrpc` filters `aria2.addUri` requests whose `out` option (preferred) or, without `out`, every URI resolves to a discarded extension. The proxy never forwards them and answers with a synthetic GID so AriaNg stays consistent. `system.multicall` is filtered per inner call and the merged reply keeps the original call order and length.
+- `aria2.addTorrent` / `aria2.addMetalink` and multi-file tasks are never filtered; a torrent that contains images keeps all its files.
+- `discard_download_worker()` polls `aria2.tellActive` / `aria2.tellWaiting` every 5s as the fallback for downloads added through the Nginx direct RPC route. It force-removes matching single-file non-torrent tasks, deletes the partial file and `.aria2` control file only inside `scan_path`, and removes the download result.
+- Tests live in `tests/test_discard_downloads.py`.
+
 ## Installer And Nginx
 
 - `app.py` reads `SCANNER_PORT` with a default of `5000`. The installer writes the chosen port to the installed project's `scanner.env`; systemd reads it through `EnvironmentFile`, and `trigger.sh` reads the same file for its local callback URL.

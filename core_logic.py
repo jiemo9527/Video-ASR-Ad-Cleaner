@@ -74,6 +74,27 @@ VIDEO_EXTENSIONS = {
     '.3gp', '.rmvb', '.dat', '.asf', '.divx'
 }
 
+# 通过 RPC 进来的单文件下载请求中，这些类型直接丢弃（图片与 NFO 刮削文件）。
+# 固定常量，不通过设置页暴露。
+DISCARD_DOWNLOAD_EXTENSIONS = {
+    '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tbn',
+    '.tif', '.tiff', '.svg', '.ico', '.heic', '.heif', '.avif',
+    '.nfo'
+}
+
+
+def is_discarded_download_name(name):
+    """文件名是否属于需要丢弃的图片/NFO 类型。"""
+    if not name:
+        return False
+    cleaned = str(name).strip().strip('"\'')
+    cleaned = cleaned.split('?', 1)[0].split('#', 1)[0]
+    cleaned = cleaned.replace('\\', '/').rstrip('/')
+    cleaned = cleaned.rsplit('/', 1)[-1]
+    if not cleaned:
+        return False
+    return os.path.splitext(cleaned)[1].lower() in DISCARD_DOWNLOAD_EXTENSIONS
+
 
 # ===================================================
 
