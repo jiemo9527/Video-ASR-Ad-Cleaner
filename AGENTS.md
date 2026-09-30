@@ -52,12 +52,11 @@ Task lifecycle:
 
 Upload destination override:
 
-- The upload queue toolbar can batch-set an explicit `upload_remote` for incomplete upload tasks.
-- The one-time `修改remote` action changes only the task override; it does not move local files.
+- The one-time batch `修改remote` action and its `/api/tasks/batch_upload_remote` endpoint were removed; remote hijack is the only toolbar way to redirect uploads.
 - Batch queue actions support selected task IDs; with no selection, they retain their all-task behavior.
-- The override is stored in task overrides and takes precedence over the default `rclone_remote` only for that task.
+- A per-task `upload_remote` is stored in task overrides and takes precedence over the default `rclone_remote` only for that task. It does not move local files.
 - Running uploads keep the destination they already started with; the override applies when they are retried.
-- The upload toolbar also has global `upload_remote_hijack_enabled` and `upload_remote_hijack_remote` settings. When enabled, tasks newly entering `upload_queue` and upload retries are assigned that remote; existing pending and running uploads are unchanged.
+- The dashboard header has global `upload_remote_hijack_enabled`, `upload_remote_hijack_remote` and `upload_remote_hijack_candidates` (newline-separated) settings, served by `/api/upload_remote_hijack`. The remote is picked from a candidate dropdown: `+` adds and switches to a custom remote, `−` removes the selected candidate, and every change saves immediately. When enabled, tasks newly entering `upload_queue` and upload retries are assigned that remote; existing pending and running uploads are unchanged. Tests live in `tests/test_upload_remote_hijack.py`.
 
 AriaNg download manager:
 

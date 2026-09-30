@@ -257,7 +257,7 @@ def get_final_config(overrides_json=None):
         "cloud_asr_per_key_concurrency": 3,
         "cloud_asr_upload_timeout": 20, "cloud_asr_read_timeout": 120, "cloud_asr_long_read_timeout": 180,
         "scan_path": "/root/downloads", "rclone_remote": "s25", "upload_remote_hijack_enabled": False,
-        "upload_remote_hijack_remote": "", "api_token": "8pUoqOTHhEAhRnacl3c19",
+        "upload_remote_hijack_remote": "", "upload_remote_hijack_candidates": "", "api_token": "8pUoqOTHhEAhRnacl3c19",
         "notify_upload_success": False, "notify_errors": True,
         "cleanup_scanner_history": True,
         "cleanup_scanner_uploaded": True, "cleanup_scanner_dirty": True,
@@ -424,10 +424,13 @@ def is_upload_task(task, overrides=None):
     return False
 
 
+REMOTE_NAME_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]*')
+
+
 def apply_upload_remote_hijack(task, source):
     config = get_final_config(None)
     remote = str(config.get('upload_remote_hijack_remote') or '').strip().rstrip(':')
-    if not config.get('upload_remote_hijack_enabled') or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', remote):
+    if not config.get('upload_remote_hijack_enabled') or not REMOTE_NAME_RE.fullmatch(remote):
         return False
     overrides = get_task_overrides(task)
     if overrides.get('upload_remote') == remote:
@@ -2085,64 +2088,48 @@ def prioritize_tasks():
     return jsonify({"code": 200, "msg": msg, "count": len(moved)})
 
 
+def normalize_remote_candidates(values):
+    candidates = []
+    for value in values or []:
+        remote = str(value or '').strip().rstrip(':')
+        if REMOTE_NAME_RE.fullmatch(remote) and remote not in candidates:
+            candidates.append(remote)
+    return candidates
+
+
 @app.route('/api/upload_remote_hijack', methods=['GET', 'POST'])
 @login_required
 def upload_remote_hijack():
     if request.method == 'GET':
         config = get_final_config(None)
+        remote = str(config.get('upload_remote_hijack_remote') or '')
+        candidates = str(config.get('upload_remote_hijack_candidates') or '').split('\n')
         return jsonify({
             'enabled': bool(config.get('upload_remote_hijack_enabled')),
-            'remote': str(config.get('upload_remote_hijack_remote') or '')
+            'remote': remote,
+            'candidates': normalize_remote_candidates(candidates + [remote])
         })
 
     data = request.get_json(silent=True) or {}
     enabled = data.get('enabled') is True or str(data.get('enabled')).lower() == 'true'
     remote = str(data.get('remote') or '').strip().rstrip(':')
-    if enabled and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', remote):
-        return jsonify({'code': 400, 'msg': '开启远端劫持时必须填写有效 remote 名'}), 400
-    if remote and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', remote):
+    if enabled and not REMOTE_NAME_RE.fullmatch(remote):
+        return jsonify({'code': 400, 'msg': '开启远端劫持时必须选择有效 remote 名'}), 400
+    if remote and not REMOTE_NAME_RE.fullmatch(remote):
         return jsonify({'code': 400, 'msg': '远端名只能包含字母、数字、下划线和连字符'}), 400
+    candidates = normalize_remote_candidates(list(data.get('candidates') or []) + [remote])
 
     for key, value in {
         'upload_remote_hijack_enabled': 'true' if enabled else 'false',
-        'upload_remote_hijack_remote': remote
+        'upload_remote_hijack_remote': remote,
+        'upload_remote_hijack_candidates': '\n'.join(candidates)
     }.items():
         config = Config.query.get(key) or Config(key=key)
         config.value = value
         db.session.add(config)
     db.session.commit()
-    state = f'已开启，目标 {remote}:' if enabled else '已关闭'
-    return jsonify({'code': 200, 'msg': f'远端劫持{state}'})
-
-
-@app.route('/api/tasks/batch_upload_remote', methods=['POST'])
-@login_required
-def batch_upload_remote():
-    data = request.json or {}
-    remote = str(data.get('remote') or '').strip().rstrip(':')
-    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', remote):
-        return jsonify({"code": 400, "msg": "远端名只能包含字母、数字、下划线和连字符"})
-
-    count = 0
-    active_count = 0
-    for task in get_batch_task_list(data):
-        ov = get_task_overrides(task)
-        if task.status not in ['pending_upload', 'uploading', 'error', 'cancelled'] or not is_upload_task(task, ov):
-            continue
-        ov['upload_remote'] = remote
-        set_task_overrides(task, ov)
-        if task.status == 'uploading':
-            task.log = (task.log or '') + f"\n=== 一次性修改 remote: {remote}: (上传中，下次重试生效) ===\n"
-            active_count += 1
-        else:
-            task.log = (task.log or '') + f"\n=== 一次性修改 remote: {remote}: ===\n"
-        count += 1
-
-    db.session.commit()
-    msg = f"已一次性修改 {count} 个未完成上传任务到 {remote}:"
-    if active_count:
-        msg += f"；{active_count} 个上传中任务将在下次重试时切换"
-    return jsonify({"code": 200, "msg": msg})
+    state = f'已开启，目标 {remote}:' if enabled else (f'已关闭，目标 {remote}:' if remote else '已关闭')
+    return jsonify({'code': 200, 'msg': f'远端劫持{state}', 'candidates': candidates})
 
 
 @app.route('/api/retry/<int:tid>', methods=['POST'])

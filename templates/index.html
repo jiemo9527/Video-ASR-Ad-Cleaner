@@ -41,9 +41,8 @@
         .dashboard-header-main { gap: .35rem !important; }
         .dashboard-top-controls { gap: .25rem !important; }
         .dashboard-header .btn { border-radius: .5rem; padding-left: .5rem !important; padding-right: .5rem !important; }
-        .batch-upload-remote { width: 230px !important; }
-        .upload-hijack-remote { width: 180px !important; }
-        .dashboard-header .input-group > .form-control { border-radius: .5rem 0 0 .5rem; }
+        .upload-hijack-remote { width: 230px !important; }
+        .dashboard-header .input-group > .form-control, .dashboard-header .input-group > .form-select { border-radius: .5rem 0 0 .5rem; }
         .dashboard-header .input-group > .btn { border-radius: 0 .5rem .5rem 0; }
         .dashboard-actions .btn { padding-top: 0; padding-bottom: 0; }
         .dashboard-actions { display: flex; flex: 0 0 100%; align-items: center; justify-content: flex-end; flex-wrap: nowrap; gap: .5rem; }
@@ -94,13 +93,20 @@
             </h4>
             <div class="dashboard-top-controls d-flex flex-wrap align-items-center gap-2">
                 <span class="badge bg-light text-muted border px-2 py-1 font-monospace" title="服务器出口 IP 已隐匿"><i class="bi bi-hdd-network text-secondary"></i> 节点: {{ server_ip }}</span>
-                <div class="batch-upload-remote input-group input-group-sm">
-                    <input class="form-control font-monospace" v-model.trim="batchUploadRemote" placeholder="remote" title="一次性修改 remote">
-                    <button class="btn btn-outline-success" :disabled="!batchUploadRemote" @click="updateBatchUploadRemote"><i class="bi bi-folder-symlink me-1"></i>修改remote</button>
-                </div>
-                <div class="upload-hijack-remote input-group input-group-sm">
-                    <input class="form-control font-monospace" v-model.trim="uploadHijackRemote" placeholder="remote" title="劫持目标 remote">
-                    <button class="btn btn-outline-primary" @click="saveUploadRemoteHijack">保存劫持</button>
+                <div class="upload-hijack-remote input-group input-group-sm" title="劫持目标 remote">
+                    <template v-if="addingHijackRemote">
+                        <input class="form-control font-monospace" v-model.trim="newHijackRemote" placeholder="自定义 remote" @keyup.enter="addHijackRemote" @keyup.esc="addingHijackRemote=false">
+                        <button class="btn btn-outline-primary" :disabled="!newHijackRemote" @click="addHijackRemote" title="添加并切换"><i class="bi bi-check-lg"></i></button>
+                        <button class="btn btn-outline-secondary" @click="addingHijackRemote=false" title="取消"><i class="bi bi-x-lg"></i></button>
+                    </template>
+                    <template v-else>
+                        <select class="form-select font-monospace" v-model="uploadHijackRemote" @change="saveUploadRemoteHijack">
+                            <option value="" disabled>选择 remote</option>
+                            <option v-for="r in uploadHijackCandidates" :key="r" :value="r">[[ r ]]:</option>
+                        </select>
+                        <button class="btn btn-outline-primary" @click="newHijackRemote=''; addingHijackRemote=true" title="添加自定义 remote"><i class="bi bi-plus-lg"></i></button>
+                        <button class="btn btn-outline-danger" :disabled="!uploadHijackRemote" @click="removeHijackRemote" title="删除当前候选"><i class="bi bi-dash-lg"></i></button>
+                    </template>
                 </div>
                 <div class="form-check form-switch mb-0" title="仅劫持检测通过后新进入上传队列或上传重试的任务">
                     <input class="form-check-input" type="checkbox" id="uploadHijackEnabled" v-model="uploadHijackEnabled" @change="saveUploadRemoteHijack">
@@ -244,7 +250,7 @@
 let modalConfig, modalLog, modalConfirm, toastInstance;
 Vue.createApp({
     delimiters: ['[[', ']]'],
-    data(){ return { tasks:[], view:'detect', curTask:{}, sysLogs:'', sysLogFilter:'', autoRefreshLogs:true, currentLogTitle:'', currentLogContent:'', batchUploadRemote:'', uploadHijackRemote:'', uploadHijackEnabled:false, ariaNgOptionsImport:'', selectedTaskIds:[], aria2Stats:{active:0, waiting:0, stopped:0, downloadSpeed:0}, statusText:{'pending':'⏳ 等待中','processing':'🔄 检测中','pending_upload':'✅ 待上传','uploading':'☁️ 上传中','uploaded':'🎉 已完成','dirty':'🚫 已拦截','error':'❌ 出错了','cancelled':'⏹ 已停止'}, toastMsg:'', toastClass:'bg-primary', toastIcon:'bi-info-circle', confirmMsg:'', confirmCallback:null, pollTimer: null }},
+    data(){ return { tasks:[], view:'detect', curTask:{}, sysLogs:'', sysLogFilter:'', autoRefreshLogs:true, currentLogTitle:'', currentLogContent:'', uploadHijackRemote:'', uploadHijackCandidates:[], newHijackRemote:'', addingHijackRemote:false, uploadHijackEnabled:false, ariaNgOptionsImport:'', selectedTaskIds:[], aria2Stats:{active:0, waiting:0, stopped:0, downloadSpeed:0}, statusText:{'pending':'⏳ 等待中','processing':'🔄 检测中','pending_upload':'✅ 待上传','uploading':'☁️ 上传中','uploaded':'🎉 已完成','dirty':'🚫 已拦截','error':'❌ 出错了','cancelled':'⏹ 已停止'}, toastMsg:'', toastClass:'bg-primary', toastIcon:'bi-info-circle', confirmMsg:'', confirmCallback:null, pollTimer: null }},
     computed: {
         filteredSystemLogs() { if(!this.sysLogs)return[]; const l=this.sysLogs.split('\n'); if(!this.sysLogFilter.trim())return l; const k=this.sysLogFilter.toLowerCase(); return l.filter(x=>x.toLowerCase().includes(k)) },
         detectTasks() { return this.tasks.filter(t => !this.isUploadTask(t)) },
@@ -370,17 +376,45 @@ Vue.createApp({
             return axios.get('/api/upload_remote_hijack').then(r=>{
                 this.uploadHijackEnabled=Boolean(r.data.enabled);
                 this.uploadHijackRemote=String(r.data.remote||'');
+                this.uploadHijackCandidates=Array.isArray(r.data.candidates) ? r.data.candidates : [];
             });
         },
 
         saveUploadRemoteHijack(){
-            const remote=this.uploadHijackRemote.replace(/:$/, '').trim();
-            return axios.post('/api/upload_remote_hijack', {enabled:this.uploadHijackEnabled, remote}).then(r=>{
-                this.uploadHijackRemote=remote;
+            const remote=this.uploadHijackRemote;
+            if(this.uploadHijackEnabled && !remote){
+                this.uploadHijackEnabled=false;
+                this.showToast('请先添加并选择 remote','error');
+                return Promise.resolve();
+            }
+            return axios.post('/api/upload_remote_hijack', {enabled:this.uploadHijackEnabled, remote, candidates:this.uploadHijackCandidates}).then(r=>{
+                this.uploadHijackCandidates=r.data.candidates || this.uploadHijackCandidates;
                 this.showToast(r.data.msg);
             }).catch(e=>{
                 this.showToast(e.response?.data?.msg || '远端劫持保存失败','error');
                 this.loadUploadRemoteHijack();
+            });
+        },
+
+        addHijackRemote(){
+            const remote=this.newHijackRemote.replace(/:$/, '').trim();
+            if(!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(remote)){
+                this.showToast('远端名只能包含字母、数字、下划线和连字符','error');
+                return;
+            }
+            if(!this.uploadHijackCandidates.includes(remote)) this.uploadHijackCandidates.push(remote);
+            this.uploadHijackRemote=remote;
+            this.addingHijackRemote=false;
+            this.saveUploadRemoteHijack();
+        },
+
+        removeHijackRemote(){
+            const remote=this.uploadHijackRemote;
+            this.confirmAction(`确定从候选中删除【${remote}:】吗？`, () => {
+                this.uploadHijackCandidates=this.uploadHijackCandidates.filter(r=>r!==remote);
+                this.uploadHijackRemote=this.uploadHijackCandidates[0] || '';
+                if(!this.uploadHijackRemote) this.uploadHijackEnabled=false;
+                this.saveUploadRemoteHijack();
             });
         },
 
@@ -469,21 +503,6 @@ Vue.createApp({
         clearHistory(){ axios.post('/api/tasks/clear').then(r=>{ this.showToast(r.data.msg); this.load(); this.loadAria2Stats() }).catch(e=>this.showToast(e.response?.data?.msg || '清空历史失败','error')) },
         openConfig(t){ this.curTask=JSON.parse(JSON.stringify(t)); modalConfig.show() },
         saveAndRetry(){ axios.post(`/api/task/${this.curTask.id}/save_and_retry`,this.curTask.config).then(()=>{ modalConfig.hide(); this.load(); this.showToast('策略更新') }) },
-
-        updateBatchUploadRemote() {
-            const remote = this.batchUploadRemote.replace(/:$/, '').trim();
-            if(!remote) return;
-            const ids = this.selectedIds('upload');
-            const scope = ids.length ? `选中的 ${ids.length} 个` : '全部';
-            this.confirmAction(`确定一次性将${scope}未完成上传任务的 remote 修改为【${remote}:】吗？\n上传中的任务不会中断，将在下次重试时切换。`, () => {
-                axios.post('/api/tasks/batch_upload_remote', {remote, ...(ids.length ? {ids} : {})}).then(res => {
-                    this.batchUploadRemote = remote;
-                    this.clearSelection('upload');
-                    this.showToast(res.data.msg);
-                    this.load();
-                }).catch(e => this.showToast(e.response?.data?.msg || '修改失败', 'error'));
-            });
-        },
 
         batchAction(type, action) {
             const actName = action==='retry'?'重试':'停止';
