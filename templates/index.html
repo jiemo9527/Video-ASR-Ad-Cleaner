@@ -131,7 +131,7 @@
 
             <div class="d-flex align-items-center gap-1">
                 <button class="btn btn-sm d-md-none" :class="uploadHijackEnabled ? 'btn-primary' : 'btn-outline-secondary'" @click="showHijackPanel=!showHijackPanel" title="上传劫持"><span class="hijack-state">[[ uploadHijackEnabled ? uploadHijackRemote + ':' : '劫持' ]]</span></button>
-                <button class="btn btn-sm btn-outline-danger" @click="confirmAction('确定按“设置 > 清理”中已启用的项目清空历史吗？\n下载器异常记录和本地文件会保留，此操作不可恢复。', () => clearHistory())" title="清空历史（队列页快速连按两下空格可直接清空）"><i class="bi bi-trash"></i><span class="d-none d-lg-inline ms-1">清空历史</span></button>
+                <button class="btn btn-sm btn-outline-danger" @click="confirmAction('确定按“设置 > 清理”中已启用的项目清空历史吗？\n下载器异常记录和本地文件会保留，此操作不可恢复。', () => clearHistory())" title="清空历史（队列页、下载器页快速连按两下空格可直接清空）"><i class="bi bi-trash"></i><span class="d-none d-lg-inline ms-1">清空历史</span></button>
                 <a href="/settings_page" class="btn btn-sm btn-outline-secondary" title="设置"><i class="bi bi-gear-fill"></i><span class="d-none d-lg-inline ms-1">设置</span></a>
                 <a href="/logout" class="btn btn-sm btn-outline-danger" title="退出登录"><i class="bi bi-box-arrow-right"></i></a>
             </div>
@@ -283,7 +283,7 @@
             <div v-show="view==='aria2'" class="p-2 p-md-3 bg-light">
                 <div class="aria-ng-toolbar d-flex justify-content-between align-items-center mb-2"><span class="fw-bold text-primary"><i class="bi bi-download me-1"></i>Aria2 下载器</span><a href="{{ url_for('aria_ng_launcher') }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary"><i class="bi bi-box-arrow-up-right me-1"></i>新窗口</a></div>
                 {% if aria_ng_available %}
-                <iframe id="ariaNgFrame" class="aria-ng-frame" src="{{ url_for('aria_ng_launcher') }}" title="AriaNg 下载器"></iframe>
+                <iframe id="ariaNgFrame" class="aria-ng-frame" src="{{ url_for('aria_ng_launcher') }}" title="AriaNg 下载器" @load="attachFrameHotkey"></iframe>
                 <details class="aria-ng-options-import mt-2 border rounded bg-white">
                     <summary class="small fw-bold px-2 py-1"><i class="bi bi-box-arrow-in-down me-1"></i>导入 AriaNg 设置</summary>
                     <div class="p-2 border-top">
@@ -355,6 +355,7 @@ Vue.createApp({
         modalConfirm=new bootstrap.Modal(document.getElementById('confirmModal'));
         toastInstance=new bootstrap.Toast(document.getElementById('liveToast'));
         window.addEventListener('keydown', this.onQueueHotkey);
+        this.attachFrameHotkey();
     },
     watch: { filterText() { this.pruneSelection() }, view(n) { if(n==='syslog') { if(!this.sysLogs)this.loadSysLogs(); this.$nextTick(()=>{ const b=document.getElementById('sysLogBox'); if(b)b.scrollTop=b.scrollHeight }) } if(n==='aria2')this.loadAria2Stats() } },
     methods:{
@@ -625,15 +626,27 @@ Vue.createApp({
         doubleSample(id){ axios.post(`/api/task/${id}/double_sample`).then(()=>{ this.load(); this.showToast('已切换动态抽样') }).catch(e=>this.showToast(e.response?.data?.msg || '切换失败','error')) },
         directUpload(id){ axios.post(`/api/task/${id}/direct_upload`).then(()=>{ this.load(); this.showToast('切换直传') }) },
         deleteTask(id){ axios.post(`/api/task/${id}/delete`).then(r=>{ this.showToast(r.data.msg); this.load() }).catch(e=>this.showToast(e.response?.data?.msg || '删除失败','error')) },
-        // 队列页快速连按两下空格：直接按“设置 > 清理”清空历史，跳过确认框
+        // 下载器是同源 iframe，焦点在其中时按键不会冒泡到外层，需要在框架内也挂监听（每次加载后重挂）
+        attachFrameHotkey(){
+            const frame=document.getElementById('ariaNgFrame');
+            try {
+                const win=frame && frame.contentWindow;
+                if(!win || win.__scannerHotkey) return;
+                win.addEventListener('keydown', this.onQueueHotkey);
+                win.__scannerHotkey=true;
+            } catch (_) {}
+        },
+        // 队列页与下载器页快速连按两下空格：直接按“设置 > 清理”清空历史，跳过确认框
         onQueueHotkey(e){
             if(e.code !== 'Space' && e.key !== ' ') return;
-            if(!['detect','upload'].includes(this.view) || e.repeat || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+            if(!['detect','upload','aria2'].includes(this.view) || e.repeat || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
             const el=e.target;
             if(el && (el.isContentEditable || ['INPUT','TEXTAREA','SELECT'].includes(el.tagName) && !(el.type === 'checkbox'))) return;
             if(document.querySelector('.modal.show, .dropdown-menu.show')) return;
+            const frameDoc=(() => { try { return document.getElementById('ariaNgFrame')?.contentDocument; } catch (_) { return null; } })();
+            if(frameDoc && frameDoc.querySelector('.modal.in, .modal.show, .open > .dropdown-menu, .dropdown-menu.show')) return;
             e.preventDefault();
-            if(el && typeof el.blur === 'function' && el !== document.body) el.blur();
+            if(el && typeof el.blur === 'function' && el !== (el.ownerDocument && el.ownerDocument.body)) el.blur();
             const now=Date.now();
             if(now - this.lastSpaceAt < 400){
                 this.lastSpaceAt=0;
