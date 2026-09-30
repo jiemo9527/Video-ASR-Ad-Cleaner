@@ -16,7 +16,7 @@
         .task-log-box {
             height: 50px; overflow-y: hidden; background: #212529; color: #28a745;
             font-family: 'Consolas', monospace; font-size: 11px; padding: 5px 8px;
-            border-radius: 4px; cursor: zoom-in; position: relative; line-height: 1.3;
+            border-radius: .6rem; cursor: zoom-in; position: relative; line-height: 1.3;
         }
         .task-log-box:hover { background: #2c3034; }
         .sys-log-box {
@@ -39,7 +39,18 @@
         .aria-ng-options-import textarea { min-height: 64px; resize: vertical; font-size: .78rem; }
 
         /* 顶部栏 */
-        .dash-header { background: #fff; border: 1px solid #e5e7eb; border-radius: .75rem; padding: .5rem .75rem; }
+        .dash-header { background: #fff; border: 1px solid #e5e7eb; border-radius: 1rem; padding: .55rem .8rem; box-shadow: 0 1px 3px rgba(0,0,0,.04); }
+
+        /* 圆润外观 */
+        .btn, .form-control, .form-select, .input-group-text { border-radius: .6rem; }
+        .btn-sm, .form-control-sm, .form-select-sm, .input-group-sm > .form-control, .input-group-sm > .form-select, .input-group-sm > .input-group-text, .input-group-sm > .btn { border-radius: .55rem; }
+        .queue-toolbar .btn, .filter-bar .btn { border-radius: 999px; }
+        .dash-card { border-radius: 1rem; overflow: hidden; border: 1px solid #e5e7eb !important; box-shadow: 0 1px 3px rgba(0,0,0,.04) !important; }
+        .dashboard-tabs .nav-link { border-radius: .7rem .7rem 0 0; }
+        .modal-content { border-radius: 1rem; overflow: hidden; }
+        .toast { border-radius: .8rem; }
+        .aria-ng-frame { border-radius: .8rem; }
+        .aria-ng-options-import { border-radius: .8rem !important; }
         .dash-title { font-size: 1.15rem; }
         .hijack-group { width: 330px; }
         .hijack-group .input-group-text { font-size: .8rem; }
@@ -58,8 +69,9 @@
         .th-help { cursor: help; }
 
         /* 手机卡片 */
-        .task-card { border-bottom: 1px solid #eef0f3; padding: .75rem .9rem; }
-        .task-card:last-child { border-bottom: 0; }
+        .task-list { padding: .5rem; background: #f6f7f9; }
+        .task-card { background: #fff; border: 1px solid #e8eaee; border-radius: .9rem; padding: .75rem .85rem; margin-bottom: .5rem; box-shadow: 0 1px 2px rgba(0,0,0,.03); }
+        .task-card:last-child { margin-bottom: 0; }
         .task-card .name { font-weight: 600; word-break: break-all; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
         .task-card .actions { display: flex; gap: .3rem; }
         .task-card .actions .btn { flex: 1 1 0; min-width: 0; padding: .3rem .15rem; font-size: .8rem; white-space: nowrap; }
@@ -91,7 +103,7 @@
             <!-- 劫持：电脑端直接显示 -->
             <div class="d-none d-md-flex align-items-center gap-2 me-auto">
                 <div class="hijack-group input-group input-group-sm" title="检测通过后新进入上传队列、以及上传重试的任务改传到这个 remote">
-                    <span class="input-group-text"><i class="bi bi-signpost-split me-1"></i>上传劫持</span>
+                    <span class="input-group-text">上传劫持</span>
                     <template v-if="addingHijackRemote">
                         <input class="form-control font-monospace" v-model.trim="newHijackRemote" placeholder="自定义 remote" @keyup.enter="addHijackRemote" @keyup.esc="addingHijackRemote=false">
                         <button class="btn btn-outline-primary" :disabled="!newHijackRemote" @click="addHijackRemote" title="添加并切换"><i class="bi bi-check-lg"></i></button>
@@ -113,7 +125,7 @@
             </div>
 
             <div class="d-flex align-items-center gap-1">
-                <button class="btn btn-sm d-md-none" :class="uploadHijackEnabled ? 'btn-primary' : 'btn-outline-secondary'" @click="showHijackPanel=!showHijackPanel" title="上传劫持"><i class="bi bi-signpost-split"></i><span class="ms-1 hijack-state">[[ uploadHijackEnabled ? uploadHijackRemote + ':' : '劫持' ]]</span></button>
+                <button class="btn btn-sm d-md-none" :class="uploadHijackEnabled ? 'btn-primary' : 'btn-outline-secondary'" @click="showHijackPanel=!showHijackPanel" title="上传劫持"><span class="hijack-state">[[ uploadHijackEnabled ? uploadHijackRemote + ':' : '劫持' ]]</span></button>
                 <button class="btn btn-sm btn-outline-danger" @click="confirmAction('确定按“设置 > 清理”中已启用的项目清空历史吗？\n下载器异常记录和本地文件会保留，此操作不可恢复。', () => clearHistory())" title="清空历史"><i class="bi bi-trash"></i><span class="d-none d-lg-inline ms-1">清空历史</span></button>
                 <a href="/settings_page" class="btn btn-sm btn-outline-secondary" title="设置"><i class="bi bi-gear-fill"></i><span class="d-none d-lg-inline ms-1">设置</span></a>
                 <a href="/logout" class="btn btn-sm btn-outline-danger" title="退出登录"><i class="bi bi-box-arrow-right"></i></a>
@@ -123,7 +135,7 @@
         <!-- 劫持：手机端展开面板 -->
         <div v-if="showHijackPanel" class="d-md-none border-top mt-2 pt-2">
             <div class="d-flex align-items-center mb-2">
-                <span class="small fw-bold me-auto"><i class="bi bi-signpost-split me-1"></i>上传劫持</span>
+                <span class="small fw-bold me-auto">上传劫持</span>
                 <div class="form-check form-switch mb-0">
                     <input class="form-check-input" type="checkbox" id="uploadHijackEnabledM" v-model="uploadHijackEnabled" @change="saveUploadRemoteHijack">
                     <label class="form-check-label small fw-bold" for="uploadHijackEnabledM">开启</label>
@@ -148,7 +160,7 @@
         </div>
     </header>
 
-    <div class="card shadow-sm border-0">
+    <div class="card dash-card">
         <div class="card-header bg-light pt-2 pb-0 border-bottom-0 px-2 px-md-3">
             <ul class="dashboard-tabs nav nav-tabs card-header-tabs nav-fill flex-md-grow-0">
                 <li class="nav-item flex-md-grow-0"><button class="nav-link w-100" :class="{active: view==='aria2'}" @click="view='aria2'"><i class="bi bi-download me-1"></i>下载<span class="d-none d-md-inline">器</span> <span class="badge bg-success rounded-pill ms-1 d-none d-md-inline" v-if="aria2Stats.downloadSpeed > 0" title="Aria2 总下载速度">[[ formatAria2DownloadSpeed() ]]</span><span class="badge bg-primary rounded-pill ms-1" v-if="aria2Stats.active + aria2Stats.waiting > 0">[[ aria2Stats.active + aria2Stats.waiting ]]</span></button></li>
@@ -217,10 +229,11 @@
 
                 <!-- 手机：卡片 -->
                 <div class="d-md-none">
-                    <div class="px-3 py-2 border-bottom bg-light small d-flex align-items-center" v-if="visibleTasks.length">
+                    <div class="px-3 py-2 border-bottom small d-flex align-items-center" v-if="visibleTasks.length">
                         <input class="form-check-input me-2" type="checkbox" id="selAllM" :checked="allSelected(view)" @change="toggleAll(view, $event.target.checked)">
                         <label for="selAllM" class="text-muted">全选当前列表</label>
                     </div>
+                    <div class="task-list" v-if="visibleTasks.length">
                     <div v-for="t in visibleTasks" :key="t.id" class="task-card">
                         <div class="d-flex gap-2">
                             <input class="form-check-input mt-1 flex-shrink-0" type="checkbox" v-model="selectedTaskIds" :value="t.id" :aria-label="`选择任务 ${t.id}`">
@@ -241,6 +254,7 @@
                         </div>
                         <div class="task-log-box mt-2" @click="showFullLog(t)" v-html="fmt(lastLogLines(t.log))"></div>
                         <div class="actions mt-2"><button v-for="a in taskActions(t)" :key="a.k" class="btn btn-sm" :class="a.cls" @click="a.run()"><i class="bi me-1" :class="a.icon"></i>[[ a.label ]]</button></div>
+                    </div>
                     </div>
                 </div>
 
