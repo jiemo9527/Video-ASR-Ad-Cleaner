@@ -12,88 +12,86 @@
     <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
     <style>
+        body { background: #f3f5f8; }
         .task-log-box {
             height: 50px; overflow-y: hidden; background: #212529; color: #28a745;
             font-family: 'Consolas', monospace; font-size: 11px; padding: 5px 8px;
-            border-radius: 3px; cursor: zoom-in; position: relative; line-height: 1.3;
+            border-radius: 4px; cursor: zoom-in; position: relative; line-height: 1.3;
         }
         .task-log-box:hover { background: #2c3034; }
         .sys-log-box {
             background-color: #1e1e1e; color: #d4d4d4; font-family: 'Consolas', monospace;
-            font-size: 13px; padding: 15px; border-radius: 4px; height: calc(100vh - 380px);
-            min-height: 500px; overflow-y: auto; white-space: pre-wrap; line-height: 1.5; border: 1px solid #343a40;
+            font-size: 13px; padding: 15px; height: calc(100vh - 260px);
+            min-height: 420px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; line-height: 1.5;
         }
         .config-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; transition: all 0.3s; }
         .dot-on { background-color: #198754; box-shadow: 0 0 4px #198754; }
         .dot-processing { background-color: #0d6efd; animation: pulse 1s infinite; }
         .dot-dirty { background-color: #dc3545; box-shadow: 0 0 4px #dc3545; }
         .dot-off { background-color: #adb5bd; opacity: 0.3; }
+        .dot-group { display: inline-flex; align-items: center; gap: 3px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 999px; padding: 3px 8px; }
+        .dot-sep { width: 1px; height: 9px; background: #ccc; margin: 0 2px; }
         @keyframes pulse { 0% { opacity: 0.5; } 50% { opacity: 1; } 100% { opacity: 0.5; } }
-        .nav-tabs .nav-link { color: #495057; font-weight: 500; border-radius: 4px 4px 0 0; }
-        .nav-tabs .nav-link.active { font-weight: bold; color: #0d6efd; border-top: 3px solid #0d6efd; background: #fff; border-bottom-color: transparent; }
-        .full-log-content { background: #0d1117; color: #e6edf3; font-family: 'Consolas', monospace; font-size: 13px; padding: 20px; height: 75vh; overflow-y: auto; white-space: pre-wrap; }
+        .full-log-content { background: #0d1117; color: #e6edf3; font-family: 'Consolas', monospace; font-size: 13px; padding: 20px; height: 75vh; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
         .progress-bar { transition: width 0.5s ease; }
         .aria-ng-frame { display: block; width: 100%; height: calc(100vh - 225px); min-height: 640px; border: 1px solid #dee2e6; border-radius: 5px; background: #fff; }
         .aria-ng-options-import summary { cursor: pointer; }
         .aria-ng-options-import textarea { min-height: 64px; resize: vertical; font-size: .78rem; }
-        .mb-4 { margin-bottom: 0 !important; }
-        .dashboard-header-main, .dashboard-top-controls { min-width: 0; }
-        .dashboard-header-main { gap: .35rem !important; }
-        .dashboard-top-controls { gap: .25rem !important; }
-        .dashboard-header .btn { border-radius: .5rem; padding-left: .5rem !important; padding-right: .5rem !important; }
-        .upload-hijack-remote { width: 230px !important; }
-        .dashboard-header .input-group > .form-control, .dashboard-header .input-group > .form-select { border-radius: .5rem 0 0 .5rem; }
-        .dashboard-header .input-group > .btn { border-radius: 0 .5rem .5rem 0; }
-        .dashboard-actions .btn { padding-top: 0; padding-bottom: 0; }
-        .dashboard-actions { display: flex; flex: 0 0 100%; align-items: center; justify-content: flex-end; flex-wrap: nowrap; gap: .5rem; }
-        .dashboard-tabs { flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
-        .dashboard-tabs .nav-item { flex: 0 0 auto; }
+
+        /* 顶部栏 */
+        .dash-header { background: #fff; border: 1px solid #e5e7eb; border-radius: .75rem; padding: .5rem .75rem; }
+        .dash-title { font-size: 1.15rem; }
+        .hijack-group { width: 330px; }
+        .hijack-group .input-group-text { font-size: .8rem; }
+        .hijack-state { font-size: .75rem; }
+
+        /* 标签与工具栏 */
+        .dashboard-tabs { flex-wrap: nowrap; }
+        .dashboard-tabs .nav-link { color: #495057; font-weight: 500; white-space: nowrap; }
+        .dashboard-tabs .nav-link.active { font-weight: bold; color: #0d6efd; border-top: 3px solid #0d6efd; background: #fff; border-bottom-color: transparent; }
+        .queue-toolbar .btn { white-space: nowrap; }
+        .filter-bar .btn { white-space: nowrap; }
+        .btn-outline-warning { color: #b7791f; border-color: #e0a800; }
+        .btn-outline-warning:hover { color: #fff; background: #d69e2e; border-color: #d69e2e; }
+        .btn-outline-purple { color: #6f42c1; border-color: #6f42c1; }
+        .btn-outline-purple:hover { color: #fff; background: #6f42c1; }
+        .th-help { cursor: help; }
+
+        /* 手机卡片 */
+        .task-card { border-bottom: 1px solid #eef0f3; padding: .75rem .9rem; }
+        .task-card:last-child { border-bottom: 0; }
+        .task-card .name { font-weight: 600; word-break: break-all; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        .task-card .actions { display: flex; gap: .3rem; }
+        .task-card .actions .btn { flex: 1 1 0; min-width: 0; padding: .3rem .15rem; font-size: .8rem; white-space: nowrap; }
+        .task-card .task-log-box { height: 42px; font-size: 10px; }
+
         @media (max-width: 767.98px) {
-            #app { padding: .75rem !important; }
-            .dashboard-header { align-items: stretch !important; gap: .5rem !important; }
-            .dashboard-header-main, .dashboard-top-controls, .dashboard-actions { width: 100%; }
-            .dashboard-header-main { align-items: stretch !important; }
-            .dashboard-title { width: 100%; margin-right: 0 !important; font-size: 1.1rem; }
-            .dashboard-top-controls .badge { display: block; width: 100% !important; }
-            .dashboard-top-controls .input-group { width: 100% !important; }
-            .dashboard-top-controls .form-check { min-height: 30px; padding-left: 2.5em; }
-            .dashboard-actions { justify-content: flex-end; flex-wrap: nowrap; }
-            .dashboard-actions .clear-history { margin-right: 0 !important; }
-            .dashboard-actions .settings-link { margin-right: 0 !important; text-align: center; }
-            .dashboard-actions .logout-link { width: 48px; text-align: center; }
-            .card-header { padding-left: .5rem !important; padding-right: .5rem !important; }
-            .dashboard-tabs .nav-link { padding: .65rem .75rem; font-size: .86rem; white-space: nowrap; }
-            .queue-toolbar { padding: .65rem !important; }
-            .queue-toolbar .btn { flex: 1 1 auto; }
-            .queue-toolbar .small { width: 100%; }
-            .queue-table { min-width: 760px; font-size: 11px; }
-            .queue-table > :not(caption) > * > * { padding: .38rem .3rem; }
-            .task-file-name { max-width: 118px !important; }
-            .upload-file-name { max-width: 118px !important; }
-            .upload-remote-name { max-width: 88px !important; }
-            .task-log-cell { width: auto !important; min-width: 150px; }
-            .task-log-box { height: 38px; font-size: 10px; padding: 4px 6px; }
-            .config-dot { width: 7px; height: 7px; }
-            .queue-table .btn-group-sm > .btn { padding: .18rem .3rem; font-size: .75rem; }
-            .aria-ng-toolbar { flex-wrap: wrap; gap: .5rem; }
-            .aria-ng-frame { height: calc(100vh - 180px); min-height: 480px; }
-            .aria-ng-options-import { padding: .65rem !important; }
-            .sys-log-box { height: calc(100vh - 250px); min-height: 420px; padding: 10px; font-size: 12px; }
+            #app { padding: .6rem !important; }
+            .dashboard-tabs .nav-link { padding: .55rem .4rem; font-size: .88rem; }
+            .queue-toolbar { gap: .35rem !important; }
+            .queue-toolbar .btn, .filter-bar .btn { padding: .2rem .45rem; font-size: .8rem; }
+            .filter-bar { flex-wrap: wrap; }
+            .aria-ng-frame { height: calc(100vh - 170px); min-height: 480px; }
+            .sys-log-box { height: calc(100vh - 230px); padding: 10px; font-size: 12px; }
         }
     </style>
 </head>
-<body class="bg-light">
-<div id="app" class="container-fluid px-4 py-4">
+<body>
+<div id="app" class="container-fluid px-3 px-lg-4 py-3">
 
-    <div class="dashboard-header d-flex flex-wrap justify-content-between align-items-center gap-1 mb-4 bg-white p-1 rounded shadow-sm border">
-        <div class="dashboard-header-main d-flex flex-wrap align-items-center gap-3">
-            <h4 class="dashboard-title mb-0 fw-bold text-primary me-2">
-                <img src="{{ url_for('static', filename='favicon.png') }}" width="24" height="24" class="me-2" style="border-radius: 4px;">
-                Scanner Pro Dashboard
-            </h4>
-            <div class="dashboard-top-controls d-flex flex-wrap align-items-center gap-2">
-                <span class="badge bg-light text-muted border px-2 py-1 font-monospace" title="服务器出口 IP 已隐匿"><i class="bi bi-hdd-network text-secondary"></i> 节点: {{ server_ip }}</span>
-                <div class="upload-hijack-remote input-group input-group-sm" title="劫持目标 remote">
+    <!-- 顶部栏 -->
+    <header class="dash-header mb-3">
+        <div class="d-flex align-items-center gap-2 flex-wrap">
+            <div class="d-flex align-items-center gap-2 me-auto me-lg-3 min-w-0">
+                <img src="{{ url_for('static', filename='favicon.png') }}" width="26" height="26" style="border-radius: 5px;" alt="">
+                <span class="dash-title fw-bold text-primary text-nowrap"><span class="d-none d-sm-inline">Scanner Pro Dashboard</span><span class="d-sm-none">Scanner Pro</span></span>
+                <span class="badge bg-light text-muted border font-monospace d-none d-xl-inline" title="服务器出口 IP 已隐匿"><i class="bi bi-hdd-network"></i> {{ server_ip }}</span>
+            </div>
+
+            <!-- 劫持：电脑端直接显示 -->
+            <div class="d-none d-md-flex align-items-center gap-2 me-auto">
+                <div class="hijack-group input-group input-group-sm" title="检测通过后新进入上传队列、以及上传重试的任务改传到这个 remote">
+                    <span class="input-group-text"><i class="bi bi-signpost-split me-1"></i>上传劫持</span>
                     <template v-if="addingHijackRemote">
                         <input class="form-control font-monospace" v-model.trim="newHijackRemote" placeholder="自定义 remote" @keyup.enter="addHijackRemote" @keyup.esc="addingHijackRemote=false">
                         <button class="btn btn-outline-primary" :disabled="!newHijackRemote" @click="addHijackRemote" title="添加并切换"><i class="bi bi-check-lg"></i></button>
@@ -108,71 +106,153 @@
                         <button class="btn btn-outline-danger" :disabled="!uploadHijackRemote" @click="removeHijackRemote" title="删除当前候选"><i class="bi bi-dash-lg"></i></button>
                     </template>
                 </div>
-                <div class="form-check form-switch mb-0" title="仅劫持检测通过后新进入上传队列或上传重试的任务">
+                <div class="form-check form-switch mb-0 text-nowrap" title="开启后按上面的 remote 劫持上传">
                     <input class="form-check-input" type="checkbox" id="uploadHijackEnabled" v-model="uploadHijackEnabled" @change="saveUploadRemoteHijack">
                     <label class="form-check-label small fw-bold" for="uploadHijackEnabled">开启劫持</label>
                 </div>
             </div>
+
+            <div class="d-flex align-items-center gap-1">
+                <button class="btn btn-sm d-md-none" :class="uploadHijackEnabled ? 'btn-primary' : 'btn-outline-secondary'" @click="showHijackPanel=!showHijackPanel" title="上传劫持"><i class="bi bi-signpost-split"></i><span class="ms-1 hijack-state">[[ uploadHijackEnabled ? uploadHijackRemote + ':' : '劫持' ]]</span></button>
+                <button class="btn btn-sm btn-outline-danger" @click="confirmAction('确定按“设置 > 清理”中已启用的项目清空历史吗？\n下载器异常记录和本地文件会保留，此操作不可恢复。', () => clearHistory())" title="清空历史"><i class="bi bi-trash"></i><span class="d-none d-lg-inline ms-1">清空历史</span></button>
+                <a href="/settings_page" class="btn btn-sm btn-outline-secondary" title="设置"><i class="bi bi-gear-fill"></i><span class="d-none d-lg-inline ms-1">设置</span></a>
+                <a href="/logout" class="btn btn-sm btn-outline-danger" title="退出登录"><i class="bi bi-box-arrow-right"></i></a>
+            </div>
         </div>
-        <div class="dashboard-actions">
-            <button class="clear-history btn btn-outline-danger me-2 px-3" @click="confirmAction('确定按“设置 > 清理”中已启用的项目清空历史吗？\n下载器异常记录和本地文件会保留，此操作不可恢复。', () => clearHistory())"><i class="bi bi-trash"></i> 清空历史</button>
-            <a href="/settings_page" class="settings-link btn btn-outline-secondary me-2 px-3"><i class="bi bi-gear-fill"></i> 设置</a>
-            <a href="/logout" class="logout-link btn btn-outline-danger px-3"><i class="bi bi-box-arrow-right"></i></a>
+
+        <!-- 劫持：手机端展开面板 -->
+        <div v-if="showHijackPanel" class="d-md-none border-top mt-2 pt-2">
+            <div class="d-flex align-items-center mb-2">
+                <span class="small fw-bold me-auto"><i class="bi bi-signpost-split me-1"></i>上传劫持</span>
+                <div class="form-check form-switch mb-0">
+                    <input class="form-check-input" type="checkbox" id="uploadHijackEnabledM" v-model="uploadHijackEnabled" @change="saveUploadRemoteHijack">
+                    <label class="form-check-label small fw-bold" for="uploadHijackEnabledM">开启</label>
+                </div>
+            </div>
+            <div class="input-group input-group-sm">
+                <template v-if="addingHijackRemote">
+                    <input class="form-control font-monospace" v-model.trim="newHijackRemote" placeholder="自定义 remote" @keyup.enter="addHijackRemote">
+                    <button class="btn btn-outline-primary" :disabled="!newHijackRemote" @click="addHijackRemote"><i class="bi bi-check-lg"></i></button>
+                    <button class="btn btn-outline-secondary" @click="addingHijackRemote=false"><i class="bi bi-x-lg"></i></button>
+                </template>
+                <template v-else>
+                    <select class="form-select font-monospace" v-model="uploadHijackRemote" @change="saveUploadRemoteHijack">
+                        <option value="" disabled>选择 remote</option>
+                        <option v-for="r in uploadHijackCandidates" :key="r" :value="r">[[ r ]]:</option>
+                    </select>
+                    <button class="btn btn-outline-primary" @click="newHijackRemote=''; addingHijackRemote=true"><i class="bi bi-plus-lg"></i></button>
+                    <button class="btn btn-outline-danger" :disabled="!uploadHijackRemote" @click="removeHijackRemote"><i class="bi bi-dash-lg"></i></button>
+                </template>
+            </div>
+            <div class="form-text">检测通过后新进入上传队列、以及上传重试的任务改传到这个 remote。</div>
         </div>
-    </div>
+    </header>
 
     <div class="card shadow-sm border-0">
-        <div class="card-header bg-light pt-3 pb-0 border-bottom-0">
-            <ul class="dashboard-tabs nav nav-tabs card-header-tabs">
-                <li class="nav-item"><button class="nav-link" :class="{active: view==='aria2'}" @click="view='aria2'">⬇️ 下载器 <span class="badge bg-success rounded-pill ms-1" v-if="aria2Stats.downloadSpeed > 0" title="Aria2 总下载速度">[[ formatAria2DownloadSpeed() ]]</span><span class="badge bg-primary rounded-pill ms-1" v-if="aria2Stats.active + aria2Stats.waiting > 0">[[ aria2Stats.active + aria2Stats.waiting ]]</span></button></li>
-                <li class="nav-item"><button class="nav-link" :class="{active: view==='detect'}" @click="view='detect'">🔍 检测队列 <span class="badge bg-secondary rounded-pill ms-1" v-if="detectTasks.length > 0">[[ detectTasks.length ]]</span></button></li>
-                <li class="nav-item"><button class="nav-link" :class="{active: view==='upload'}" @click="view='upload'">☁️ 上传队列 <span class="badge bg-info text-dark rounded-pill ms-1" v-if="activeUploadCount > 0" title="Scanner 总上传速度">[[ formatUploadSpeed() ]]</span><span class="badge bg-secondary rounded-pill ms-1" v-if="uploadTasks.length > 0">[[ uploadTasks.length ]]</span></button></li>
-                <li class="nav-item"><button class="nav-link" :class="{active: view==='syslog'}" @click="view='syslog'">📜 系统日志</button></li>
+        <div class="card-header bg-light pt-2 pb-0 border-bottom-0 px-2 px-md-3">
+            <ul class="dashboard-tabs nav nav-tabs card-header-tabs nav-fill flex-md-grow-0">
+                <li class="nav-item flex-md-grow-0"><button class="nav-link w-100" :class="{active: view==='aria2'}" @click="view='aria2'"><i class="bi bi-download me-1"></i>下载<span class="d-none d-md-inline">器</span> <span class="badge bg-success rounded-pill ms-1 d-none d-md-inline" v-if="aria2Stats.downloadSpeed > 0" title="Aria2 总下载速度">[[ formatAria2DownloadSpeed() ]]</span><span class="badge bg-primary rounded-pill ms-1" v-if="aria2Stats.active + aria2Stats.waiting > 0">[[ aria2Stats.active + aria2Stats.waiting ]]</span></button></li>
+                <li class="nav-item flex-md-grow-0"><button class="nav-link w-100" :class="{active: view==='detect'}" @click="view='detect'"><i class="bi bi-search me-1"></i>检测<span class="d-none d-md-inline">队列</span> <span class="badge bg-secondary rounded-pill ms-1" v-if="detectTasks.length > 0">[[ detectTasks.length ]]</span></button></li>
+                <li class="nav-item flex-md-grow-0"><button class="nav-link w-100" :class="{active: view==='upload'}" @click="view='upload'"><i class="bi bi-cloud-arrow-up me-1"></i>上传<span class="d-none d-md-inline">队列</span> <span class="badge bg-info text-dark rounded-pill ms-1 d-none d-md-inline" v-if="activeUploadCount > 0" title="Scanner 总上传速度">[[ formatUploadSpeed() ]]</span><span class="badge bg-secondary rounded-pill ms-1" v-if="uploadTasks.length > 0">[[ uploadTasks.length ]]</span></button></li>
+                <li class="nav-item flex-md-grow-0"><button class="nav-link w-100" :class="{active: view==='syslog'}" @click="view='syslog'"><i class="bi bi-terminal me-1"></i>日志</button></li>
             </ul>
         </div>
 
         <div class="card-body p-0 border-top bg-white">
 
-            <div v-if="view==='detect'">
-                    <div class="queue-toolbar p-2 border-bottom d-flex flex-wrap gap-2 bg-light bg-opacity-50 ps-3">
-                        <button class="btn btn-sm btn-outline-primary" @click="batchAction('detect', 'retry')"><i class="bi bi-arrow-repeat me-1"></i>[[ batchActionLabel('detect', 'retry') ]]</button>
-                        <button class="btn btn-sm btn-outline-danger" @click="batchAction('detect', 'stop')"><i class="bi bi-stop-circle me-1"></i>[[ batchActionLabel('detect', 'stop') ]]</button>
+            <!-- 检测 / 上传 队列 -->
+            <div v-if="view==='detect' || view==='upload'">
+                <div class="queue-toolbar px-2 px-md-3 py-2 border-bottom d-flex flex-wrap gap-2 align-items-center bg-light bg-opacity-50">
+                    <button class="btn btn-sm btn-outline-primary" @click="batchAction(view, 'retry')" :title="selectedCount(view) ? '' : '重试全部出错/已停止的任务'"><i class="bi bi-arrow-repeat me-1"></i>[[ batchActionLabel(view, 'retry') ]]</button>
+                    <button class="btn btn-sm btn-outline-danger" @click="batchAction(view, 'stop')"><i class="bi bi-stop-circle me-1"></i>[[ batchActionLabel(view, 'stop') ]]</button>
+                    <template v-if="view==='detect'">
                         <button class="btn btn-sm btn-outline-warning" :disabled="!prioritizableCount" @click="batchPrioritize()" title="把选中的等待中任务提到检测队列最前"><i class="bi bi-arrow-bar-up me-1"></i>插队[[ prioritizableCount ? ` (${prioritizableCount})` : '' ]]</button>
-                        <button class="btn btn-sm btn-outline-success" :disabled="!directUploadableCount" @click="batchDirectUpload()" title="选中的任务跳过检测，直接上传（检测中的任务需先停止）"><i class="bi bi-forward-fill me-1"></i>批量直传[[ directUploadableCount ? ` (${directUploadableCount})` : '' ]]</button>
-                        <button class="btn btn-sm btn-outline-danger" :disabled="!selectedCount('detect')" @click="batchDelete('detect')"><i class="bi bi-trash-fill me-1"></i>批量删除</button>
-                        <span v-if="selectedCount('detect')" class="small text-primary align-self-center ms-1">已选 [[ selectedCount('detect') ]] 项 <button class="btn btn-link btn-sm p-0 ms-1" @click="clearSelection('detect')">清除</button></span>
+                        <button class="btn btn-sm btn-outline-success" :disabled="!directUploadableCount" @click="batchDirectUpload()" title="选中的任务跳过检测，直接上传（检测中的任务需先停止）"><i class="bi bi-forward-fill me-1"></i>直传[[ directUploadableCount ? ` (${directUploadableCount})` : '' ]]</button>
+                    </template>
+                    <button class="btn btn-sm btn-outline-danger" :disabled="!selectedCount(view)" @click="batchDelete(view)"><i class="bi bi-trash-fill me-1"></i>删除[[ selectedCount(view) ? ` (${selectedCount(view)})` : '' ]]</button>
+                    <span v-if="selectedCount(view)" class="small text-primary text-nowrap">已选 [[ selectedCount(view) ]] 项 <button class="btn btn-link btn-sm p-0 ms-1 align-baseline" @click="clearSelection(view)">清除</button></span>
+                </div>
+
+                <div class="px-2 px-md-3 py-2 border-bottom d-flex flex-wrap gap-2 align-items-center">
+                    <div class="filter-bar d-flex gap-1">
+                        <button v-for="f in statusFilters[view]" :key="f.id" class="btn btn-sm" :class="filterStatus[view]===f.id ? 'btn-dark' : 'btn-light border'" @click="setFilter(view, f.id)">[[ f.label ]] <span class="badge rounded-pill ms-1" :class="filterStatus[view]===f.id ? 'bg-light text-dark' : 'bg-secondary'">[[ statusCount(view, f.id) ]]</span></button>
                     </div>
-                    <div class="table-responsive">
-                        <table class="queue-table table table-hover align-middle mb-0">
-                            <thead class="table-light"><tr><th class="text-center" style="width:42px"><input class="form-check-input" type="checkbox" :checked="allSelected('detect')" @change="toggleAll('detect', $event.target.checked)" title="全选"></th><th class="text-center">ID</th><th>文件信息</th><th class="text-center">状态指示</th><th class="text-center">结果</th><th>实时日志 (双击全屏)</th><th class="text-end pe-4">操作</th></tr></thead>
-                            <tbody>
-                                <tr v-for="t in detectTasks" :key="t.id">
-                                    <td class="text-center"><input class="form-check-input" type="checkbox" v-model="selectedTaskIds" :value="t.id" :aria-label="`选择任务 ${t.id}`"></td>
-                                    <td class="text-center fw-bold text-muted">[[ t.id ]]</td>
-                                    <td><div class="task-file-name text-truncate fw-bold text-dark" style="max-width:280px" :title="t.filename"><i class="bi bi-file-earmark-play me-1"></i>[[ t.filename ]]</div><div class="small text-muted mt-1"><i class="bi bi-clock"></i> [[ t.created_at ]]</div></td>
-                                    <td class="text-center"><div class="d-flex justify-content-center bg-light rounded-pill py-1 px-2 border" style="width: fit-content; margin: 0 auto; gap:3px"><span v-for="i in audioDotCount(t)" :class="['config-dot', getDotClass('audio', t, i)]"></span><span style="border-right:1px solid #ccc; margin:0 2px"></span><span :class="['config-dot', getDotClass('subtitle', t)]"></span><span :class="['config-dot', getDotClass('meta', t)]"></span></div></td>
-                                    <td class="text-center"><span class="badge rounded-pill" :class="bg(t.status)">[[ statusText[t.status]||t.status ]]</span></td>
-                                    <td class="task-log-cell" style="width: 35%;"><div class="task-log-box" @dblclick="showFullLog(t)" v-html="fmt(t.log)"></div></td>
-                                    <td class="text-end pe-3">
-                                        <div class="btn-group btn-group-sm">
-                                            <button v-if="canControl(t)" class="btn btn-outline-primary" @click="openConfig(t)" title="调整"><i class="bi bi-sliders"></i></button>
-                                            <button v-if="canPrioritize(t)" class="btn btn-outline-warning" @click="prioritize(t.id)" title="插队(提到检测队列最前)"><i class="bi bi-arrow-bar-up"></i></button>
-                                            <button v-if="canDoubleSample(t)" class="btn btn-outline-warning" @click="confirmAction('确定让该任务使用动态抽样并重新检测吗？', () => doubleSample(t.id))" title="动态抽样"><i class="bi bi-soundwave"></i></button>
-                                            <button v-if="canControl(t)" class="btn btn-outline-success" @click="confirmAction('确定跳过检测直接上传吗？', () => directUpload(t.id))" title="直传"><i class="bi bi-forward-fill"></i></button>
-                                            <button v-if="canStop(t)" class="btn btn-outline-danger" @click="confirmAction('确定停止该任务吗？', () => cancel(t.id))" title="停止"><i class="bi bi-stop-circle-fill"></i></button>
-                                            <button v-if="isError(t)" class="btn btn-outline-secondary" @click="retry(t.id)" title="重试"><i class="bi bi-arrow-clockwise"></i></button>
-                                            <button class="btn btn-outline-danger" @click="confirmAction(isRunning(t) ? '⚠️ 任务运行中，将先停止再删除任务及本地文件，确定吗？' : '⚠️ 警告：确定要删除此任务吗？', () => deleteTask(t.id))" title="删除"><i class="bi bi-trash-fill"></i></button>
-                                        </div>
-                                    </td>
-                                </tr>
-                                <tr v-if="detectTasks.length===0"><td colspan="7" class="text-center py-5 text-muted">当前没有等待检测的任务</td></tr>
-                            </tbody>
-                        </table>
+                    <div class="input-group input-group-sm ms-md-auto" style="max-width: 260px;">
+                        <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
+                        <input type="search" class="form-control" v-model.trim="filterText" placeholder="搜索文件名或 ID">
                     </div>
+                </div>
+
+                <!-- 电脑：表格 -->
+                <div class="table-responsive d-none d-md-block">
+                    <table class="queue-table table table-hover align-middle mb-0">
+                        <thead class="table-light" v-if="view==='detect'"><tr><th class="text-center" style="width:42px"><input class="form-check-input" type="checkbox" :checked="allSelected('detect')" @change="toggleAll('detect', $event.target.checked)" title="全选当前列表"></th><th class="text-center">ID</th><th>文件信息</th><th class="text-center"><span class="th-help" title="左侧每个点是一个音频抽样段，竖线右侧依次是字幕、元数据。绿=通过，蓝=进行中，红=命中或失败，灰=未开始或未启用">状态指示 <i class="bi bi-question-circle text-muted"></i></span></th><th class="text-center">结果</th><th>实时日志 <span class="small fw-normal text-muted">(双击全屏)</span></th><th class="text-end pe-4">操作</th></tr></thead>
+                        <thead class="table-light" v-else><tr><th class="text-center" style="width:42px"><input class="form-check-input" type="checkbox" :checked="allSelected('upload')" @change="toggleAll('upload', $event.target.checked)" title="全选当前列表"></th><th class="text-center">ID</th><th>文件信息</th><th>上传目标</th><th style="min-width:160px">传输进度</th><th>速度 / ETA</th><th>结束时间</th><th class="text-center">状态</th><th class="text-end pe-4">操作</th></tr></thead>
+                        <tbody v-if="view==='detect'">
+                            <tr v-for="t in visibleTasks" :key="t.id">
+                                <td class="text-center"><input class="form-check-input" type="checkbox" v-model="selectedTaskIds" :value="t.id" :aria-label="`选择任务 ${t.id}`"></td>
+                                <td class="text-center fw-bold text-muted">[[ t.id ]]</td>
+                                <td><div class="text-truncate fw-bold text-dark" style="max-width:300px" :title="t.filename"><i class="bi bi-file-earmark-play me-1"></i>[[ t.filename ]]</div><div class="small text-muted mt-1"><i class="bi bi-clock"></i> [[ t.created_at ]]</div></td>
+                                <td class="text-center"><span class="dot-group"><span v-for="i in audioDotCount(t)" :class="['config-dot', getDotClass('audio', t, i)]" :title="dotTitle('audio', t, i)"></span><span class="dot-sep"></span><span :class="['config-dot', getDotClass('subtitle', t)]" :title="dotTitle('subtitle', t)"></span><span :class="['config-dot', getDotClass('meta', t)]" :title="dotTitle('meta', t)"></span></span></td>
+                                <td class="text-center"><span class="badge rounded-pill" :class="bg(t.status)">[[ statusText[t.status]||t.status ]]</span></td>
+                                <td style="width: 34%;"><div class="task-log-box" @dblclick="showFullLog(t)" v-html="fmt(t.log)"></div></td>
+                                <td class="text-end pe-3"><div class="btn-group btn-group-sm"><button v-for="a in taskActions(t)" :key="a.k" class="btn" :class="a.cls" :title="a.title" @click="a.run()"><i class="bi" :class="a.icon"></i></button></div></td>
+                            </tr>
+                        </tbody>
+                        <tbody v-else>
+                            <tr v-for="t in visibleTasks" :key="t.id">
+                                <td class="text-center"><input class="form-check-input" type="checkbox" v-model="selectedTaskIds" :value="t.id" :aria-label="`选择任务 ${t.id}`"></td>
+                                <td class="text-center fw-bold text-muted">[[ t.id ]]</td>
+                                <td class="text-truncate" style="max-width:260px" :title="t.filename" @dblclick="showFullLog(t)"><i class="bi bi-file-earmark-arrow-up me-1"></i>[[ t.filename ]]</td>
+                                <td class="font-monospace small text-truncate" style="max-width:160px" :title="uploadRemote(t.upload_target)">[[ uploadRemote(t.upload_target) ]]</td>
+                                <td><div class="progress bg-secondary bg-opacity-10" style="height: 10px; border-radius: 6px;"><div class="progress-bar" :style="{width: t.progress + '%'}" :class="progressClass(t)"></div></div><div class="small text-end text-muted mt-1">[[ t.progress ]]%</div></td>
+                                <td><div v-if="t.status==='uploading'" class="small"><div class="fw-bold text-dark">[[ t.upload_speed || '-' ]]</div><div class="text-muted"><i class="bi bi-hourglass-split"></i> [[ t.upload_eta ]]</div></div><div v-else class="text-muted small">-</div></td>
+                                <td class="small text-muted text-nowrap">[[ t.finished_at || '-' ]]</td>
+                                <td class="text-center"><span class="badge rounded-pill" :class="bg(t.status)">[[ statusText[t.status]||t.status ]]</span></td>
+                                <td class="text-end pe-3"><div class="btn-group btn-group-sm"><button v-for="a in taskActions(t)" :key="a.k" class="btn" :class="a.cls" :title="a.title" @click="a.run()"><i class="bi" :class="a.icon"></i></button></div></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- 手机：卡片 -->
+                <div class="d-md-none">
+                    <div class="px-3 py-2 border-bottom bg-light small d-flex align-items-center" v-if="visibleTasks.length">
+                        <input class="form-check-input me-2" type="checkbox" id="selAllM" :checked="allSelected(view)" @change="toggleAll(view, $event.target.checked)">
+                        <label for="selAllM" class="text-muted">全选当前列表</label>
+                    </div>
+                    <div v-for="t in visibleTasks" :key="t.id" class="task-card">
+                        <div class="d-flex gap-2">
+                            <input class="form-check-input mt-1 flex-shrink-0" type="checkbox" v-model="selectedTaskIds" :value="t.id" :aria-label="`选择任务 ${t.id}`">
+                            <div class="flex-grow-1 min-w-0">
+                                <div class="name" :title="t.filename">[[ t.filename ]]</div>
+                                <div class="d-flex flex-wrap align-items-center gap-2 mt-1 small text-muted">
+                                    <span>#[[ t.id ]]</span>
+                                    <span class="badge rounded-pill" :class="bg(t.status)">[[ statusText[t.status]||t.status ]]</span>
+                                    <span v-if="view==='detect'" class="dot-group"><span v-for="i in audioDotCount(t)" :class="['config-dot', getDotClass('audio', t, i)]"></span><span class="dot-sep"></span><span :class="['config-dot', getDotClass('subtitle', t)]"></span><span :class="['config-dot', getDotClass('meta', t)]"></span></span>
+                                    <span v-if="view==='upload'" class="font-monospace">[[ uploadRemote(t.upload_target) ]]</span>
+                                    <span v-if="view==='detect'">[[ t.created_at ]]</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div v-if="view==='upload'" class="mt-2">
+                            <div class="progress bg-secondary bg-opacity-10" style="height: 8px;"><div class="progress-bar" :style="{width: t.progress + '%'}" :class="progressClass(t)"></div></div>
+                            <div class="d-flex small text-muted mt-1"><span class="me-auto">[[ t.progress ]]%</span><span v-if="t.status==='uploading'">[[ t.upload_speed ]] · [[ t.upload_eta ]]</span><span v-else-if="t.finished_at">[[ t.finished_at ]]</span></div>
+                        </div>
+                        <div class="task-log-box mt-2" @click="showFullLog(t)" v-html="fmt(lastLogLines(t.log))"></div>
+                        <div class="actions mt-2"><button v-for="a in taskActions(t)" :key="a.k" class="btn btn-sm" :class="a.cls" @click="a.run()"><i class="bi me-1" :class="a.icon"></i>[[ a.label ]]</button></div>
+                    </div>
+                </div>
+
+                <div v-if="visibleTasks.length===0" class="text-center py-5 text-muted">
+                    <i class="bi bi-inbox fs-1 d-block mb-2 opacity-50"></i>
+                    [[ queueTasks(view).length ? '没有符合筛选条件的任务' : (view==='detect' ? '当前没有等待检测的任务' : '暂无上传任务') ]]
+                    <div v-if="queueTasks(view).length"><button class="btn btn-link btn-sm" @click="resetFilters(view)">清除筛选</button></div>
+                </div>
             </div>
 
-            <div v-show="view==='aria2'" class="p-3 bg-light">
-                <div class="aria-ng-toolbar d-flex justify-content-between align-items-center mb-2"><span class="fw-bold text-primary"><i class="bi bi-download me-1"></i>Aria2 下载器</span><a href="{{ url_for('aria_ng_launcher') }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">新窗口</a></div>
+            <div v-show="view==='aria2'" class="p-2 p-md-3 bg-light">
+                <div class="aria-ng-toolbar d-flex justify-content-between align-items-center mb-2"><span class="fw-bold text-primary"><i class="bi bi-download me-1"></i>Aria2 下载器</span><a href="{{ url_for('aria_ng_launcher') }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary"><i class="bi bi-box-arrow-up-right me-1"></i>新窗口</a></div>
                 {% if aria_ng_available %}
                 <iframe id="ariaNgFrame" class="aria-ng-frame" src="{{ url_for('aria_ng_launcher') }}" title="AriaNg 下载器"></iframe>
                 <details class="aria-ng-options-import mt-2 border rounded bg-white">
@@ -194,44 +274,15 @@
                 {% endif %}
             </div>
 
-            <div v-if="view==='upload'">
-                <div class="queue-toolbar p-2 border-bottom d-flex flex-wrap gap-2 align-items-center bg-light bg-opacity-50 ps-3">
-                    <button class="btn btn-sm btn-outline-primary" @click="batchAction('upload', 'retry')"><i class="bi bi-arrow-repeat me-1"></i>[[ batchActionLabel('upload', 'retry') ]]</button>
-                    <button class="btn btn-sm btn-outline-danger" @click="batchAction('upload', 'stop')"><i class="bi bi-stop-circle me-1"></i>[[ batchActionLabel('upload', 'stop') ]]</button>
-                    <button class="btn btn-sm btn-outline-danger" :disabled="!selectedCount('upload')" @click="batchDelete('upload')"><i class="bi bi-trash-fill me-1"></i>批量删除</button>
-                    <span v-if="selectedCount('upload')" class="small text-primary align-self-center ms-1">已选 [[ selectedCount('upload') ]] 项 <button class="btn btn-link btn-sm p-0 ms-1" @click="clearSelection('upload')">清除</button></span>
-                </div>
-                <div class="table-responsive">
-                    <table class="queue-table table table-hover align-middle mb-0">
-                        <thead class="table-light"><tr><th class="text-center" style="width:42px"><input class="form-check-input" type="checkbox" :checked="allSelected('upload')" @change="toggleAll('upload', $event.target.checked)" title="全选"></th><th class="text-center">ID</th><th>文件信息</th><th>上传目标</th><th>传输进度</th><th>速度 / ETA</th><th>结束时间</th><th class="text-center">状态</th><th class="text-end pe-4">操作</th></tr></thead>
-                        <tbody>
-                            <tr v-for="t in uploadTasks" :key="t.id">
-                                <td class="text-center"><input class="form-check-input" type="checkbox" v-model="selectedTaskIds" :value="t.id" :aria-label="`选择任务 ${t.id}`"></td>
-                                <td class="text-center fw-bold text-muted">[[ t.id ]]</td>
-                                <td class="upload-file-name text-truncate" style="max-width:250px" :title="t.filename"><i class="bi bi-file-earmark-arrow-up me-1"></i>[[ t.filename ]]</td>
-                                <td class="upload-remote-name font-monospace small text-truncate" style="max-width:160px" :title="uploadRemote(t.upload_target)">[[ uploadRemote(t.upload_target) ]]</td>
-                                <td><div class="progress bg-secondary bg-opacity-10" style="height: 12px; border-radius: 6px;"><div class="progress-bar progress-bar-striped progress-bar-animated" :style="{width: t.progress + '%'}" :class="t.status==='uploaded'?'bg-success':'bg-primary'"></div></div><div class="small text-end text-muted mt-1">[[ t.progress ]]%</div></td>
-                                <td><div v-if="t.status==='uploading'" class="small"><div class="fw-bold text-dark">🚀 [[ t.upload_speed ]]</div><div class="text-muted">⏱ [[ t.upload_eta ]]</div></div><div v-else class="text-muted small">-</div></td>
-                                <td class="small text-muted">[[ t.finished_at || '-' ]]</td>
-                                <td class="text-center"><span class="badge rounded-pill" :class="bg(t.status)">[[ statusText[t.status]||t.status ]]</span></td>
-                                <td class="text-end pe-3"><div class="btn-group btn-group-sm"><button v-if="canStop(t)" class="btn btn-outline-danger" @click="confirmAction('确定停止上传？', () => cancel(t.id))"><i class="bi bi-stop-fill"></i></button><button v-if="t.status==='error' || t.status==='cancelled'" class="btn btn-outline-secondary" @click="retry(t.id)"><i class="bi bi-arrow-repeat"></i></button><button class="btn btn-outline-danger" @click="confirmAction(isRunning(t) ? '⚠️ 上传中，将先停止再删除记录及本地文件，确定吗？' : '⚠️ 确定删除此记录吗？', () => deleteTask(t.id))"><i class="bi bi-trash-fill"></i></button></div></td>
-                            </tr>
-                            <tr v-if="uploadTasks.length===0"><td colspan="9" class="text-center py-5 text-muted">暂无上传任务</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-
             <div v-if="view==='syslog'" class="p-0">
-                <div class="bg-white p-2 border-bottom d-flex justify-content-between align-items-center px-4">
-                    <div class="d-flex align-items-center gap-3">
-                        <span class="fw-bold text-dark"><i class="bi bi-terminal-fill me-2 text-secondary"></i>System Logs</span>
-                        <div class="input-group input-group-sm" style="width: 250px;"><span class="input-group-text bg-light"><i class="bi bi-funnel"></i></span><input type="text" class="form-control" v-model="sysLogFilter" placeholder="关键词过滤..."><button class="btn btn-outline-secondary" v-if="sysLogFilter" @click="sysLogFilter=''">×</button></div>
-                        <div class="form-check form-switch mb-0"><input class="form-check-input" type="checkbox" v-model="autoRefreshLogs" id="autoRef"><label class="form-check-label small text-muted" for="autoRef">自动</label></div>
+                <div class="bg-white p-2 border-bottom d-flex flex-wrap gap-2 justify-content-between align-items-center px-2 px-md-3">
+                    <div class="input-group input-group-sm flex-grow-1" style="max-width: 320px;"><span class="input-group-text bg-light"><i class="bi bi-funnel"></i></span><input type="text" class="form-control" v-model="sysLogFilter" placeholder="关键词过滤..."><button class="btn btn-outline-secondary" v-if="sysLogFilter" @click="sysLogFilter=''">×</button></div>
+                    <div class="d-flex align-items-center gap-2">
+                        <div class="form-check form-switch mb-0"><input class="form-check-input" type="checkbox" v-model="autoRefreshLogs" id="autoRef"><label class="form-check-label small text-muted" for="autoRef">自动刷新</label></div>
+                        <div class="btn-group btn-group-sm"><button class="btn btn-outline-secondary" @click="loadSysLogs" title="刷新"><i class="bi bi-arrow-clockwise"></i></button><button class="btn btn-outline-danger" @click="confirmAction('确定清空系统日志(journalctl)吗？', () => clearSysLogs())" title="清空"><i class="bi bi-eraser-fill"></i></button></div>
                     </div>
-                    <div class="btn-group btn-group-sm"><button class="btn btn-outline-secondary" @click="loadSysLogs"><i class="bi bi-arrow-clockwise"></i></button><button class="btn btn-outline-danger" @click="confirmAction('确定清空系统日志(journalctl)吗？', () => clearSysLogs())"><i class="bi bi-eraser-fill"></i></button></div>
                 </div>
-                <div class="sys-log-box m-0 border-0 rounded-0" id="sysLogBox">
+                <div class="sys-log-box" id="sysLogBox">
                     <div v-for="(line, idx) in filteredSystemLogs" :key="idx" :class="getLogClass(line)" style="padding-left:5px">[[ line ]]</div>
                     <div v-if="!sysLogs" class="text-muted p-3">正在读取系统日志...</div>
                 </div>
@@ -251,7 +302,7 @@
 let modalConfig, modalLog, modalConfirm, toastInstance;
 Vue.createApp({
     delimiters: ['[[', ']]'],
-    data(){ return { tasks:[], view:'detect', curTask:{}, sysLogs:'', sysLogFilter:'', autoRefreshLogs:true, currentLogTitle:'', currentLogContent:'', uploadHijackRemote:'', uploadHijackCandidates:[], newHijackRemote:'', addingHijackRemote:false, uploadHijackEnabled:false, hijackLoadedAt:0, ariaNgOptionsImport:'', selectedTaskIds:[], aria2Stats:{active:0, waiting:0, stopped:0, downloadSpeed:0}, statusText:{'pending':'⏳ 等待中','processing':'🔄 检测中','pending_upload':'✅ 待上传','uploading':'☁️ 上传中','uploaded':'🎉 已完成','dirty':'🚫 已拦截','error':'❌ 出错了','cancelled':'⏹ 已停止'}, toastMsg:'', toastClass:'bg-primary', toastIcon:'bi-info-circle', confirmMsg:'', confirmCallback:null, pollTimer: null }},
+    data(){ return { tasks:[], view:'detect', curTask:{}, sysLogs:'', sysLogFilter:'', autoRefreshLogs:true, currentLogTitle:'', currentLogContent:'', uploadHijackRemote:'', uploadHijackCandidates:[], newHijackRemote:'', addingHijackRemote:false, uploadHijackEnabled:false, hijackLoadedAt:0, showHijackPanel:false, filterText:'', filterStatus:{detect:'all', upload:'all'}, statusFilters:{detect:[{id:'all',label:'全部'},{id:'active',label:'进行中',statuses:['pending','processing']},{id:'dirty',label:'已拦截',statuses:['dirty']},{id:'failed',label:'出错/停止',statuses:['error','cancelled']}], upload:[{id:'all',label:'全部'},{id:'active',label:'进行中',statuses:['pending_upload','uploading']},{id:'done',label:'已完成',statuses:['uploaded']},{id:'failed',label:'出错/停止',statuses:['error','cancelled','dirty']}]}, ariaNgOptionsImport:'', selectedTaskIds:[], aria2Stats:{active:0, waiting:0, stopped:0, downloadSpeed:0}, statusText:{'pending':'⏳ 等待中','processing':'🔄 检测中','pending_upload':'✅ 待上传','uploading':'☁️ 上传中','uploaded':'🎉 已完成','dirty':'🚫 已拦截','error':'❌ 出错了','cancelled':'⏹ 已停止'}, toastMsg:'', toastClass:'bg-primary', toastIcon:'bi-info-circle', confirmMsg:'', confirmCallback:null, pollTimer: null }},
     computed: {
         filteredSystemLogs() { if(!this.sysLogs)return[]; const l=this.sysLogs.split('\n'); if(!this.sysLogFilter.trim())return l; const k=this.sysLogFilter.toLowerCase(); return l.filter(x=>x.toLowerCase().includes(k)) },
         detectTasks() { return this.tasks.filter(t => !this.isUploadTask(t)) },
@@ -260,7 +311,8 @@ Vue.createApp({
         activeUploadCount() { return this.tasks.filter(t => t.status === 'uploading').length },
         activeUploadSpeed() { return this.uploadTasks.filter(t => t.status === 'uploading').reduce((total, t) => total + this.uploadSpeedBytes(t.upload_speed), 0) },
         prioritizableCount() { return this.selectedIds('detect').filter(id => { const t = this.tasks.find(x => x.id === id); return t && t.status === 'pending' }).length },
-        directUploadableCount() { return this.selectedIds('detect').filter(id => { const t = this.tasks.find(x => x.id === id); return t && this.canControl(t) }).length }
+        directUploadableCount() { return this.selectedIds('detect').filter(id => { const t = this.tasks.find(x => x.id === id); return t && this.canControl(t) }).length },
+        visibleTasks() { return this.filteredTasks(this.view) }
     },
     mounted(){
         this.load();
@@ -274,7 +326,7 @@ Vue.createApp({
         modalConfirm=new bootstrap.Modal(document.getElementById('confirmModal'));
         toastInstance=new bootstrap.Toast(document.getElementById('liveToast'))
     },
-    watch: { view(n) { if(n==='syslog') { if(!this.sysLogs)this.loadSysLogs(); this.$nextTick(()=>{ const b=document.getElementById('sysLogBox'); if(b)b.scrollTop=b.scrollHeight }) } if(n==='aria2')this.loadAria2Stats() } },
+    watch: { filterText() { this.pruneSelection() }, view(n) { if(n==='syslog') { if(!this.sysLogs)this.loadSysLogs(); this.$nextTick(()=>{ const b=document.getElementById('sysLogBox'); if(b)b.scrollTop=b.scrollHeight }) } if(n==='aria2')this.loadAria2Stats() } },
     methods:{
         isUploadTask(t) {
             if(['pending_upload', 'uploading', 'uploaded'].includes(t.status)) return true;
@@ -480,12 +532,50 @@ Vue.createApp({
         showFullLog(t){ this.currentLogTitle=t.filename; this.currentLogContent=t.log; modalLog.show() },
         uploadRemote(target){ const value=String(target || ''); const pos=value.indexOf(':'); return pos >= 0 ? value.slice(0, pos + 1) : (value || '-') },
         queueTasks(type){ return type==='upload' ? this.uploadTasks : this.detectTasks },
+        filteredTasks(type){
+            const filter=(this.statusFilters[type] || []).find(f => f.id === this.filterStatus[type]);
+            const q=this.filterText.toLowerCase();
+            return this.queueTasks(type).filter(t => (!filter || !filter.statuses || filter.statuses.includes(t.status))
+                && (!q || String(t.filename || '').toLowerCase().includes(q) || String(t.id) === q.replace(/^#/, '')));
+        },
+        statusCount(type, id){
+            const filter=(this.statusFilters[type] || []).find(f => f.id === id);
+            const tasks=this.queueTasks(type);
+            return filter && filter.statuses ? tasks.filter(t => filter.statuses.includes(t.status)).length : tasks.length;
+        },
+        setFilter(type, id){ this.filterStatus[type]=id; this.pruneSelection() },
+        resetFilters(type){ this.filterStatus[type]='all'; this.filterText='' },
+        pruneSelection(){ const ids=new Set([...this.filteredTasks('detect'), ...this.filteredTasks('upload')].map(t=>t.id)); this.selectedTaskIds=this.selectedTaskIds.filter(id=>ids.has(id)) },
+        progressClass(t){ if(t.status==='uploaded') return 'bg-success'; if(['error','cancelled'].includes(t.status)) return 'bg-secondary'; return t.status==='uploading' ? 'bg-primary progress-bar-striped progress-bar-animated' : 'bg-primary' },
+        lastLogLines(log){ const lines=String(log || '').trim().split('\n'); return lines.slice(-3).join('\n') },
+        dotTitle(type, t, idx){
+            const state={'dot-on':'通过','dot-processing':'进行中','dot-dirty':'命中/失败','dot-off':'未开始或未启用'}[this.getDotClass(type, t, idx)];
+            if(type==='audio'){ const name=this.audioSegmentNames(t)[idx-1]; return `音频抽样段 ${name || idx}：${state}` }
+            return `${type==='subtitle'?'字幕':'元数据'}：${state}`;
+        },
+        taskActions(t){
+            const acts=[];
+            if(this.isUploadTask(t)){
+                if(this.canStop(t)) acts.push({k:'stop', label:'停止', title:'停止上传', icon:'bi-stop-fill', cls:'btn-outline-danger', run:()=>this.confirmAction('确定停止上传？', () => this.cancel(t.id))});
+                if(['error','cancelled'].includes(t.status)) acts.push({k:'retry', label:'重试', title:'重新上传', icon:'bi-arrow-repeat', cls:'btn-outline-secondary', run:()=>this.retry(t.id)});
+                acts.push({k:'log', label:'日志', title:'查看日志', icon:'bi-file-text', cls:'btn-outline-secondary', run:()=>this.showFullLog(t)});
+            } else {
+                if(this.canControl(t)) acts.push({k:'config', label:'调整', title:'调整检测策略后重试', icon:'bi-sliders', cls:'btn-outline-primary', run:()=>this.openConfig(t)});
+                if(this.canPrioritize(t)) acts.push({k:'prio', label:'插队', title:'插队(提到检测队列最前)', icon:'bi-arrow-bar-up', cls:'btn-outline-warning', run:()=>this.prioritize(t.id)});
+                if(this.canDoubleSample(t)) acts.push({k:'double', label:'抽样', title:'改用动态抽样重新检测', icon:'bi-soundwave', cls:'btn-outline-purple', run:()=>this.confirmAction('确定让该任务使用动态抽样并重新检测吗？', () => this.doubleSample(t.id))});
+                if(this.canControl(t)) acts.push({k:'direct', label:'直传', title:'跳过检测直接上传', icon:'bi-forward-fill', cls:'btn-outline-success', run:()=>this.confirmAction('确定跳过检测直接上传吗？', () => this.directUpload(t.id))});
+                if(this.canStop(t)) acts.push({k:'stop', label:'停止', title:'停止', icon:'bi-stop-circle-fill', cls:'btn-outline-danger', run:()=>this.confirmAction('确定停止该任务吗？', () => this.cancel(t.id))});
+                if(this.isError(t)) acts.push({k:'retry', label:'重试', title:'重试', icon:'bi-arrow-clockwise', cls:'btn-outline-secondary', run:()=>this.retry(t.id)});
+            }
+            acts.push({k:'delete', label:'删除', title:'删除', icon:'bi-trash-fill', cls:'btn-outline-danger', run:()=>this.confirmAction(this.isRunning(t) ? '⚠️ 任务运行中，将先停止再删除任务及本地文件，确定吗？' : '⚠️ 确定删除此任务及本地文件吗？', () => this.deleteTask(t.id))});
+            return acts;
+        },
         selectedIds(type){ const ids=new Set(this.queueTasks(type).map(t=>t.id)); return this.selectedTaskIds.filter(id=>ids.has(id)) },
         selectedCount(type){ return this.selectedIds(type).length },
-        allSelected(type){ const tasks=this.queueTasks(type); return tasks.length>0 && tasks.every(t=>this.selectedTaskIds.includes(t.id)) },
-        toggleAll(type, checked){ const ids=this.queueTasks(type).map(t=>t.id); this.selectedTaskIds=checked ? [...new Set([...this.selectedTaskIds,...ids])] : this.selectedTaskIds.filter(id=>!ids.includes(id)) },
+        allSelected(type){ const tasks=this.filteredTasks(type); return tasks.length>0 && tasks.every(t=>this.selectedTaskIds.includes(t.id)) },
+        toggleAll(type, checked){ const ids=this.filteredTasks(type).map(t=>t.id); this.selectedTaskIds=checked ? [...new Set([...this.selectedTaskIds,...ids])] : this.selectedTaskIds.filter(id=>!ids.includes(id)) },
         clearSelection(type){ const ids=new Set(this.queueTasks(type).map(t=>t.id)); this.selectedTaskIds=this.selectedTaskIds.filter(id=>!ids.has(id)) },
-        batchActionLabel(type, action){ const count=this.selectedCount(type); if(count)return `${action==='retry'?'重试':'停止'}选中 (${count})`; return action==='retry'?'全部重试 (错误/取消)':'全部停止' },
+        batchActionLabel(type, action){ const count=this.selectedCount(type); if(count)return `${action==='retry'?'重试':'停止'}选中 (${count})`; return action==='retry'?'全部重试':'全部停止' },
         canPrioritize(t){ return t.status==='pending' && !this.isUploadTask(t) },
         prioritize(id){ axios.post('/api/tasks/prioritize', {ids:[id]}).then(r=>{ this.showToast(r.data.msg); this.load() }).catch(e=>this.showToast(e.response?.data?.msg || '插队失败','error')) },
         batchPrioritize(){
@@ -501,7 +591,7 @@ Vue.createApp({
         },
         isRunning(t){ return ['processing','uploading'].includes(t.status) }, isError(t){ return ['error','cancelled','dirty'].includes(t.status) }, canControl(t){ return ['pending','dirty','error','cancelled'].includes(t.status) }, canStop(t){ return ['pending','processing','pending_upload','uploading'].includes(t.status) },
         cancel(id){ axios.post('/api/cancel/'+id).then(()=>{ this.load(); this.showToast('任务已停止','error') }) },
-        retry(id){ axios.post('/api/retry/'+id, {type:this.view}).then(r=>{ this.showToast(r.data.msg || '已重新入队'); this.load() }).catch(e=>this.showToast(e.response?.data?.msg || '重试请求失败','error')) },
+        retry(id){ axios.post('/api/retry/'+id, {type:this.view==='upload'?'upload':'detect'}).then(r=>{ this.showToast(r.data.msg || '已重新入队'); this.load() }).catch(e=>this.showToast(e.response?.data?.msg || '重试请求失败','error')) },
         doubleSample(id){ axios.post(`/api/task/${id}/double_sample`).then(()=>{ this.load(); this.showToast('已切换动态抽样') }).catch(e=>this.showToast(e.response?.data?.msg || '切换失败','error')) },
         directUpload(id){ axios.post(`/api/task/${id}/direct_upload`).then(()=>{ this.load(); this.showToast('切换直传') }) },
         deleteTask(id){ axios.post(`/api/task/${id}/delete`).then(r=>{ this.showToast(r.data.msg); this.load() }).catch(e=>this.showToast(e.response?.data?.msg || '删除失败','error')) },
