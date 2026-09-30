@@ -45,7 +45,7 @@
         .btn, .form-control, .form-select, .input-group-text { border-radius: .6rem; }
         .btn-sm, .form-control-sm, .form-select-sm, .input-group-sm > .form-control, .input-group-sm > .form-select, .input-group-sm > .input-group-text, .input-group-sm > .btn { border-radius: .55rem; }
         .queue-toolbar .btn, .filter-bar .btn { border-radius: 999px; }
-        .dash-card { border-radius: 1rem; overflow: hidden; border: 1px solid #e5e7eb !important; box-shadow: 0 1px 3px rgba(0,0,0,.04) !important; }
+        .dash-card { border-radius: 1rem; border: 1px solid #e5e7eb !important; box-shadow: 0 1px 3px rgba(0,0,0,.04) !important; }
         .dashboard-tabs .nav-link { border-radius: .7rem .7rem 0 0; }
         .modal-content { border-radius: 1rem; overflow: hidden; }
         .toast { border-radius: .8rem; }
@@ -72,6 +72,12 @@
         .task-list { padding: .5rem; background: #f6f7f9; }
         .task-card { background: #fff; border: 1px solid #e8eaee; border-radius: .9rem; padding: .75rem .85rem; margin-bottom: .5rem; box-shadow: 0 1px 2px rgba(0,0,0,.03); }
         .task-card:last-child { margin-bottom: 0; }
+        .upload-rows { padding: .5rem; background: #f6f7f9; }
+        .upload-row { position: relative; display: flex; align-items: center; gap: .5rem; background: #fff; border: 1px solid #e8eaee; border-radius: .8rem; padding: .55rem .6rem .6rem; margin-bottom: .4rem; font-size: .9rem; overflow: visible; }
+        .upload-row:last-child { margin-bottom: 0; }
+        .upload-row .badge { font-size: .7rem; }
+        .upload-row .row-progress { position: absolute; left: .6rem; bottom: 3px; height: 3px; max-width: calc(100% - 1.2rem); border-radius: 3px; }
+        .upload-row .dropdown-menu { border-radius: .8rem; }
         .task-card .name { font-weight: 600; word-break: break-all; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
         .task-card .actions { display: flex; gap: .3rem; }
         .task-card .actions .btn { flex: 1 1 0; min-width: 0; padding: .3rem .15rem; font-size: .8rem; white-space: nowrap; }
@@ -103,7 +109,6 @@
             <!-- 劫持：电脑端直接显示 -->
             <div class="d-none d-md-flex align-items-center gap-2 me-auto">
                 <div class="hijack-group input-group input-group-sm" title="检测通过后新进入上传队列、以及上传重试的任务改传到这个 remote">
-                    <span class="input-group-text">上传劫持</span>
                     <template v-if="addingHijackRemote">
                         <input class="form-control font-monospace" v-model.trim="newHijackRemote" placeholder="自定义 remote" @keyup.enter="addHijackRemote" @keyup.esc="addingHijackRemote=false">
                         <button class="btn btn-outline-primary" :disabled="!newHijackRemote" @click="addHijackRemote" title="添加并切换"><i class="bi bi-check-lg"></i></button>
@@ -135,7 +140,7 @@
         <!-- 劫持：手机端展开面板 -->
         <div v-if="showHijackPanel" class="d-md-none border-top mt-2 pt-2">
             <div class="d-flex align-items-center mb-2">
-                <span class="small fw-bold me-auto">上传劫持</span>
+                <span class="me-auto"></span>
                 <div class="form-check form-switch mb-0">
                     <input class="form-check-input" type="checkbox" id="uploadHijackEnabledM" v-model="uploadHijackEnabled" @change="saveUploadRemoteHijack">
                     <label class="form-check-label small fw-bold" for="uploadHijackEnabledM">开启</label>
@@ -233,7 +238,7 @@
                         <input class="form-check-input me-2" type="checkbox" id="selAllM" :checked="allSelected(view)" @change="toggleAll(view, $event.target.checked)">
                         <label for="selAllM" class="text-muted">全选当前列表</label>
                     </div>
-                    <div class="task-list" v-if="visibleTasks.length">
+                    <div class="task-list" v-if="visibleTasks.length && view==='detect'">
                     <div v-for="t in visibleTasks" :key="t.id" class="task-card">
                         <div class="d-flex gap-2">
                             <input class="form-check-input mt-1 flex-shrink-0" type="checkbox" v-model="selectedTaskIds" :value="t.id" :aria-label="`选择任务 ${t.id}`">
@@ -242,19 +247,29 @@
                                 <div class="d-flex flex-wrap align-items-center gap-2 mt-1 small text-muted">
                                     <span>#[[ t.id ]]</span>
                                     <span class="badge rounded-pill" :class="bg(t.status)">[[ statusText[t.status]||t.status ]]</span>
-                                    <span v-if="view==='detect'" class="dot-group"><span v-for="i in audioDotCount(t)" :class="['config-dot', getDotClass('audio', t, i)]"></span><span class="dot-sep"></span><span :class="['config-dot', getDotClass('subtitle', t)]"></span><span :class="['config-dot', getDotClass('meta', t)]"></span></span>
-                                    <span v-if="view==='upload'" class="font-monospace">[[ uploadRemote(t.upload_target) ]]</span>
-                                    <span v-if="view==='detect'">[[ t.created_at ]]</span>
+                                    <span class="dot-group"><span v-for="i in audioDotCount(t)" :class="['config-dot', getDotClass('audio', t, i)]"></span><span class="dot-sep"></span><span :class="['config-dot', getDotClass('subtitle', t)]"></span><span :class="['config-dot', getDotClass('meta', t)]"></span></span>
+                                    <span>[[ t.created_at ]]</span>
                                 </div>
                             </div>
-                        </div>
-                        <div v-if="view==='upload'" class="mt-2">
-                            <div class="progress bg-secondary bg-opacity-10" style="height: 8px;"><div class="progress-bar" :style="{width: t.progress + '%'}" :class="progressClass(t)"></div></div>
-                            <div class="d-flex small text-muted mt-1"><span class="me-auto">[[ t.progress ]]%</span><span v-if="t.status==='uploading'">[[ t.upload_speed ]] · [[ t.upload_eta ]]</span><span v-else-if="t.finished_at">[[ t.finished_at ]]</span></div>
                         </div>
                         <div class="task-log-box mt-2" @click="showFullLog(t)" v-html="fmt(lastLogLines(t.log))"></div>
                         <div class="actions mt-2"><button v-for="a in taskActions(t)" :key="a.k" class="btn btn-sm" :class="a.cls" @click="a.run()"><i class="bi me-1" :class="a.icon"></i>[[ a.label ]]</button></div>
                     </div>
+                    </div>
+                    <div class="upload-rows" v-if="visibleTasks.length && view==='upload'">
+                        <div v-for="t in visibleTasks" :key="t.id" class="upload-row">
+                            <input class="form-check-input flex-shrink-0 m-0" type="checkbox" v-model="selectedTaskIds" :value="t.id" :aria-label="`选择任务 ${t.id}`">
+                            <div class="flex-grow-1 min-w-0 text-truncate" :title="t.filename" @click="showFullLog(t)">[[ t.filename ]]</div>
+                            <span class="small text-muted text-nowrap">[[ t.status==='uploading' && t.upload_speed ? t.upload_speed : t.progress + '%' ]]</span>
+                            <span class="badge rounded-pill flex-shrink-0" :class="bg(t.status)">[[ statusText[t.status]||t.status ]]</span>
+                            <div class="dropdown flex-shrink-0">
+                                <button class="btn btn-sm btn-light border px-2 py-0" data-bs-toggle="dropdown" aria-label="操作"><i class="bi bi-three-dots"></i></button>
+                                <ul class="dropdown-menu dropdown-menu-end">
+                                    <li v-for="a in taskActions(t)" :key="a.k"><button class="dropdown-item" :class="{'text-danger': a.k==='delete' || a.k==='stop'}" @click="a.run()"><i class="bi me-2" :class="a.icon"></i>[[ a.label ]]</button></li>
+                                </ul>
+                            </div>
+                            <div class="row-progress" :class="progressClass(t)" :style="{width: t.progress + '%'}"></div>
+                        </div>
                     </div>
                 </div>
 
