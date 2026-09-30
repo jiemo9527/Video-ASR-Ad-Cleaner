@@ -110,7 +110,7 @@
                 </div>
                 <div class="form-check form-switch mb-0" title="仅劫持检测通过后新进入上传队列或上传重试的任务">
                     <input class="form-check-input" type="checkbox" id="uploadHijackEnabled" v-model="uploadHijackEnabled" @change="saveUploadRemoteHijack">
-                    <label class="form-check-label small fw-bold" for="uploadHijackEnabled">开启</label>
+                    <label class="form-check-label small fw-bold" for="uploadHijackEnabled">开启劫持</label>
                 </div>
             </div>
         </div>
@@ -250,7 +250,7 @@
 let modalConfig, modalLog, modalConfirm, toastInstance;
 Vue.createApp({
     delimiters: ['[[', ']]'],
-    data(){ return { tasks:[], view:'detect', curTask:{}, sysLogs:'', sysLogFilter:'', autoRefreshLogs:true, currentLogTitle:'', currentLogContent:'', uploadHijackRemote:'', uploadHijackCandidates:[], newHijackRemote:'', addingHijackRemote:false, uploadHijackEnabled:false, ariaNgOptionsImport:'', selectedTaskIds:[], aria2Stats:{active:0, waiting:0, stopped:0, downloadSpeed:0}, statusText:{'pending':'⏳ 等待中','processing':'🔄 检测中','pending_upload':'✅ 待上传','uploading':'☁️ 上传中','uploaded':'🎉 已完成','dirty':'🚫 已拦截','error':'❌ 出错了','cancelled':'⏹ 已停止'}, toastMsg:'', toastClass:'bg-primary', toastIcon:'bi-info-circle', confirmMsg:'', confirmCallback:null, pollTimer: null }},
+    data(){ return { tasks:[], view:'detect', curTask:{}, sysLogs:'', sysLogFilter:'', autoRefreshLogs:true, currentLogTitle:'', currentLogContent:'', uploadHijackRemote:'', uploadHijackCandidates:[], newHijackRemote:'', addingHijackRemote:false, uploadHijackEnabled:false, hijackLoadedAt:0, ariaNgOptionsImport:'', selectedTaskIds:[], aria2Stats:{active:0, waiting:0, stopped:0, downloadSpeed:0}, statusText:{'pending':'⏳ 等待中','processing':'🔄 检测中','pending_upload':'✅ 待上传','uploading':'☁️ 上传中','uploaded':'🎉 已完成','dirty':'🚫 已拦截','error':'❌ 出错了','cancelled':'⏹ 已停止'}, toastMsg:'', toastClass:'bg-primary', toastIcon:'bi-info-circle', confirmMsg:'', confirmCallback:null, pollTimer: null }},
     computed: {
         filteredSystemLogs() { if(!this.sysLogs)return[]; const l=this.sysLogs.split('\n'); if(!this.sysLogFilter.trim())return l; const k=this.sysLogFilter.toLowerCase(); return l.filter(x=>x.toLowerCase().includes(k)) },
         detectTasks() { return this.tasks.filter(t => !this.isUploadTask(t)) },
@@ -377,6 +377,7 @@ Vue.createApp({
                 this.uploadHijackEnabled=Boolean(r.data.enabled);
                 this.uploadHijackRemote=String(r.data.remote||'');
                 this.uploadHijackCandidates=Array.isArray(r.data.candidates) ? r.data.candidates : [];
+                this.hijackLoadedAt=Date.now();
             });
         },
 
@@ -420,6 +421,8 @@ Vue.createApp({
 
         startPolling() {
             const step = () => {
+                // 超限自动切换会在服务端改劫持目标，定时同步，避免页面用旧值覆盖
+                if(!this.addingHijackRemote && Date.now() - this.hijackLoadedAt > 10000) this.loadUploadRemoteHijack().catch(()=>{});
                 this.load().finally(() => {
                     const busy = this.activeDetectCount > 0 || this.activeUploadCount > 0;
                     const delay = busy ? 1000 : 3000;

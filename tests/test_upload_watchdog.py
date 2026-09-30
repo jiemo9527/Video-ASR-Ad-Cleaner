@@ -1,6 +1,9 @@
 import os
+import stat
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -55,6 +58,49 @@ class UploadWatchdogTests(unittest.TestCase):
         self.assertTrue(core.can_retry_slow_upload(0))
         self.assertTrue(core.can_retry_slow_upload(2))
         self.assertFalse(core.can_retry_slow_upload(3))
+
+
+# 模拟 rclone：持续报告 1KB/s 的低速，最后正常完成。
+SLOW_RCLONE = r'''#!/usr/bin/env python3
+import json, sys
+for _ in range(3):
+    print(json.dumps({"level": "info", "msg": "", "stats": {"speed": 1024, "eta": 999, "transferring": [{"bytes": 1, "size": 1}]}}), file=sys.stderr, flush=True)
+'''
+
+
+class SlowRestartSwitchTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        rclone = os.path.join(self.tmp.name, 'rclone')
+        with open(rclone, 'w') as f:
+            f.write(SLOW_RCLONE)
+        os.chmod(rclone, os.stat(rclone).st_mode | stat.S_IEXEC)
+        self.old_path = os.environ['PATH']
+        os.environ['PATH'] = self.tmp.name + os.pathsep + self.old_path
+        # 稀疏文件：大小超过看门狗阈值但不占磁盘
+        self.media = os.path.join(self.tmp.name, 'movie.mkv')
+        with open(self.media, 'wb') as f:
+            f.truncate(ScannerCore.UPLOAD_WATCHDOG_MIN_FILE_SIZE + 1)
+
+    def tearDown(self):
+        os.environ['PATH'] = self.old_path
+        self.tmp.cleanup()
+
+    def upload(self, enabled):
+        core = ScannerCore(logger_callback=lambda m: None)
+        core.upload_slow_restart_enabled = enabled
+        with mock.patch.object(ScannerCore, 'UPLOAD_WATCHDOG_GRACE_SECONDS', 0):
+            return core, core.upload_with_progress(self.media, 'g01:movie.mkv')
+
+    def test_enabled_watchdog_restarts_slow_upload(self):
+        core, ok = self.upload(True)
+        self.assertFalse(ok)
+        self.assertTrue(core.upload_restart_requested)
+
+    def test_disabled_watchdog_lets_slow_upload_finish(self):
+        core, ok = self.upload(False)
+        self.assertTrue(ok)
+        self.assertFalse(core.upload_restart_requested)
 
 
 if __name__ == '__main__':

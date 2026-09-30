@@ -1727,6 +1727,12 @@ class ScannerCore:
     UPLOAD_WATCHDOG_MIN_SPEED = 3 * 1024 * 1024
     UPLOAD_WATCHDOG_GRACE_SECONDS = 35
     UPLOAD_WATCHDOG_MAX_RETRIES = 3
+    upload_slow_restart_enabled = True
+    # 网盘账号上传额度/存储空间用尽（如 Google Drive 每日 750GB 上传上限）
+    UPLOAD_LIMIT_RE = re.compile(
+        r'upload ?limit|userRateLimitExceeded|user rate limit exceeded|storageQuotaExceeded|storage quota|'
+        r'teamDriveFileLimitExceeded|dailyLimitExceeded|quotaExceeded|quotaLimitReached|insufficient ?storage',
+        re.IGNORECASE)
 
     @classmethod
     def can_retry_slow_upload(cls, retry_count):
@@ -1748,8 +1754,13 @@ class ScannerCore:
             return False
         return (time.monotonic() if now is None else now) - low_speed_started_at >= cls.UPLOAD_WATCHDOG_GRACE_SECONDS
 
+    @classmethod
+    def is_upload_limit_error(cls, message):
+        return bool(cls.UPLOAD_LIMIT_RE.search(str(message or '')))
+
     def upload_with_progress(self, local_path, remote_path=None):
         self.upload_restart_requested = False
+        self.upload_limit_hit = False
         if self._stopped: return False
         if not remote_path:
             filename = os.path.basename(local_path)
@@ -1784,6 +1795,8 @@ class ScannerCore:
                 message = str(data.get('msg', '')).strip()
                 if level in ('warning', 'error') and message:
                     self.log(f"rclone {level}: {message}")
+                    if self.is_upload_limit_error(message):
+                        self.upload_limit_hit = True
 
                 if 'stats' not in data:
                     continue
@@ -1794,7 +1807,8 @@ class ScannerCore:
                 pct = int((transferred / max(1, transfer_size)) * 100)
                 speed_bytes = float(st.get('speed', 0) or 0)
                 now = time.monotonic()
-                if file_size >= self.UPLOAD_WATCHDOG_MIN_FILE_SIZE and speed_bytes < self.UPLOAD_WATCHDOG_MIN_SPEED:
+                if (self.upload_slow_restart_enabled and file_size >= self.UPLOAD_WATCHDOG_MIN_FILE_SIZE
+                        and speed_bytes < self.UPLOAD_WATCHDOG_MIN_SPEED):
                     low_speed_started_at = low_speed_started_at or now
                     if self.should_restart_slow_upload(file_size, speed_bytes, low_speed_started_at, now):
                         self.upload_restart_requested = True

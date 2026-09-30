@@ -257,7 +257,7 @@ def get_final_config(overrides_json=None):
         "cloud_asr_per_key_concurrency": 3,
         "cloud_asr_upload_timeout": 20, "cloud_asr_read_timeout": 120, "cloud_asr_long_read_timeout": 180,
         "scan_path": "/root/downloads", "rclone_remote": "s25", "upload_remote_hijack_enabled": False,
-        "upload_remote_hijack_remote": "", "upload_remote_hijack_candidates": "", "api_token": "8pUoqOTHhEAhRnacl3c19",
+        "upload_remote_hijack_remote": "", "upload_remote_hijack_candidates": "", "upload_remote_auto_switch": False, "upload_slow_restart": True, "api_token": "8pUoqOTHhEAhRnacl3c19",
         "notify_upload_success": False, "notify_errors": True,
         "cleanup_scanner_history": True,
         "cleanup_scanner_uploaded": True, "cleanup_scanner_dirty": True,
@@ -274,7 +274,7 @@ def get_final_config(overrides_json=None):
     for k, v in db_configs.items():
         if k in ["download_proxy", "cleanup_upload_dirty"]:
             continue
-        if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "cloud_asr_proxy_enabled", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample", "upload_remote_hijack_enabled",
+        if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "cloud_asr_proxy_enabled", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample", "upload_remote_hijack_enabled", "upload_remote_auto_switch", "upload_slow_restart",
                    "notify_upload_success", "notify_errors", "cleanup_scanner_history", "cleanup_scanner_uploaded", "cleanup_scanner_dirty", "cleanup_scanner_error", "cleanup_scanner_cancelled",
                    "cleanup_detect_dirty", "cleanup_detect_error", "cleanup_detect_cancelled", "cleanup_upload_uploaded", "cleanup_upload_error", "cleanup_upload_cancelled", "cleanup_aria2_completed",
                    "discard_images", "discard_nfo"]:
@@ -425,6 +425,54 @@ def is_upload_task(task, overrides=None):
 
 
 REMOTE_NAME_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]*')
+# 超限 remote 在进程内冷却 24 小时（Google Drive 上传额度按滚动 24 小时恢复），服务重启后清空
+UPLOAD_LIMIT_COOLDOWN_SECONDS = 24 * 3600
+upload_limit_exhausted = {}
+upload_limit_lock = threading.Lock()
+
+
+def normalize_remote_candidates(values):
+    candidates = []
+    for value in values or []:
+        remote = str(value or '').strip().rstrip(':')
+        if REMOTE_NAME_RE.fullmatch(remote) and remote not in candidates:
+            candidates.append(remote)
+    return candidates
+
+
+def pick_next_upload_remote(current_remote, candidates, now=None):
+    """标记 current_remote 超限，按候选顺序返回其后第一个未超限的 remote；全部超限返回 None。"""
+    now = time.monotonic() if now is None else now
+    with upload_limit_lock:
+        if current_remote:
+            upload_limit_exhausted[current_remote] = now
+        for remote, hit_at in list(upload_limit_exhausted.items()):
+            if now - hit_at >= UPLOAD_LIMIT_COOLDOWN_SECONDS:
+                del upload_limit_exhausted[remote]
+        start = candidates.index(current_remote) + 1 if current_remote in candidates else 0
+        for remote in candidates[start:] + candidates[:start]:
+            if remote not in upload_limit_exhausted:
+                return remote
+    return None
+
+
+def switch_upload_remote_on_limit(task, current_remote):
+    """超限自动切换：任务改传下一个候选 remote，全局劫持同步指向它。未开启或无可用候选返回 None。"""
+    config = get_final_config(None)
+    if not config.get('upload_remote_auto_switch'):
+        return None
+    candidates = normalize_remote_candidates(str(config.get('upload_remote_hijack_candidates') or '').split('\n'))
+    next_remote = pick_next_upload_remote(current_remote, candidates)
+    if not next_remote:
+        return None
+    overrides = get_task_overrides(task)
+    overrides['upload_remote'] = next_remote
+    set_task_overrides(task, overrides)
+    for key, value in {'upload_remote_hijack_enabled': 'true', 'upload_remote_hijack_remote': next_remote}.items():
+        item = Config.query.get(key) or Config(key=key)
+        item.value = value
+        db.session.add(item)
+    return next_remote
 
 
 def apply_upload_remote_hijack(task, source):
@@ -1311,6 +1359,7 @@ def upload_worker():
                 core = ScannerCore(logger_callback=db_logger, task_id=task_id, root_dir_name=current_root_name,
                                    rclone_remote=rclone_remote)
                 core.prog_cb = upload_prog
+                core.upload_slow_restart_enabled = bool(final_settings.get('upload_slow_restart', True))
                 with task_state_lock:
                     running_tasks[task_id] = core
                 try:
@@ -1381,6 +1430,16 @@ def upload_worker():
                                 if final_settings.get('notify_errors', True): send_task_tg_msg(
                                     core, final_settings, task, f"❌ 上传持续低速: {task.filename}"
                                 )
+                        elif (core.upload_limit_hit and not core._stopped and task.status != 'cancelled'
+                              and (next_remote := switch_upload_remote_on_limit(task, dest_remote))):
+                            task.status = 'pending_upload'
+                            task.progress = 0
+                            task.upload_speed = ''
+                            task.upload_eta = '自动切换中'
+                            task.finished_at = None
+                            db_logger(f"🔀 {dest_remote}: 账号超限，自动切换到 {next_remote}: 并重新上传")
+                            if safe_db_commit(f"upload limit switch {task_id}"):
+                                upload_queue.put(task_id)
                         # 🔥🔥🔥 修复逻辑：检查是“失败”还是“手动停止”
                         elif core._stopped:
                             # 仅仅记录停止日志，不要报错，不要发通知
@@ -1388,7 +1447,8 @@ def upload_worker():
                         elif task.status != 'cancelled':
                             task.status = 'error';
                             task.finished_at = datetime.now();
-                            db_logger(f"❌ 上传失败{': ' + os.path.basename(current_upload_path) if dir_task and current_upload_path else ''}")
+                            db_logger(f"❌ 上传失败{': ' + os.path.basename(current_upload_path) if dir_task and current_upload_path else ''}"
+                                      f"{'（账号超限，无可切换的候选 remote）' if core.upload_limit_hit else ''}")
                             if final_settings.get('notify_errors', True): send_task_tg_msg(
                                 core, final_settings, task, f"❌ 上传失败: {task.filename}"
                             )
@@ -2088,15 +2148,6 @@ def prioritize_tasks():
     return jsonify({"code": 200, "msg": msg, "count": len(moved)})
 
 
-def normalize_remote_candidates(values):
-    candidates = []
-    for value in values or []:
-        remote = str(value or '').strip().rstrip(':')
-        if REMOTE_NAME_RE.fullmatch(remote) and remote not in candidates:
-            candidates.append(remote)
-    return candidates
-
-
 @app.route('/api/upload_remote_hijack', methods=['GET', 'POST'])
 @login_required
 def upload_remote_hijack():
@@ -2329,7 +2380,7 @@ def settings():
             if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "cloud_asr_proxy_enabled", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample",
                       "notify_upload_success", "notify_errors", "cleanup_scanner_history", "cleanup_scanner_uploaded", "cleanup_scanner_dirty", "cleanup_scanner_error", "cleanup_scanner_cancelled",
                       "cleanup_detect_dirty", "cleanup_detect_error", "cleanup_detect_cancelled", "cleanup_upload_uploaded", "cleanup_upload_error", "cleanup_upload_cancelled", "cleanup_aria2_completed",
-                   "discard_images", "discard_nfo"]:
+                   "discard_images", "discard_nfo", "upload_remote_auto_switch", "upload_slow_restart"]:
                 val = "true" if (v is True or str(v).lower() == 'true') else "false"
             elif k == 'discard_extra_extensions':
                 extensions = configured_discard_extensions({'discard_extra_extensions': v})
