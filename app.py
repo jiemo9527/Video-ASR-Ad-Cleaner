@@ -143,6 +143,67 @@ def get_active_task_ids():
         return set(running_tasks.keys()) | set(active_detect_tasks) | set(active_upload_tasks)
 
 
+# 运行中被删除的任务：先停止，待工作线程退出后删除记录与本地文件
+pending_delete_ids = set()
+
+
+def finish_pending_delete(task_id):
+    """任务已不在运行时执行延后删除；返回是否删除。工作线程与删除接口都会调用，只有一方会执行。"""
+    with task_state_lock:
+        if (task_id not in pending_delete_ids or task_id in running_tasks
+                or task_id in active_detect_tasks or task_id in active_upload_tasks):
+            return False
+        pending_delete_ids.discard(task_id)
+    try:
+        task = Task.query.get(task_id)
+        if task:
+            remove_task_files(task)
+            db.session.delete(task)
+            db.session.commit()
+        return True
+    except Exception as e:
+        safe_db_rollback(f"pending delete {task_id}")
+        print(f"⚠️ 延后删除任务失败[{task_id}]: {e}")
+        return False
+
+
+def stop_and_delete_tasks(tasks, wait_seconds=5):
+    """删除任务；运行中的先停止再删除。返回 (已删除数, 删除文件数, 停止后待删数)。"""
+    deleted_count = 0
+    deleted_files = 0
+    stopping_ids = []
+    active_ids = get_active_task_ids()
+    for task in tasks:
+        if task.id in active_ids:
+            with task_state_lock:
+                pending_delete_ids.add(task.id)
+                core = running_tasks.get(task.id)
+            if core:
+                core.stop()
+            task.status = 'cancelled'
+            task.finished_at = datetime.now()
+            task.log = (task.log or '') + "\n⏹ 已停止，结束后自动删除\n"
+            stopping_ids.append(task.id)
+            continue
+        deleted_files += len(remove_task_files(task))
+        db.session.delete(task)
+        deleted_count += 1
+    db.session.commit()
+
+    deadline = time.time() + wait_seconds
+    while stopping_ids:
+        for task_id in list(stopping_ids):
+            with task_state_lock:
+                handled = task_id not in pending_delete_ids
+            if handled or finish_pending_delete(task_id):
+                stopping_ids.remove(task_id)
+                deleted_count += 1
+        if not stopping_ids or time.time() >= deadline:
+            break
+        time.sleep(0.2)
+    return deleted_count, deleted_files, len(stopping_ids)
+
+
 def safe_db_rollback(context="db"):
     try:
         db.session.rollback()
@@ -1260,6 +1321,7 @@ def detection_worker():
                     clear_running_task(task_id, core)
                     release_task_stage(task_id, 'detect')
                     safe_db_commit(f"detect finally {task_id}");
+                    finish_pending_delete(task_id)
                     detect_queue.task_done()
             except Exception as e:
                 safe_db_rollback("detect worker")
@@ -1469,6 +1531,7 @@ def upload_worker():
                     clear_running_task(task_id, core)
                     release_task_stage(task_id, 'upload')
                     safe_db_commit(f"upload finally {task_id}")
+                    finish_pending_delete(task_id)
                     upload_queue.task_done()
             except Exception as e:
                 safe_db_rollback("upload worker")
@@ -2053,9 +2116,12 @@ def batch_tasks():
     target = d.get('type');
     count = 0
     if not action or not target: return jsonify({"code": 400})
+    if action == 'direct_upload' and not (isinstance(d.get('ids'), list) and d.get('ids')):
+        return jsonify({"code": 400, "msg": "请先选择要直传的任务"}), 400
 
     detect_ids = [];
     upload_ids = []
+    skipped = 0
 
     for t in get_batch_task_list(d):
         ov = get_task_overrides(t)
@@ -2073,6 +2139,22 @@ def batch_tasks():
                 if t.id in running_tasks: running_tasks[t.id].stop()
                 t.status = 'cancelled';
                 t.finished_at = datetime.now();
+                count += 1
+
+            elif action == 'direct_upload':
+                # 与单任务直传一致：跳过检测直接进入上传；检测中的任务需先停止
+                if t.status not in ['pending', 'dirty', 'error', 'cancelled'] or is_up:
+                    skipped += 1
+                    continue
+                update_task_overrides(t, {'direct_upload': True})
+                t.log = (t.log or '') + "\n=== 批量直传 ===\n"
+                t.finished_at = None
+                t.retry_count = 0
+                if t.status == 'pending' and detect_queue.move_to_front(t.id):
+                    pass
+                else:
+                    t.status = 'pending'
+                    detect_ids.append(t.id)
                 count += 1
 
         elif target == 'upload':
@@ -2094,7 +2176,10 @@ def batch_tasks():
     for i in reversed(detect_ids): enqueue_detect_task(i, priority=True)
     for i in upload_ids: upload_queue.put(i)
 
-    return jsonify({"code": 200, "msg": f"操作了 {count} 个任务"})
+    msg = f"操作了 {count} 个任务"
+    if skipped:
+        msg += f"，跳过 {skipped} 个检测中或已进入上传的任务"
+    return jsonify({"code": 200, "msg": msg})
 
 
 @app.route('/api/tasks/prioritize', methods=['POST'])
@@ -2307,13 +2392,9 @@ def delete_task_file(tid):
     t = Task.query.get(tid);
     if not t: return jsonify({"code": 404})
     if tid in get_active_task_ids():
-        core = running_tasks.get(tid)
-        if core:
-            core.stop()
-        t.status = 'cancelled'
-        t.finished_at = datetime.now()
-        safe_db_commit(f"defer delete active task {tid}")
-        return jsonify({"code": 409, "msg": "任务仍在运行，已发送停止指令；请稍后再删除记录"})
+        deleted_count, _, stopping = stop_and_delete_tasks([t])
+        msg = "任务已停止并删除" if deleted_count else "任务已停止，结束后自动删除"
+        return jsonify({"code": 200, "msg": msg})
 
     deleted = remove_task_files(t)
     db.session.delete(t);
@@ -2330,34 +2411,12 @@ def batch_delete_tasks():
     if not isinstance(task_ids, list) or not task_ids:
         return jsonify({"code": 400, "msg": "请先选择要删除的任务"}), 400
 
-    selected_tasks = get_batch_task_list(data)
-    active_ids = get_active_task_ids()
-    deleted_count = 0
-    deleted_files = 0
-    stopped_count = 0
-
-    for task in selected_tasks:
-        if task.id in active_ids:
-            core = running_tasks.get(task.id)
-            if core:
-                core.stop()
-            if is_upload_task(task):
-                task.log = (task.log or '') + "\n⏹ 上传已停止\n"
-            task.status = 'cancelled'
-            task.finished_at = datetime.now()
-            stopped_count += 1
-            continue
-
-        deleted_files += len(remove_task_files(task))
-        db.session.delete(task)
-        deleted_count += 1
-
-    db.session.commit()
+    deleted_count, deleted_files, stopping_count = stop_and_delete_tasks(get_batch_task_list(data))
     msg = f"已删除 {deleted_count} 个任务"
     if deleted_files:
         msg += f"及 {deleted_files} 个本地文件"
-    if stopped_count:
-        msg += f"；{stopped_count} 个运行中任务已停止，待结束后可再次删除"
+    if stopping_count:
+        msg += f"；{stopping_count} 个运行中任务已停止，结束后自动删除"
     return jsonify({"code": 200, "msg": msg})
 
 

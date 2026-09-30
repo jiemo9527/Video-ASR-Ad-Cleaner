@@ -138,6 +138,7 @@
                         <button class="btn btn-sm btn-outline-primary" @click="batchAction('detect', 'retry')"><i class="bi bi-arrow-repeat me-1"></i>[[ batchActionLabel('detect', 'retry') ]]</button>
                         <button class="btn btn-sm btn-outline-danger" @click="batchAction('detect', 'stop')"><i class="bi bi-stop-circle me-1"></i>[[ batchActionLabel('detect', 'stop') ]]</button>
                         <button class="btn btn-sm btn-outline-warning" :disabled="!prioritizableCount" @click="batchPrioritize()" title="把选中的等待中任务提到检测队列最前"><i class="bi bi-arrow-bar-up me-1"></i>插队[[ prioritizableCount ? ` (${prioritizableCount})` : '' ]]</button>
+                        <button class="btn btn-sm btn-outline-success" :disabled="!directUploadableCount" @click="batchDirectUpload()" title="选中的任务跳过检测，直接上传（检测中的任务需先停止）"><i class="bi bi-forward-fill me-1"></i>批量直传[[ directUploadableCount ? ` (${directUploadableCount})` : '' ]]</button>
                         <button class="btn btn-sm btn-outline-danger" :disabled="!selectedCount('detect')" @click="batchDelete('detect')"><i class="bi bi-trash-fill me-1"></i>批量删除</button>
                         <span v-if="selectedCount('detect')" class="small text-primary align-self-center ms-1">已选 [[ selectedCount('detect') ]] 项 <button class="btn btn-link btn-sm p-0 ms-1" @click="clearSelection('detect')">清除</button></span>
                     </div>
@@ -160,7 +161,7 @@
                                             <button v-if="canControl(t)" class="btn btn-outline-success" @click="confirmAction('确定跳过检测直接上传吗？', () => directUpload(t.id))" title="直传"><i class="bi bi-forward-fill"></i></button>
                                             <button v-if="canStop(t)" class="btn btn-outline-danger" @click="confirmAction('确定停止该任务吗？', () => cancel(t.id))" title="停止"><i class="bi bi-stop-circle-fill"></i></button>
                                             <button v-if="isError(t)" class="btn btn-outline-secondary" @click="retry(t.id)" title="重试"><i class="bi bi-arrow-clockwise"></i></button>
-                                            <button class="btn btn-outline-danger" @click="confirmAction('⚠️ 警告：确定要删除此任务吗？', () => deleteTask(t.id))" title="删除"><i class="bi bi-trash-fill"></i></button>
+                                            <button class="btn btn-outline-danger" @click="confirmAction(isRunning(t) ? '⚠️ 任务运行中，将先停止再删除任务及本地文件，确定吗？' : '⚠️ 警告：确定要删除此任务吗？', () => deleteTask(t.id))" title="删除"><i class="bi bi-trash-fill"></i></button>
                                         </div>
                                     </td>
                                 </tr>
@@ -213,7 +214,7 @@
                                 <td><div v-if="t.status==='uploading'" class="small"><div class="fw-bold text-dark">🚀 [[ t.upload_speed ]]</div><div class="text-muted">⏱ [[ t.upload_eta ]]</div></div><div v-else class="text-muted small">-</div></td>
                                 <td class="small text-muted">[[ t.finished_at || '-' ]]</td>
                                 <td class="text-center"><span class="badge rounded-pill" :class="bg(t.status)">[[ statusText[t.status]||t.status ]]</span></td>
-                                <td class="text-end pe-3"><div class="btn-group btn-group-sm"><button v-if="canStop(t)" class="btn btn-outline-danger" @click="confirmAction('确定停止上传？', () => cancel(t.id))"><i class="bi bi-stop-fill"></i></button><button v-if="t.status==='error' || t.status==='cancelled'" class="btn btn-outline-secondary" @click="retry(t.id)"><i class="bi bi-arrow-repeat"></i></button><button class="btn btn-outline-danger" @click="confirmAction('⚠️ 确定删除此记录吗？', () => deleteTask(t.id))"><i class="bi bi-trash-fill"></i></button></div></td>
+                                <td class="text-end pe-3"><div class="btn-group btn-group-sm"><button v-if="canStop(t)" class="btn btn-outline-danger" @click="confirmAction('确定停止上传？', () => cancel(t.id))"><i class="bi bi-stop-fill"></i></button><button v-if="t.status==='error' || t.status==='cancelled'" class="btn btn-outline-secondary" @click="retry(t.id)"><i class="bi bi-arrow-repeat"></i></button><button class="btn btn-outline-danger" @click="confirmAction(isRunning(t) ? '⚠️ 上传中，将先停止再删除记录及本地文件，确定吗？' : '⚠️ 确定删除此记录吗？', () => deleteTask(t.id))"><i class="bi bi-trash-fill"></i></button></div></td>
                             </tr>
                             <tr v-if="uploadTasks.length===0"><td colspan="9" class="text-center py-5 text-muted">暂无上传任务</td></tr>
                         </tbody>
@@ -258,7 +259,8 @@ Vue.createApp({
         activeDetectCount() { return this.tasks.filter(t => t.status === 'processing').length },
         activeUploadCount() { return this.tasks.filter(t => t.status === 'uploading').length },
         activeUploadSpeed() { return this.uploadTasks.filter(t => t.status === 'uploading').reduce((total, t) => total + this.uploadSpeedBytes(t.upload_speed), 0) },
-        prioritizableCount() { return this.selectedIds('detect').filter(id => { const t = this.tasks.find(x => x.id === id); return t && t.status === 'pending' }).length }
+        prioritizableCount() { return this.selectedIds('detect').filter(id => { const t = this.tasks.find(x => x.id === id); return t && t.status === 'pending' }).length },
+        directUploadableCount() { return this.selectedIds('detect').filter(id => { const t = this.tasks.find(x => x.id === id); return t && this.canControl(t) }).length }
     },
     mounted(){
         this.load();
@@ -502,7 +504,7 @@ Vue.createApp({
         retry(id){ axios.post('/api/retry/'+id, {type:this.view}).then(r=>{ this.showToast(r.data.msg || '已重新入队'); this.load() }).catch(e=>this.showToast(e.response?.data?.msg || '重试请求失败','error')) },
         doubleSample(id){ axios.post(`/api/task/${id}/double_sample`).then(()=>{ this.load(); this.showToast('已切换动态抽样') }).catch(e=>this.showToast(e.response?.data?.msg || '切换失败','error')) },
         directUpload(id){ axios.post(`/api/task/${id}/direct_upload`).then(()=>{ this.load(); this.showToast('切换直传') }) },
-        deleteTask(id){ axios.post(`/api/task/${id}/delete`).then(r=>{ this.showToast(r.data.msg); this.load() }) },
+        deleteTask(id){ axios.post(`/api/task/${id}/delete`).then(r=>{ this.showToast(r.data.msg); this.load() }).catch(e=>this.showToast(e.response?.data?.msg || '删除失败','error')) },
         clearHistory(){ axios.post('/api/tasks/clear').then(r=>{ this.showToast(r.data.msg); this.load(); this.loadAria2Stats() }).catch(e=>this.showToast(e.response?.data?.msg || '清空历史失败','error')) },
         openConfig(t){ this.curTask=JSON.parse(JSON.stringify(t)); modalConfig.show() },
         saveAndRetry(){ axios.post(`/api/task/${this.curTask.id}/save_and_retry`,this.curTask.config).then(()=>{ modalConfig.hide(); this.load(); this.showToast('策略更新') }) },
@@ -519,10 +521,21 @@ Vue.createApp({
                 });
             });
         },
+        batchDirectUpload() {
+            const ids = this.selectedIds('detect');
+            if(!ids.length) return;
+            this.confirmAction(`确定让选中的 ${this.directUploadableCount} 个任务跳过检测直接上传吗？`, () => {
+                axios.post('/api/tasks/batch', {type:'detect', action:'direct_upload', ids}).then(res => {
+                    this.clearSelection('detect');
+                    this.showToast(res.data.msg);
+                    this.load();
+                }).catch(e => this.showToast(e.response?.data?.msg || '批量直传失败', 'error'));
+            });
+        },
         batchDelete(type) {
             const ids = this.selectedIds(type);
             if(!ids.length) return;
-            this.confirmAction(`⚠️ 确定删除选中的 ${ids.length} 个任务及其本地媒体文件吗？此操作不可恢复。运行中的任务将先停止，结束后可再次删除。`, () => {
+            this.confirmAction(`⚠️ 确定删除选中的 ${ids.length} 个任务及其本地媒体文件吗？此操作不可恢复。运行中的任务会先停止再删除。`, () => {
                 axios.post('/api/tasks/batch_delete', {ids}).then(res => {
                     this.clearSelection(type);
                     this.showToast(res.data.msg);
