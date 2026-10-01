@@ -67,6 +67,14 @@
         .btn-outline-purple { color: #6f42c1; border-color: #6f42c1; }
         .btn-outline-purple:hover { color: #fff; background: #6f42c1; }
         .th-help { cursor: help; }
+        .table-fixed { table-layout: fixed; }
+        .table-fixed td { overflow: hidden; }
+        .table-fixed th { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .resizable-th { position: relative; }
+        .col-resizer { position: absolute; top: 0; right: 0; width: 8px; height: 100%; cursor: col-resize; user-select: none; z-index: 2; }
+        .col-resizer::after { content: ''; position: absolute; top: 25%; bottom: 25%; right: 3px; width: 2px; border-radius: 2px; background: #dee2e6; }
+        .col-resizer:hover::after, body.col-resizing .col-resizer::after { background: #0d6efd; }
+        body.col-resizing { cursor: col-resize !important; user-select: none; }
 
         /* 手机卡片 */
         .task-list { padding: .5rem; background: #f6f7f9; }
@@ -202,17 +210,23 @@
 
                 <!-- 电脑：表格 -->
                 <div class="table-responsive d-none d-md-block">
-                    <table class="queue-table table table-hover align-middle mb-0">
-                        <thead class="table-light" v-if="view==='detect'"><tr><th class="text-center" style="width:42px"><input class="form-check-input" type="checkbox" :checked="allSelected('detect')" @change="toggleAll('detect', $event.target.checked)" title="全选当前列表"></th><th class="text-center">ID</th><th>文件信息</th><th class="text-center"><span class="th-help" title="左侧每个点是一个音频抽样段，竖线右侧依次是字幕、元数据。绿=通过，蓝=进行中，红=命中或失败，灰=未开始或未启用">状态指示 <i class="bi bi-question-circle text-muted"></i></span></th><th class="text-center">结果</th><th>实时日志 <span class="small fw-normal text-muted">(双击全屏)</span></th><th class="text-end pe-4">操作</th></tr></thead>
-                        <thead class="table-light" v-else><tr><th class="text-center" style="width:42px"><input class="form-check-input" type="checkbox" :checked="allSelected('upload')" @change="toggleAll('upload', $event.target.checked)" title="全选当前列表"></th><th class="text-center">ID</th><th>文件信息</th><th>上传目标</th><th style="min-width:160px">传输进度</th><th>速度 / ETA</th><th>结束时间</th><th class="text-center">状态</th><th class="text-end pe-4">操作</th></tr></thead>
+                    <table class="queue-table table table-hover align-middle mb-0 table-fixed" :style="tableStyle(view)">
+                        <colgroup><col v-for="c in queueColumns[view]" :key="c.key" :style="{width: colWidth(view, c) ? colWidth(view, c) + 'px' : 'auto'}"></colgroup>
+                        <thead class="table-light"><tr>
+                            <th v-for="c in queueColumns[view]" :key="c.key" :class="c.cls" class="resizable-th">
+                                <input v-if="c.key==='sel'" class="form-check-input" type="checkbox" :checked="allSelected(view)" @change="toggleAll(view, $event.target.checked)" title="全选当前列表">
+                                <template v-else><span :class="{'th-help': c.help}" :title="c.help || ''">[[ c.label ]]<i v-if="c.help" class="bi bi-question-circle text-muted ms-1"></i></span><span v-if="c.hint" class="small fw-normal text-muted ms-1">[[ c.hint ]]</span></template>
+                                <span v-if="!c.fixed" class="col-resizer" title="拖动调整列宽，双击恢复默认" @mousedown.prevent.stop="startColResize($event, view, c)" @dblclick.stop="resetColWidth(view, c)"></span>
+                            </th>
+                        </tr></thead>
                         <tbody v-if="view==='detect'">
                             <tr v-for="t in visibleTasks" :key="t.id">
                                 <td class="text-center"><input class="form-check-input" type="checkbox" v-model="selectedTaskIds" :value="t.id" :aria-label="`选择任务 ${t.id}`"></td>
                                 <td class="text-center fw-bold text-muted">[[ t.id ]]</td>
-                                <td><div class="text-truncate fw-bold text-dark" style="max-width:300px" :title="t.filename"><i class="bi bi-file-earmark-play me-1"></i>[[ t.filename ]]</div><div class="small text-muted mt-1"><i class="bi bi-clock"></i> [[ t.created_at ]]</div></td>
+                                <td><div class="text-truncate fw-bold text-dark" :title="t.filename"><i class="bi bi-file-earmark-play me-1"></i>[[ t.filename ]]</div><div class="small text-muted mt-1"><i class="bi bi-clock"></i> [[ t.created_at ]]</div></td>
                                 <td class="text-center"><span class="dot-group"><span v-for="i in audioDotCount(t)" :class="['config-dot', getDotClass('audio', t, i)]" :title="dotTitle('audio', t, i)"></span><span class="dot-sep"></span><span :class="['config-dot', getDotClass('subtitle', t)]" :title="dotTitle('subtitle', t)"></span><span :class="['config-dot', getDotClass('meta', t)]" :title="dotTitle('meta', t)"></span></span></td>
                                 <td class="text-center"><span class="badge rounded-pill" :class="bg(t.status)">[[ statusText[t.status]||t.status ]]</span></td>
-                                <td style="width: 34%;"><div class="task-log-box" @dblclick="showFullLog(t)" v-html="fmt(t.log)"></div></td>
+                                <td><div class="task-log-box" @dblclick="showFullLog(t)" v-html="fmt(t.log)"></div></td>
                                 <td class="text-end pe-3"><div class="btn-group btn-group-sm"><button v-for="a in taskActions(t)" :key="a.k" class="btn" :class="a.cls" :title="a.title" @click="a.run()"><i class="bi" :class="a.icon"></i></button></div></td>
                             </tr>
                         </tbody>
@@ -220,11 +234,11 @@
                             <tr v-for="t in visibleTasks" :key="t.id">
                                 <td class="text-center"><input class="form-check-input" type="checkbox" v-model="selectedTaskIds" :value="t.id" :aria-label="`选择任务 ${t.id}`"></td>
                                 <td class="text-center fw-bold text-muted">[[ t.id ]]</td>
-                                <td class="text-truncate" style="max-width:260px" :title="t.filename" @dblclick="showFullLog(t)"><i class="bi bi-file-earmark-arrow-up me-1"></i>[[ t.filename ]]</td>
-                                <td class="font-monospace small text-truncate" style="max-width:160px" :title="uploadRemote(t.upload_target)">[[ uploadRemote(t.upload_target) ]]</td>
+                                <td class="text-truncate" :title="t.filename" @dblclick="showFullLog(t)"><i class="bi bi-file-earmark-arrow-up me-1"></i>[[ t.filename ]]</td>
+                                <td class="font-monospace small text-truncate" :title="uploadRemote(t.upload_target)">[[ uploadRemote(t.upload_target) ]]</td>
                                 <td><div class="progress bg-secondary bg-opacity-10" style="height: 10px; border-radius: 6px;"><div class="progress-bar" :style="{width: t.progress + '%'}" :class="progressClass(t)"></div></div><div class="small text-end text-muted mt-1">[[ t.progress ]]%</div></td>
-                                <td class="small text-nowrap"><template v-if="t.status==='uploading'"><span class="fw-bold text-dark">[[ t.upload_speed || '-' ]]</span><span class="text-muted"> · [[ t.upload_eta || '-' ]]</span></template><span v-else class="text-muted">-</span></td>
-                                <td class="small text-muted text-nowrap">[[ t.finished_at || '-' ]]</td>
+                                <td class="small text-truncate"><template v-if="t.status==='uploading'"><span class="fw-bold text-dark">[[ t.upload_speed || '-' ]]</span><span class="text-muted"> · [[ t.upload_eta || '-' ]]</span></template><span v-else class="text-muted">-</span></td>
+                                <td class="small text-muted text-truncate">[[ t.finished_at || '-' ]]</td>
                                 <td class="text-center"><span class="badge rounded-pill" :class="bg(t.status)">[[ statusText[t.status]||t.status ]]</span></td>
                                 <td class="text-end pe-3"><div class="btn-group btn-group-sm"><button v-for="a in taskActions(t)" :key="a.k" class="btn" :class="a.cls" :title="a.title" @click="a.run()"><i class="bi" :class="a.icon"></i></button></div></td>
                             </tr>
@@ -329,9 +343,34 @@
 
 <script>
 let modalConfig, modalLog, modalConfirm, toastInstance;
+// 队列表格列宽只保存在当前浏览器
+function loadColWidths(){ try { return JSON.parse(localStorage.getItem('scanner.colWidths') || '{}') || {}; } catch (_) { return {}; } }
+function saveColWidths(widths){ try { localStorage.setItem('scanner.colWidths', JSON.stringify(widths)); } catch (_) {} }
 Vue.createApp({
     delimiters: ['[[', ']]'],
-    data(){ return { tasks:[], view:'detect', curTask:{}, sysLogs:'', sysLogFilter:'', autoRefreshLogs:true, currentLogTitle:'', currentLogContent:'', uploadHijackRemote:'', uploadHijackCandidates:[], newHijackRemote:'', addingHijackRemote:false, uploadHijackEnabled:false, hijackLoadedAt:0, showHijackPanel:false, lastSpaceAt:0, filterText:'', filterStatus:{detect:'all', upload:'all'}, statusFilters:{detect:[{id:'all',label:'全部'},{id:'active',label:'进行中',statuses:['pending','processing']},{id:'dirty',label:'已拦截',statuses:['dirty']},{id:'failed',label:'出错/停止',statuses:['error','cancelled']}], upload:[{id:'all',label:'全部'},{id:'active',label:'进行中',statuses:['pending_upload','uploading']},{id:'done',label:'已完成',statuses:['uploaded']},{id:'failed',label:'出错/停止',statuses:['error','cancelled','dirty']}]}, ariaNgOptionsImport:'', selectedTaskIds:[], aria2Stats:{active:0, waiting:0, stopped:0, downloadSpeed:0}, statusText:{'pending':'⏳ 等待中','processing':'🔄 检测中','pending_upload':'✅ 待上传','uploading':'☁️ 上传中','uploaded':'🎉 已完成','dirty':'🚫 已拦截','error':'❌ 出错了','cancelled':'⏹ 已停止'}, toastMsg:'', toastClass:'bg-primary', toastIcon:'bi-info-circle', confirmMsg:'', confirmCallback:null, pollTimer: null }},
+    data(){ return { tasks:[], view:'detect', curTask:{}, sysLogs:'', sysLogFilter:'', autoRefreshLogs:true, currentLogTitle:'', currentLogContent:'', uploadHijackRemote:'', uploadHijackCandidates:[], newHijackRemote:'', addingHijackRemote:false, uploadHijackEnabled:false, hijackLoadedAt:0, showHijackPanel:false, lastSpaceAt:0, colWidths:loadColWidths(), colResize:null,
+        queueColumns:{
+            detect:[
+                {key:'sel', fixed:true, width:42, cls:'text-center'},
+                {key:'id', label:'ID', width:64, cls:'text-center'},
+                {key:'file', label:'文件信息', width:300},
+                {key:'dots', label:'状态指示', width:150, cls:'text-center', help:'左侧每个点是一个音频抽样段，竖线右侧依次是字幕、元数据。绿=通过，蓝=进行中，红=命中或失败，灰=未开始或未启用'},
+                {key:'status', label:'结果', width:110, cls:'text-center'},
+                {key:'log', label:'实时日志', hint:'(双击全屏)', width:null},
+                {key:'ops', label:'操作', width:230, cls:'text-end pe-4'}
+            ],
+            upload:[
+                {key:'sel', fixed:true, width:42, cls:'text-center'},
+                {key:'id', label:'ID', width:64, cls:'text-center'},
+                {key:'file', label:'文件信息', width:null},
+                {key:'remote', label:'上传目标', width:130},
+                {key:'progress', label:'传输进度', width:200},
+                {key:'speed', label:'速度 / ETA', width:170},
+                {key:'finished', label:'结束时间', width:150},
+                {key:'status', label:'状态', width:110, cls:'text-center'},
+                {key:'ops', label:'操作', width:150, cls:'text-end pe-4'}
+            ]
+        }, filterText:'', filterStatus:{detect:'all', upload:'all'}, statusFilters:{detect:[{id:'all',label:'全部'},{id:'active',label:'进行中',statuses:['pending','processing']},{id:'dirty',label:'已拦截',statuses:['dirty']},{id:'failed',label:'出错/停止',statuses:['error','cancelled']}], upload:[{id:'all',label:'全部'},{id:'active',label:'进行中',statuses:['pending_upload','uploading']},{id:'done',label:'已完成',statuses:['uploaded']},{id:'failed',label:'出错/停止',statuses:['error','cancelled','dirty']}]}, ariaNgOptionsImport:'', selectedTaskIds:[], aria2Stats:{active:0, waiting:0, stopped:0, downloadSpeed:0}, statusText:{'pending':'⏳ 等待中','processing':'🔄 检测中','pending_upload':'✅ 待上传','uploading':'☁️ 上传中','uploaded':'🎉 已完成','dirty':'🚫 已拦截','error':'❌ 出错了','cancelled':'⏹ 已停止'}, toastMsg:'', toastClass:'bg-primary', toastIcon:'bi-info-circle', confirmMsg:'', confirmCallback:null, pollTimer: null }},
     computed: {
         filteredSystemLogs() { if(!this.sysLogs)return[]; const l=this.sysLogs.split('\n'); if(!this.sysLogFilter.trim())return l; const k=this.sysLogFilter.toLowerCase(); return l.filter(x=>x.toLowerCase().includes(k)) },
         detectTasks() { return this.tasks.filter(t => !this.isUploadTask(t)) },
@@ -626,6 +665,39 @@ Vue.createApp({
         doubleSample(id){ axios.post(`/api/task/${id}/double_sample`).then(()=>{ this.load(); this.showToast('已切换动态抽样') }).catch(e=>this.showToast(e.response?.data?.msg || '切换失败','error')) },
         directUpload(id){ axios.post(`/api/task/${id}/direct_upload`).then(()=>{ this.load(); this.showToast('切换直传') }) },
         deleteTask(id){ axios.post(`/api/task/${id}/delete`).then(r=>{ this.showToast(r.data.msg); this.load() }).catch(e=>this.showToast(e.response?.data?.msg || '删除失败','error')) },
+        colWidth(view, c){ const saved=(this.colWidths[view] || {})[c.key]; return c.fixed ? c.width : (saved || c.width) },
+        // 弹性列（默认宽度为空）未被拖过时由它填满剩余空间；拖过后表格宽度=各列之和，列宽严格按拖动结果
+        tableStyle(view){
+            const cols=this.queueColumns[view];
+            const sum=cols.reduce((total, c) => total + (this.colWidth(view, c) || 220), 0);
+            const flexSized=cols.some(c => c.width === null && this.colWidth(view, c));
+            return flexSized ? {width: sum + 'px', minWidth: 'auto'} : {minWidth: sum + 'px'};
+        },
+        startColResize(e, view, c){
+            const th=e.target.closest('th');
+            this.colResize={view, key:c.key, startX:e.clientX, startWidth:th.getBoundingClientRect().width};
+            document.body.classList.add('col-resizing');
+            const move=ev => {
+                const r=this.colResize; if(!r) return;
+                const width=Math.max(48, Math.round(r.startWidth + ev.clientX - r.startX));
+                this.colWidths={...this.colWidths, [r.view]:{...(this.colWidths[r.view] || {}), [r.key]:width}};
+            };
+            const up=() => {
+                window.removeEventListener('mousemove', move);
+                window.removeEventListener('mouseup', up);
+                document.body.classList.remove('col-resizing');
+                this.colResize=null;
+                saveColWidths(this.colWidths);
+            };
+            window.addEventListener('mousemove', move);
+            window.addEventListener('mouseup', up);
+        },
+        resetColWidth(view, c){
+            const widths={...(this.colWidths[view] || {})};
+            delete widths[c.key];
+            this.colWidths={...this.colWidths, [view]:widths};
+            saveColWidths(this.colWidths);
+        },
         // 下载器是同源 iframe，焦点在其中时按键不会冒泡到外层，需要在框架内也挂监听（每次加载后重挂）
         attachFrameHotkey(){
             const frame=document.getElementById('ariaNgFrame');
