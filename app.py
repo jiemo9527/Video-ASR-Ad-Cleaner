@@ -613,11 +613,27 @@ def resolve_directory_task_path(file_path, file_count, scan_path):
     return os.path.dirname(abs_path)
 
 
-def build_directory_remote_path(root_path, file_path, root_dir_name, default_remote, remote_override=None):
+def resolve_path_remote(path, scan_path, default_remote):
+    """scan_path 下第一级目录名即 remote；更深的子目录（如 g01/Season 3）不参与，上传时丢弃。"""
+    parent = os.path.abspath(os.path.dirname(str(path or '').rstrip('/\\')))
+    abs_scan = os.path.abspath(str(scan_path or '/root/downloads').rstrip('/\\') or os.sep)
+    try:
+        rel = os.path.relpath(parent, abs_scan)
+    except ValueError:
+        rel = os.pardir
+    if rel == os.curdir:
+        return default_remote
+    if rel != os.pardir and not rel.startswith(os.pardir + os.sep):
+        return rel.split(os.sep)[0]
+    folder_name = os.path.basename(parent)
+    root_name = os.path.basename(abs_scan)
+    return default_remote if (folder_name == root_name or not folder_name) else folder_name
+
+
+def build_directory_remote_path(root_path, file_path, scan_path, default_remote, remote_override=None):
     normalized_root = root_path.rstrip('/\\')
     root_name = os.path.basename(normalized_root)
-    parent_name = os.path.basename(os.path.dirname(normalized_root))
-    remote_prefix = remote_override or (default_remote if (parent_name == root_dir_name or not parent_name) else parent_name)
+    remote_prefix = remote_override or resolve_path_remote(normalized_root, scan_path, default_remote)
     rel_path = os.path.relpath(file_path, root_path).replace(os.sep, '/')
     remote_rel = f"{root_name}/{rel_path}" if rel_path and rel_path != '.' else root_name
     return remote_prefix, f"{remote_prefix}:{remote_rel}"
@@ -631,16 +647,13 @@ def get_task_upload_target(task, config=None):
     if is_directory_task(task, task_overrides):
         current_path = task_overrides.get('_current_item') or task.filepath
         if current_path:
-            root_name = os.path.basename(str(final_settings.get('scan_path') or '/root/downloads').rstrip('/\\'))
-            _, remote_path = build_directory_remote_path(task.filepath, current_path, root_name,
+            _, remote_path = build_directory_remote_path(task.filepath, current_path, final_settings.get('scan_path'),
                                                           final_settings.get('rclone_remote', 's25'),
                                                           remote_override=upload_remote)
             return remote_path
     filepath = str(task.filepath or '')
     filename = os.path.basename(filepath or task.filename or '')
-    root_name = os.path.basename(str(final_settings.get('scan_path') or '/root/downloads').rstrip('/\\'))
-    folder_name = os.path.basename(os.path.dirname(filepath))
-    remote_prefix = upload_remote or (rclone_remote if (folder_name == root_name or not folder_name) else folder_name)
+    remote_prefix = upload_remote or resolve_path_remote(filepath, final_settings.get('scan_path'), rclone_remote)
     return f"{remote_prefix}:{filename}" if remote_prefix else filename
 
 
@@ -1383,13 +1396,12 @@ def upload_worker():
 
                 if dir_task:
                     upload_remote = str(task_overrides.get('upload_remote') or '').strip()
-                    dest_remote, remote_path = build_directory_remote_path(task.filepath, current_upload_path, current_root_name,
+                    dest_remote, remote_path = build_directory_remote_path(task.filepath, current_upload_path, scan_path,
                                                                             rclone_remote, remote_override=upload_remote)
                 else:
-                    folder_name = os.path.basename(os.path.dirname(task.filepath))
                     upload_remote = str(task_overrides.get('upload_remote') or '').strip()
-                    dest_remote = upload_remote or (rclone_remote if (folder_name == current_root_name or not folder_name) else folder_name)
-                    remote_path = f"{dest_remote}:{os.path.basename(current_upload_path)}" if upload_remote else None
+                    dest_remote = upload_remote or resolve_path_remote(task.filepath, scan_path, rclone_remote)
+                    remote_path = f"{dest_remote}:{os.path.basename(current_upload_path)}"
 
                 def db_logger(msg):
                     try:

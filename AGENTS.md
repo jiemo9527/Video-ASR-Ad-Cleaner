@@ -54,6 +54,7 @@ Task lifecycle:
 
 Upload destination override:
 
+- Default destination (`resolve_path_remote()` in `app.py`): the first folder level under `scan_path` names the remote, and files directly in `scan_path` use `rclone_remote`. Deeper download sub-folders are dropped, so `<scan_path>/g01/Season 3/a.mkv` uploads to `g01:a.mkv`. A directory (multi-file) task keeps its own folder name and inner structure (`g01:<task folder>/...`). Paths outside `scan_path` keep the legacy parent-folder rule. Tests live in `tests/test_upload_remote_path.py`.
 - The one-time batch `修改remote` action and its `/api/tasks/batch_upload_remote` endpoint were removed; remote hijack is the only toolbar way to redirect uploads.
 - Batch queue actions support selected task IDs; with no selection, they retain their all-task behavior.
 - A per-task `upload_remote` is stored in task overrides and takes precedence over the default `rclone_remote` only for that task. It does not move local files.
