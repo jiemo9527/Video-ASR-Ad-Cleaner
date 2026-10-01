@@ -138,6 +138,12 @@
             </div>
         </div>
 
+        <!-- 手机端：总网速（标签栏放不下速度徽章） -->
+        <div class="d-md-none d-flex gap-3 border-top mt-2 pt-2 small font-monospace">
+            <span :class="aria2Stats.downloadSpeed > 0 ? 'text-success fw-bold' : 'text-muted'" title="Aria2 总下载速度"><i class="bi bi-arrow-down-circle me-1"></i>[[ formatAria2DownloadSpeed() ]]</span>
+            <span :class="activeUploadCount > 0 ? 'text-primary fw-bold' : 'text-muted'" title="Scanner 总上传速度"><i class="bi bi-arrow-up-circle me-1"></i>[[ formatUploadSpeed() ]]</span>
+        </div>
+
         <!-- 劫持：手机端展开面板 -->
         <div v-if="showHijackPanel" class="d-md-none border-top mt-2 pt-2">
             <div class="d-flex align-items-center mb-2">
