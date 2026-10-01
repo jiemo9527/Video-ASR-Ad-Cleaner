@@ -265,6 +265,7 @@
                     <div class="upload-rows" v-if="visibleTasks.length && view==='upload'">
                         <div v-for="t in visibleTasks" :key="t.id" class="upload-row">
                             <input class="form-check-input flex-shrink-0 m-0" type="checkbox" v-model="selectedTaskIds" :value="t.id" :aria-label="`选择任务 ${t.id}`">
+                            <span class="text-muted small fw-bold flex-shrink-0">#[[ t.id ]]</span>
                             <div class="flex-grow-1 min-w-0 text-truncate" :title="t.filename" @click="showFullLog(t)">[[ t.filename ]]</div>
                             <span class="small text-muted text-nowrap">[[ t.status==='uploading' && t.upload_speed ? t.upload_speed : t.progress + '%' ]]</span>
                             <span class="badge rounded-pill flex-shrink-0" :class="bg(t.status)">[[ statusText[t.status]||t.status ]]</span>
