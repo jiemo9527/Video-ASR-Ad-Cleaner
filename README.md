@@ -38,8 +38,22 @@
 
 ## ⚙️ 界面预览
 
-![img.png](img.png)
-![img_1.png](img_1.png)
+**检测队列**
+
+![检测队列](docs/images/dashboard-detect.png)
+
+**上传队列**
+
+![上传队列](docs/images/dashboard-upload.png)
+
+**设置 · 检测**
+
+![设置-检测](docs/images/settings-detect.png)
+
+**设置 · 识别模型**
+
+![设置-识别模型](docs/images/settings-model.png)
+
 ## 快速开始
 
 ### 安装
