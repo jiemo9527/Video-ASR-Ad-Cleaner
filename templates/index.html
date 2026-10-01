@@ -67,6 +67,7 @@
         .btn-outline-purple { color: #6f42c1; border-color: #6f42c1; }
         .btn-outline-purple:hover { color: #fff; background: #6f42c1; }
         .th-help { cursor: help; }
+        .name-2l { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-all; line-height: 1.35; }
 
         /* 手机卡片 */
         .task-list { padding: .5rem; background: #f6f7f9; }
@@ -204,7 +205,7 @@
                 <div class="table-responsive d-none d-md-block">
                     <table class="queue-table table table-hover align-middle mb-0">
                         <thead class="table-light" v-if="view==='detect'"><tr><th class="text-center" style="width:42px"><input class="form-check-input" type="checkbox" :checked="allSelected('detect')" @change="toggleAll('detect', $event.target.checked)" title="全选当前列表"></th><th class="text-center">ID</th><th>文件信息</th><th class="text-center"><span class="th-help" title="左侧每个点是一个音频抽样段，竖线右侧依次是字幕、元数据。绿=通过，蓝=进行中，红=命中或失败，灰=未开始或未启用">状态指示 <i class="bi bi-question-circle text-muted"></i></span></th><th class="text-center">结果</th><th>实时日志 <span class="small fw-normal text-muted">(双击全屏)</span></th><th class="text-end pe-4">操作</th></tr></thead>
-                        <thead class="table-light" v-else><tr><th class="text-center" style="width:42px"><input class="form-check-input" type="checkbox" :checked="allSelected('upload')" @change="toggleAll('upload', $event.target.checked)" title="全选当前列表"></th><th class="text-center">ID</th><th>文件信息</th><th>上传目标</th><th style="min-width:160px">传输进度</th><th>速度 / ETA</th><th>结束时间</th><th class="text-center">状态</th><th class="text-end pe-4">操作</th></tr></thead>
+                        <thead class="table-light" v-else><tr><th class="text-center" style="width:42px"><input class="form-check-input" type="checkbox" :checked="allSelected('upload')" @change="toggleAll('upload', $event.target.checked)" title="全选当前列表"></th><th class="text-center" style="width:96px">ID / 状态</th><th>文件信息</th><th>上传目标</th><th style="width:120px">传输进度</th><th>速度 / ETA</th><th>结束时间</th><th class="text-end pe-4">操作</th></tr></thead>
                         <tbody v-if="view==='detect'">
                             <tr v-for="t in visibleTasks" :key="t.id">
                                 <td class="text-center"><input class="form-check-input" type="checkbox" v-model="selectedTaskIds" :value="t.id" :aria-label="`选择任务 ${t.id}`"></td>
@@ -219,13 +220,12 @@
                         <tbody v-else>
                             <tr v-for="t in visibleTasks" :key="t.id">
                                 <td class="text-center"><input class="form-check-input" type="checkbox" v-model="selectedTaskIds" :value="t.id" :aria-label="`选择任务 ${t.id}`"></td>
-                                <td class="text-center fw-bold text-muted">[[ t.id ]]</td>
-                                <td class="text-truncate" style="max-width:260px" :title="t.filename" @dblclick="showFullLog(t)"><i class="bi bi-file-earmark-arrow-up me-1"></i>[[ t.filename ]]</td>
+                                <td class="text-center"><div class="fw-bold text-muted lh-sm">[[ t.id ]]</div><span class="badge rounded-pill mt-1" :class="bg(t.status)">[[ statusText[t.status]||t.status ]]</span></td>
+                                <td style="max-width:360px" :title="t.filename" @dblclick="showFullLog(t)"><div class="name-2l"><i class="bi bi-file-earmark-arrow-up me-1"></i>[[ t.filename ]]</div></td>
                                 <td class="font-monospace small text-truncate" style="max-width:160px" :title="uploadRemote(t.upload_target)">[[ uploadRemote(t.upload_target) ]]</td>
                                 <td><div class="progress bg-secondary bg-opacity-10" style="height: 10px; border-radius: 6px;"><div class="progress-bar" :style="{width: t.progress + '%'}" :class="progressClass(t)"></div></div><div class="small text-end text-muted mt-1">[[ t.progress ]]%</div></td>
                                 <td class="small text-nowrap"><template v-if="t.status==='uploading'"><span class="fw-bold text-dark">[[ t.upload_speed || '-' ]]</span><span class="text-muted"> · [[ t.upload_eta || '-' ]]</span></template><span v-else class="text-muted">-</span></td>
                                 <td class="small text-muted text-nowrap">[[ t.finished_at || '-' ]]</td>
-                                <td class="text-center"><span class="badge rounded-pill" :class="bg(t.status)">[[ statusText[t.status]||t.status ]]</span></td>
                                 <td class="text-end pe-3"><div class="btn-group btn-group-sm"><button v-for="a in taskActions(t)" :key="a.k" class="btn" :class="a.cls" :title="a.title" @click="a.run()"><i class="bi" :class="a.icon"></i></button></div></td>
                             </tr>
                         </tbody>
