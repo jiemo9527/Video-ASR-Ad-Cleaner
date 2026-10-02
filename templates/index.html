@@ -79,7 +79,8 @@
         .progress-row .row-progress { position: absolute; left: 0; top: 0; bottom: 0; max-width: 100%; opacity: .14; pointer-events: none; transition: width .5s ease; }
         .m-item .row-progress { position: absolute; left: .55rem; bottom: 2px; height: 3px; max-width: calc(100% - 1.1rem); border-radius: 3px; }
         .m-item .dropdown-menu { border-radius: .8rem; }
-        .m-speed { font-size: .68rem; }
+        .m-speed { font-size: .68rem; white-space: nowrap; }
+        @media (max-width: 359.98px) { .m-ip { display: none !important; } }
         .m-filter { width: auto; flex: 0 0 auto; max-width: 42%; }
 
         @media (max-width: 767.98px) {
@@ -87,6 +88,8 @@
             .dashboard-tabs .nav-link { padding: .4rem .3rem; font-size: .85rem; }
             .dash-header { padding: .4rem .55rem; margin-bottom: .5rem !important; }
             .dash-title { font-size: 1rem; }
+            .dash-header .gap-2 { gap: .35rem !important; }
+            .dash-header .btn-sm { padding-left: .4rem; padding-right: .4rem; }
             .queue-toolbar { gap: .35rem !important; }
             .aria-ng-frame { height: calc(100vh - 170px); min-height: 480px; }
             .sys-log-box { height: calc(100vh - 230px); padding: 10px; font-size: 12px; }
@@ -102,13 +105,16 @@
             <div class="d-flex align-items-center gap-2 me-auto me-lg-3 min-w-0">
                 <img src="{{ url_for('static', filename='favicon.png') }}" width="26" height="26" style="border-radius: 5px;" alt="">
                 <span class="dash-title fw-bold text-primary text-nowrap"><span class="d-none d-sm-inline">Scanner Pro Dashboard</span></span>
-                <span class="badge bg-light text-muted border font-monospace d-none d-lg-inline" title="服务器公网 IP（后两段已隐藏）"><i class="bi bi-globe2"></i> [[ serverIp ]]</span>
+                <span class="badge bg-light text-muted border font-monospace d-none d-md-inline" title="服务器公网 IP（后两段已隐藏）"><i class="bi bi-globe2"></i> [[ serverIp ]]</span>
                 <span class="badge bg-light border font-monospace d-none d-md-inline" :class="diskLow ? 'text-danger border-danger' : 'text-muted'" :title="diskTitle()" v-if="serverDisk.free != null"><i class="bi bi-hdd"></i> 可用 [[ formatSize(serverDisk.free) ]]</span>
                 <span class="m-speed d-md-none font-monospace lh-sm">
                     <span class="d-block" :class="aria2Stats.downloadSpeed > 0 ? 'text-success fw-bold' : 'text-muted'" title="Aria2 总下载速度">↓[[ formatAria2DownloadSpeed() ]]</span>
                     <span class="d-block" :class="activeUploadCount > 0 ? 'text-primary fw-bold' : 'text-muted'" title="Scanner 总上传速度">↑[[ formatUploadSpeed() ]]</span>
                 </span>
-                <span class="m-speed d-md-none font-monospace lh-sm text-nowrap" :class="diskLow ? 'text-danger fw-bold' : 'text-muted'" :title="diskTitle()" v-if="serverDisk.free != null"><i class="bi bi-hdd"></i> [[ formatSize(serverDisk.free) ]]</span>
+                <span class="m-speed d-md-none font-monospace lh-sm text-nowrap">
+                    <span class="d-block text-muted m-ip" title="服务器公网 IP（后两段已隐藏）">[[ serverIp ]]</span>
+                    <span class="d-block" :class="diskLow ? 'text-danger fw-bold' : 'text-muted'" :title="diskTitle()" v-if="serverDisk.free != null">盘[[ formatSize(serverDisk.free) ]]</span>
+                </span>
             </div>
 
             <!-- 劫持：电脑端直接显示 -->
@@ -135,7 +141,7 @@
             </div>
 
             <div class="d-flex align-items-center gap-1">
-                <button class="btn btn-sm d-md-none" :class="uploadHijackEnabled ? 'btn-primary' : 'btn-outline-secondary'" @click="showHijackPanel=!showHijackPanel" title="上传劫持"><span class="hijack-state">[[ uploadHijackEnabled ? uploadHijackRemote + ':' : '劫持' ]]</span></button>
+                <button class="btn btn-sm d-md-none text-nowrap" :class="uploadHijackEnabled ? 'btn-primary' : 'btn-outline-secondary'" @click="showHijackPanel=!showHijackPanel" title="上传劫持"><span class="hijack-state">[[ uploadHijackEnabled ? uploadHijackRemote + ':' : '劫持' ]]</span></button>
                 <button class="btn btn-sm btn-outline-danger" @click="confirmAction('确定按“设置 > 清理”中已启用的项目清空历史吗？\n下载器异常记录和本地文件会保留，此操作不可恢复。', () => clearHistory())" title="清空历史（队列页、下载器页快速连按两下空格可直接清空）"><i class="bi bi-trash"></i><span class="d-none d-lg-inline ms-1">清空历史</span></button>
                 <a href="/settings_page" class="btn btn-sm btn-outline-secondary" title="设置"><i class="bi bi-gear-fill"></i><span class="d-none d-lg-inline ms-1">设置</span></a>
                 <a href="/logout" class="btn btn-sm btn-outline-danger" title="退出登录"><i class="bi bi-box-arrow-right"></i></a>
