@@ -10,6 +10,7 @@ import time
 import random
 import re
 import socket
+import ipaddress
 import concurrent.futures
 import requests
 from datetime import datetime, timedelta
@@ -673,11 +674,117 @@ def send_task_tg_msg(core, config, task, message):
     )
 
 
-def get_masked_server_ip():
-    parts = get_server_ip().split('.')
+PUBLIC_IP_SERVICES = (
+    'https://api.ipify.org',
+    'https://ipv4.icanhazip.com',
+    'https://ifconfig.me/ip',
+)
+PUBLIC_IP_TTL = 6 * 3600
+PUBLIC_IP_RETRY = 300
+public_ip_cache = {'ip': '', 'checked_at': 0.0, 'refreshing': False}
+public_ip_lock = threading.Lock()
+
+
+def fetch_public_ip():
+    for url in PUBLIC_IP_SERVICES:
+        try:
+            resp = requests.get(url, timeout=4)
+            value = resp.text.strip()
+            if resp.ok and ipaddress.ip_address(value).is_global:
+                return value
+        except Exception:
+            continue
+    return ''
+
+
+def refresh_public_ip():
+    ip = ''
+    try:
+        ip = fetch_public_ip()
+    finally:
+        with public_ip_lock:
+            if ip:
+                public_ip_cache['ip'] = ip
+            public_ip_cache['checked_at'] = time.time() if ip else time.time() - PUBLIC_IP_TTL + PUBLIC_IP_RETRY
+            public_ip_cache['refreshing'] = False
+
+
+def get_public_ip():
+    # 公网 IP 在后台线程里查询并缓存，页面请求不等待外部服务。
+    with public_ip_lock:
+        stale = time.time() - public_ip_cache['checked_at'] > PUBLIC_IP_TTL
+        if stale and not public_ip_cache['refreshing']:
+            public_ip_cache['refreshing'] = True
+            threading.Thread(target=refresh_public_ip, daemon=True).start()
+        return public_ip_cache['ip']
+
+
+def mask_ip(value):
+    value = str(value or '').strip()
+    if not value:
+        return 'x.x.x.x'
+    if ':' in value:
+        groups = [g for g in value.split(':') if g]
+        return ':'.join(groups[:2] + ['x', 'x']) if len(groups) >= 2 else 'x:x'
+    parts = value.split('.')
     if len(parts) == 4:
-        return f"{parts[0]}.{parts[1]}.***.***"
-    return '***.***.***.***'
+        return f"{parts[0]}.{parts[1]}.x.x"
+    return 'x.x.x.x'
+
+
+def get_masked_server_ip():
+    return mask_ip(get_public_ip() or get_server_ip())
+
+
+def get_disk_usage_info(path):
+    # 优先统计下载目录所在磁盘；目录不存在时退回项目目录。
+    for candidate in (path, APP_ROOT):
+        if candidate and os.path.isdir(candidate):
+            try:
+                usage = shutil.disk_usage(candidate)
+                return {'path': candidate, 'total': usage.total, 'used': usage.used, 'free': usage.free}
+            except OSError:
+                continue
+    return {'path': '', 'total': None, 'used': None, 'free': None}
+
+
+DIR_SIZE_TTL = 30
+dir_size_cache = {}
+
+
+def get_path_size(path):
+    if not path:
+        return None
+    try:
+        if os.path.isfile(path):
+            return os.path.getsize(path)
+        if not os.path.isdir(path):
+            return None
+    except OSError:
+        return None
+    cached = dir_size_cache.get(path)
+    now = time.time()
+    if cached and now - cached[0] < DIR_SIZE_TTL:
+        return cached[1]
+    total = 0
+    for file_path in list_directory_task_files(path):
+        try:
+            total += os.path.getsize(file_path)
+        except OSError:
+            pass
+    dir_size_cache[path] = (now, total)
+    return total
+
+
+def get_task_file_size(task, overrides=None):
+    ov = overrides if overrides is not None else get_task_overrides(task)
+    stored = ov.get('_file_size')
+    stored = stored if isinstance(stored, int) and stored >= 0 else None
+    # 目录任务上传时文件会被逐个移走，优先使用入队时记录的总大小。
+    if stored is not None and is_directory_task(task, ov):
+        return stored
+    live = get_path_size(task.filepath)
+    return live if live is not None else stored
 
 
 def get_aria2_rpc_config():
@@ -964,6 +1071,9 @@ def create_trigger_task(path, file_count=1, upload_remote='', aria_gid='', sourc
         task_overrides['upload_remote'] = upload_remote
     if aria_gid:
         task_overrides['_aria_gid'] = str(aria_gid)
+    file_size = get_path_size(task_path)
+    if file_size is not None:
+        task_overrides['_file_size'] = file_size
 
     # Aria2 may complete several files in the same second. Reserve the custom
     # task ID and commit the task as one critical section to prevent collisions.
@@ -1362,6 +1472,11 @@ def upload_worker():
                     upload_queue.task_done()
                     continue
                 task.status = 'uploading';
+                if not is_directory_task(task):
+                    # 记录清洗后的最终大小，上传完成后本地文件已移走仍可展示。
+                    upload_size = get_path_size(task.filepath)
+                    if upload_size is not None:
+                        update_task_overrides(task, {'_file_size': upload_size})
                 if not safe_db_commit(f"upload start {task_id}"):
                     release_task_stage(task_id, 'upload')
                     upload_queue.task_done()
@@ -2113,11 +2228,19 @@ def get_tasks():
     for t in (detect_sel + upload_sel):
         final_config = get_final_config(t.overrides)
         res.append({"id": t.id, "filename": t.filename, "status": t.status, "log": t.log,
+                    "file_size": get_task_file_size(t),
                     "created_at": t.created_at.strftime("%m-%d %H:%M"),
                     "finished_at": t.finished_at.strftime("%H:%M:%S") if t.finished_at else "-", "progress": t.progress,
                     "upload_speed": t.upload_speed, "upload_eta": t.upload_eta,
                     "upload_target": get_task_upload_target(t, final_config), "config": final_config})
     return jsonify(res)
+
+
+@app.route('/api/server_info')
+@login_required
+def server_info():
+    disk = get_disk_usage_info(str(get_final_config(None).get('scan_path') or ''))
+    return jsonify({"ip": get_masked_server_ip(), "disk": disk})
 
 
 @app.route('/api/tasks/batch', methods=['POST'])

@@ -102,11 +102,13 @@
             <div class="d-flex align-items-center gap-2 me-auto me-lg-3 min-w-0">
                 <img src="{{ url_for('static', filename='favicon.png') }}" width="26" height="26" style="border-radius: 5px;" alt="">
                 <span class="dash-title fw-bold text-primary text-nowrap"><span class="d-none d-sm-inline">Scanner Pro Dashboard</span></span>
-                <span class="badge bg-light text-muted border font-monospace d-none d-xl-inline" title="服务器出口 IP 已隐匿"><i class="bi bi-hdd-network"></i> {{ server_ip }}</span>
+                <span class="badge bg-light text-muted border font-monospace d-none d-lg-inline" title="服务器公网 IP（后两段已隐藏）"><i class="bi bi-globe2"></i> [[ serverIp ]]</span>
+                <span class="badge bg-light border font-monospace d-none d-md-inline" :class="diskLow ? 'text-danger border-danger' : 'text-muted'" :title="diskTitle()" v-if="serverDisk.free != null"><i class="bi bi-hdd"></i> 可用 [[ formatSize(serverDisk.free) ]]</span>
                 <span class="m-speed d-md-none font-monospace lh-sm">
                     <span class="d-block" :class="aria2Stats.downloadSpeed > 0 ? 'text-success fw-bold' : 'text-muted'" title="Aria2 总下载速度">↓[[ formatAria2DownloadSpeed() ]]</span>
                     <span class="d-block" :class="activeUploadCount > 0 ? 'text-primary fw-bold' : 'text-muted'" title="Scanner 总上传速度">↑[[ formatUploadSpeed() ]]</span>
                 </span>
+                <span class="m-speed d-md-none font-monospace lh-sm text-nowrap" :class="diskLow ? 'text-danger fw-bold' : 'text-muted'" :title="diskTitle()" v-if="serverDisk.free != null"><i class="bi bi-hdd"></i> [[ formatSize(serverDisk.free) ]]</span>
             </div>
 
             <!-- 劫持：电脑端直接显示 -->
@@ -235,7 +237,7 @@
                             <tr v-for="t in visibleTasks" :key="t.id">
                                 <td class="text-center"><input class="form-check-input" type="checkbox" v-model="selectedTaskIds" :value="t.id" :aria-label="`选择任务 ${t.id}`"></td>
                                 <td class="text-center fw-bold text-muted">[[ t.id ]]</td>
-                                <td><div class="text-truncate fw-bold text-dark" style="max-width:300px" :title="t.filename"><i class="bi bi-file-earmark-play me-1"></i>[[ t.filename ]]</div><div class="small text-muted mt-1"><i class="bi bi-clock"></i> [[ t.created_at ]]</div></td>
+                                <td><div class="text-truncate fw-bold text-dark" style="max-width:300px" :title="t.filename"><i class="bi bi-file-earmark-play me-1"></i>[[ t.filename ]]</div><div class="small text-muted mt-1"><i class="bi bi-clock"></i> [[ t.created_at ]]<span v-if="t.file_size != null" class="ms-2"><i class="bi bi-hdd"></i> [[ formatSize(t.file_size) ]]</span></div></td>
                                 <td class="text-center"><span class="dot-group"><span v-for="i in audioDotCount(t)" :class="['config-dot', getDotClass('audio', t, i)]" :title="dotTitle('audio', t, i)"></span><span class="dot-sep"></span><span :class="['config-dot', getDotClass('subtitle', t)]" :title="dotTitle('subtitle', t)"></span><span :class="['config-dot', getDotClass('meta', t)]" :title="dotTitle('meta', t)"></span></span></td>
                                 <td class="text-center"><span class="badge rounded-pill" :class="bg(t.status)">[[ statusText[t.status]||t.status ]]</span></td>
                                 <td style="width: 34%;"><div class="task-log-box" @dblclick="showFullLog(t)" v-html="fmt(t.log)"></div></td>
@@ -246,7 +248,7 @@
                             <tr v-for="t in visibleTasks" :key="t.id" class="progress-row">
                                 <td class="text-center"><input class="form-check-input" type="checkbox" v-model="selectedTaskIds" :value="t.id" :aria-label="`选择任务 ${t.id}`"><div class="row-progress" :class="progressClass(t)" :style="{width: t.progress + '%'}"></div></td>
                                 <td class="text-center"><div class="fw-bold text-muted lh-sm">[[ t.id ]]</div><span class="badge rounded-pill mt-1" :class="bg(t.status)">[[ statusText[t.status]||t.status ]]</span></td>
-                                <td style="max-width:360px" :title="t.filename" @dblclick="showFullLog(t)"><div class="name-2l"><i class="bi bi-file-earmark-arrow-up me-1"></i>[[ t.filename ]]</div></td>
+                                <td style="max-width:360px" :title="t.filename" @dblclick="showFullLog(t)"><div class="name-2l"><i class="bi bi-file-earmark-arrow-up me-1"></i>[[ t.filename ]]</div><div v-if="t.file_size != null" class="small text-muted"><i class="bi bi-hdd"></i> [[ formatSize(t.file_size) ]]</div></td>
                                 <td class="font-monospace small text-truncate" style="max-width:160px" :title="uploadRemote(t.upload_target)">[[ uploadRemote(t.upload_target) ]]</td>
                                 <td class="small text-nowrap"><span class="fw-bold" :class="t.status==='uploading' ? 'text-primary' : 'text-muted'">[[ t.progress ]]%</span><template v-if="t.status==='uploading'"><span class="fw-bold text-dark"> · [[ t.upload_speed || '-' ]]</span><span class="text-muted"> · [[ t.upload_eta || '-' ]]</span></template></td>
                                 <td class="small text-muted text-nowrap">[[ t.finished_at || '-' ]]</td>
@@ -265,6 +267,7 @@
                             <div class="m-meta">
                                 <span class="fw-bold">#[[ t.id ]]</span>
                                 <span class="fw-bold" :class="statusTextClass(t.status)">[[ statusText[t.status]||t.status ]]</span>
+                                <span v-if="t.file_size != null">[[ formatSize(t.file_size) ]]</span>
                                 <template v-if="view==='detect'">
                                     <span class="dot-group py-0"><span v-for="i in audioDotCount(t)" :class="['config-dot', getDotClass('audio', t, i)]"></span><span class="dot-sep"></span><span :class="['config-dot', getDotClass('subtitle', t)]"></span><span :class="['config-dot', getDotClass('meta', t)]"></span></span>
                                     <span>[[ t.created_at ]]</span>
@@ -344,7 +347,7 @@
 let modalConfig, modalLog, modalConfirm, toastInstance;
 Vue.createApp({
     delimiters: ['[[', ']]'],
-    data(){ return { tasks:[], view:'detect', curTask:{}, sysLogs:'', sysLogFilter:'', autoRefreshLogs:true, currentLogTitle:'', currentLogContent:'', uploadHijackRemote:'', uploadHijackCandidates:[], newHijackRemote:'', addingHijackRemote:false, uploadHijackEnabled:false, hijackLoadedAt:0, showHijackPanel:false, lastSpaceAt:0, filterText:'', filterStatus:{detect:'all', upload:'all'}, statusFilters:{detect:[{id:'all',label:'全部'},{id:'active',label:'进行中',statuses:['pending','processing']},{id:'dirty',label:'已拦截',statuses:['dirty']},{id:'failed',label:'出错/停止',statuses:['error','cancelled']}], upload:[{id:'all',label:'全部'},{id:'active',label:'进行中',statuses:['pending_upload','uploading']},{id:'done',label:'已完成',statuses:['uploaded']},{id:'failed',label:'出错/停止',statuses:['error','cancelled','dirty']}]}, ariaNgOptionsImport:'', selectedTaskIds:[], aria2Stats:{active:0, waiting:0, stopped:0, downloadSpeed:0}, statusText:{'pending':'⏳ 等待中','processing':'🔄 检测中','pending_upload':'✅ 待上传','uploading':'☁️ 上传中','uploaded':'🎉 已完成','dirty':'🚫 已拦截','error':'❌ 出错了','cancelled':'⏹ 已停止'}, toastMsg:'', toastClass:'bg-primary', toastIcon:'bi-info-circle', confirmMsg:'', confirmCallback:null, pollTimer: null }},
+    data(){ return { tasks:[], serverIp:{{ server_ip|tojson }}, serverDisk:{path:'', total:null, used:null, free:null}, view:'detect', curTask:{}, sysLogs:'', sysLogFilter:'', autoRefreshLogs:true, currentLogTitle:'', currentLogContent:'', uploadHijackRemote:'', uploadHijackCandidates:[], newHijackRemote:'', addingHijackRemote:false, uploadHijackEnabled:false, hijackLoadedAt:0, showHijackPanel:false, lastSpaceAt:0, filterText:'', filterStatus:{detect:'all', upload:'all'}, statusFilters:{detect:[{id:'all',label:'全部'},{id:'active',label:'进行中',statuses:['pending','processing']},{id:'dirty',label:'已拦截',statuses:['dirty']},{id:'failed',label:'出错/停止',statuses:['error','cancelled']}], upload:[{id:'all',label:'全部'},{id:'active',label:'进行中',statuses:['pending_upload','uploading']},{id:'done',label:'已完成',statuses:['uploaded']},{id:'failed',label:'出错/停止',statuses:['error','cancelled','dirty']}]}, ariaNgOptionsImport:'', selectedTaskIds:[], aria2Stats:{active:0, waiting:0, stopped:0, downloadSpeed:0}, statusText:{'pending':'⏳ 等待中','processing':'🔄 检测中','pending_upload':'✅ 待上传','uploading':'☁️ 上传中','uploaded':'🎉 已完成','dirty':'🚫 已拦截','error':'❌ 出错了','cancelled':'⏹ 已停止'}, toastMsg:'', toastClass:'bg-primary', toastIcon:'bi-info-circle', confirmMsg:'', confirmCallback:null, pollTimer: null }},
     computed: {
         filteredSystemLogs() { if(!this.sysLogs)return[]; const l=this.sysLogs.split('\n'); if(!this.sysLogFilter.trim())return l; const k=this.sysLogFilter.toLowerCase(); return l.filter(x=>x.toLowerCase().includes(k)) },
         detectTasks() { return this.tasks.filter(t => !this.isUploadTask(t)) },
@@ -354,7 +357,8 @@ Vue.createApp({
         activeUploadSpeed() { return this.uploadTasks.filter(t => t.status === 'uploading').reduce((total, t) => total + this.uploadSpeedBytes(t.upload_speed), 0) },
         prioritizableCount() { return this.selectedIds('detect').filter(id => { const t = this.tasks.find(x => x.id === id); return t && t.status === 'pending' }).length },
         directUploadableCount() { return this.selectedIds('detect').filter(id => { const t = this.tasks.find(x => x.id === id); return t && this.canControl(t) }).length },
-        visibleTasks() { return this.filteredTasks(this.view) }
+        visibleTasks() { return this.filteredTasks(this.view) },
+        diskLow() { const d=this.serverDisk; return d.free != null && (d.free < 10*1073741824 || (d.total > 0 && d.free / d.total < 0.05)) }
     },
     mounted(){
         this.load();
@@ -363,6 +367,8 @@ Vue.createApp({
         this.startPolling();
         setInterval(()=>{if(this.view==='syslog'&&this.autoRefreshLogs)this.loadSysLogs(true)}, 5000);
         setInterval(()=>this.loadAria2Stats(), 3000);
+        this.loadServerInfo();
+        setInterval(()=>this.loadServerInfo(), 30000);
         modalConfig=new bootstrap.Modal(document.getElementById('configModal'));
         modalLog=new bootstrap.Modal(document.getElementById('fullLogModal'));
         modalConfirm=new bootstrap.Modal(document.getElementById('confirmModal'));
@@ -401,6 +407,29 @@ Vue.createApp({
                 const stat=r.data && r.data.result || {};
                 this.aria2Stats={active:Number(stat.numActive||0), waiting:Number(stat.numWaiting||0), stopped:Number(stat.numStopped||0), downloadSpeed:Number(stat.downloadSpeed||0)};
             }).catch(()=>{});
+        },
+
+        loadServerInfo(){
+            return axios.get('/api/server_info').then(r=>{
+                const d=r.data||{};
+                if(d.ip)this.serverIp=d.ip;
+                if(d.disk)this.serverDisk=d.disk;
+            }).catch(()=>{});
+        },
+
+        formatSize(bytes){
+            let size=Number(bytes);
+            if(!Number.isFinite(size)||size<0)return '-';
+            const units=['B','KB','MB','GB','TB'];
+            let unit=0;
+            while(size>=1024&&unit<units.length-1){size/=1024;unit++}
+            const digits=unit===0||size>=100?0:(size>=10?1:2);
+            return `${size.toFixed(digits)}${units[unit]}`;
+        },
+
+        diskTitle(){
+            const d=this.serverDisk;
+            return `服务器可用磁盘空间\n目录: ${d.path||'-'}\n已用: ${this.formatSize(d.used)} / 总计: ${this.formatSize(d.total)}`;
         },
 
         formatAria2DownloadSpeed(){
