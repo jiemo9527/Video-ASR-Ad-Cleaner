@@ -170,9 +170,9 @@ class SubtitleTrackRemuxTests(unittest.TestCase):
             self.assertTrue(os.path.isfile(source))
 
     def test_sample_with_only_ad_event_removes_subtitle_track(self):
-        sample = r'C:\Users\Administrator\Downloads\37 4K.mkv'
-        if not os.path.isfile(sample):
-            self.skipTest('user sample not present')
+        sample = os.environ.get('SCANNER_SUBTITLE_AD_SAMPLE', '')
+        if not sample or not os.path.isfile(sample):
+            self.skipTest('set SCANNER_SUBTITLE_AD_SAMPLE to a local sample video')
         with tempfile.TemporaryDirectory() as tmp:
             clip = os.path.join(tmp, 'sample.mkv')
             subprocess.run(['ffmpeg', '-v', 'error', '-i', sample, '-t', '35',
