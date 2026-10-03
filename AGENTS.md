@@ -117,10 +117,13 @@ Status probe endpoint:
   (multi-server automation, media organizers, dashboards). It authenticates with
   the same `X-API-Token` header as `/api/trigger` and requires no login session.
 - It never mutates state. It reports `detect_pending`, `upload_pending`,
-  `in_memory_active`, `queue_depth`, and the Aria2 `numActive`/`numWaiting`
-  counters, plus a single `busy`/`idle` verdict.
-- The verdict is fail-safe: when the database or Aria2 RPC cannot be read, the
-  endpoint reports `busy`. A caller must never treat an unknown state as idle.
+  `in_memory_active`, `queue_depth`, Aria2 `numActive`/`numWaiting`,
+  `aria2_paused` and `aria2_waiting_runnable`, plus a `busy`/`idle` verdict.
+- Aria2 includes paused downloads in `numWaiting`; the probe pages through
+  `aria2.tellWaiting` and treats only runnable waiting and active downloads as busy.
+- The verdict is fail-safe: when the database or Aria2 RPC cannot be read, or
+  waiting jobs cannot all be classified, it reports `busy`. A caller must never
+  treat an unknown state as idle.
 
 ## Settings And Defaults
 

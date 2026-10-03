@@ -2173,10 +2173,28 @@ def scanner_status():
     aria2_ok = False
     aria2_active = None
     aria2_waiting = None
+    aria2_paused = None
+    aria2_waiting_runnable = None
     try:
         stat = call_aria2_rpc('aria2.getGlobalStat', [])
-        aria2_active = int(stat.get('numActive', 0))
-        aria2_waiting = int(stat.get('numWaiting', 0))
+        aria2_active = int(stat['numActive'])
+        aria2_waiting = int(stat['numWaiting'])
+        if aria2_active < 0 or aria2_waiting < 0:
+            raise ValueError('Aria2 returned negative counters')
+        aria2_paused = 0
+        aria2_waiting_runnable = 0
+        for offset in range(0, aria2_waiting, 100):
+            length = min(100, aria2_waiting - offset)
+            items = call_aria2_rpc('aria2.tellWaiting', [offset, length, ['status']])
+            if not isinstance(items, list) or len(items) != length:
+                raise ValueError('Aria2 waiting list changed during status probe')
+            for item in items:
+                if item.get('status') == 'paused':
+                    aria2_paused += 1
+                elif item.get('status') == 'waiting':
+                    aria2_waiting_runnable += 1
+                else:
+                    raise ValueError('Aria2 returned unknown waiting status')
         aria2_ok = True
     except Exception:
         aria2_ok = False
@@ -2184,7 +2202,7 @@ def scanner_status():
     scanner_busy = (detect_pending + upload_pending + in_memory_active) > 0
     # Fail-safe: if aria2 or the DB cannot be read we cannot PROVE idleness, so
     # report busy. A caller must never act on an unknown state.
-    aria2_busy = (not aria2_ok) or (aria2_active or 0) > 0 or (aria2_waiting or 0) > 0
+    aria2_busy = (not aria2_ok) or (aria2_active or 0) > 0 or (aria2_waiting_runnable or 0) > 0
     busy = bool(scanner_busy or aria2_busy or (not db_ok))
 
     return jsonify({
@@ -2199,6 +2217,8 @@ def scanner_status():
         "aria2_ok": aria2_ok,
         "aria2_active": aria2_active,
         "aria2_waiting": aria2_waiting,
+        "aria2_paused": aria2_paused,
+        "aria2_waiting_runnable": aria2_waiting_runnable,
     })
 
 
