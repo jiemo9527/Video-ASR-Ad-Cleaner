@@ -459,6 +459,79 @@ class ScannerCore:
                 hit_words.append(kw)
         return hit_words
 
+    def clean_track_title(self, title, meta_keywords):
+        """Remove keyword-hit segments from a track title, keep the remaining description.
+
+        Only the matched keyword text and separators around it are removed;
+        whatever is left (e.g. a language name) stays. Matching follows the
+        metadata keyword table, so new ad markers are handled by adding them
+        there, not in code. Returns '' when nothing meaningful remains.
+        """
+        original = SCAN_IGNORED_CHARS_RE.sub('', str(title or ''))
+        if not original.strip():
+            return ''
+        text = original
+        for kw in sorted({str(k) for k in meta_keywords if k}, key=len, reverse=True):
+            needle = SCAN_IGNORED_CHARS_RE.sub('', kw)
+            if needle:
+                text = re.sub(re.escape(needle), '\x00', text, flags=re.IGNORECASE)
+        if text == original:
+            return original.strip()
+        # Remove separators adjacent to each removed segment, then empty brackets.
+        text = re.sub(r'[\s._\-@|/\\]*\x00[\s._\-@|/\\]*', ' ', text)
+        text = re.sub(r'[\[(（【]\s*[\])）】]', ' ', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text if re.search(r'\w', text) else ''
+
+    def get_track_label_tags(self, file_path):
+        """Return {source stream index: {'language', 'title'}} for audio and subtitle streams."""
+        res = self.run_cmd([
+            'ffprobe', '-v', 'error', '-show_entries',
+            'stream=index,codec_type:stream_tags=language,title', '-of', 'json', file_path
+        ], timeout=30)
+        if not res or res.returncode != 0 or not res.stdout:
+            return {}
+        try:
+            data = json.loads(res.stdout)
+        except Exception:
+            return {}
+        labels = {}
+        for stream in data.get('streams', []):
+            if stream.get('codec_type') in ('audio', 'subtitle') and stream.get('index') is not None:
+                tags = stream.get('tags') or {}
+                labels[str(stream['index'])] = {
+                    'type': stream['codec_type'],
+                    'language': tags.get('language') or '',
+                    'title': tags.get('title') or '',
+                }
+        return labels
+
+    def get_track_label_restore_args(self, source, audio_map_args, meta_keywords):
+        """Re-apply language codes and keyword-cleaned titles to output audio/subtitle streams.
+
+        Metadata cleanup clears every stream tag. Language codes are restored
+        as-is; titles keep only the text that remains after removing keyword hits.
+        """
+        labels = self.get_track_label_tags(source)
+        if not labels:
+            return []
+        mapped_audio = [arg.split(':', 1)[1] for arg in audio_map_args[1::2] if re.fullmatch(r'0:\d+', arg)]
+        if not mapped_audio:  # Fallback '-map 0:a?' keeps every audio stream in order.
+            mapped_audio = [idx for idx, info in labels.items() if info['type'] == 'audio']
+        subtitles = [idx for idx, info in labels.items() if info['type'] == 'subtitle']
+        args = []
+        for spec, indexes in (('a', mapped_audio), ('s', subtitles)):
+            for out_index, src_index in enumerate(indexes):
+                info = labels.get(src_index)
+                if not info:
+                    continue
+                if info['language']:
+                    args.extend([f'-metadata:s:{spec}:{out_index}', f"language={info['language']}"])
+                title = self.clean_track_title(info['title'], meta_keywords)
+                if title:
+                    args.extend([f'-metadata:s:{spec}:{out_index}', f'title={title}'])
+        return args
+
     def get_audio_streams(self, file_path):
         res = self.run_cmd(
             ['ffprobe', '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index,codec_name', '-of',
@@ -691,23 +764,18 @@ class ScannerCore:
                          for _, _, texts in self._subtitle_cues(lines, fmt) for text in texts)
 
     def clean_subtitle_content(self, content, fmt, keywords):
-        """剔除命中关键词的字幕行；整条事件的文本都被剔除时删除该事件。返回 (新内容, 剔除行数)。"""
+        """删除命中关键词的整条字幕事件，保留其他时段；返回 (新内容, 删除的文本行数)。"""
         lines = content.splitlines()
         removed = 0
         replacements = []
         for start, end, texts in self._subtitle_cues(lines, fmt):
-            kept = [t for t in texts if not self.find_keywords(SUBTITLE_TAG_RE.sub('', t), keywords)]
-            if len(kept) == len(texts):
+            if not any(self.find_keywords(SUBTITLE_TAG_RE.sub('', text), keywords) for text in texts):
                 continue
-            removed += len(texts) - len(kept)
+            removed += len(texts)
             if fmt == 'ass':
-                prefix = lines[start].split(',', 9)
-                new_lines = [','.join(prefix[:9] + ['\\N'.join(kept)])] if kept else []
-                replacements.append((start, end, new_lines))
-            elif kept:
-                replacements.append((start, end, kept))
+                replacements.append((start, end, []))
             else:
-                # 整条 cue 删除：连同序号行/时间行及其后空行
+                # 连同序号行、时间行及其后空行一起删除。
                 cue_start = start - 1
                 while cue_start > 0 and lines[cue_start - 1].strip():
                     cue_start -= 1
@@ -1108,12 +1176,14 @@ class ScannerCore:
             output = os.path.join(dir_name, f"{name}_clean_meta{ext}")
             output_muxer = self.get_metadata_remux_muxer(container_format, output)
             cmd = ['ffmpeg', '-err_detect', 'ignore_err', '-i', source, '-map', '0:v:0']
-            cmd.extend(self.get_safe_audio_map_args(source))
+            audio_map_args = self.get_safe_audio_map_args(source)
+            cmd.extend(audio_map_args)
             cmd.extend(['-map', '0:s?', '-c', 'copy', '-dn', '-ignore_unknown', '-strict', '-2', '-map_metadata', '-1',
                    '-metadata', 'title=', '-metadata', 'comment=',
                    '-metadata', 'description=', '-metadata', 'synopsis=',
                    '-metadata', 'artist=', '-metadata', 'album=', '-metadata', 'copyright='])
             cmd.extend(self.get_stream_metadata_clear_args())
+            cmd.extend(self.get_track_label_restore_args(source, audio_map_args, meta_keywords))
             if output_muxer:
                 self.log(f"ℹ️ 文件扩展名 {ext} 与实际容器 {container_format} 不一致，按 {output_muxer} 重封装")
                 cmd.extend(['-f', output_muxer])
@@ -1139,20 +1209,15 @@ class ScannerCore:
         dirty_idxs = set()
         image_count = 0
 
-        for stream in streams:
-            idx = stream['index']
-            hit_words = self.find_keywords(self.subtitle_metadata_text(stream), sub_keywords)
-            if hit_words:
-                self.log(f"🚫 字幕轨 #{idx} 元数据命中: {', '.join(hit_words)}")
-                dirty_idxs.add(idx)
-
+        # Language, title, and handler_name can all be player-facing track
+        # labels. A keyword in a label alone is not evidence that its subtitle
+        # content is dirty; only matching dialogue events are removed.
         text_streams = []
         for stream in streams:
             if not self.is_text_subtitle_stream(stream):
                 image_count += 1
                 continue
-            if stream['index'] not in dirty_idxs:
-                text_streams.append(stream)
+            text_streams.append(stream)
 
         self.log(f"ℹ️ 字幕轨 {len(streams)} 条，待扫文本轨 {len(text_streams)} 条，图片轨 {image_count} 条")
         with tempfile.TemporaryDirectory(prefix='subscan_') as tmp_dir:
@@ -1174,9 +1239,9 @@ class ScannerCore:
                     with open(clean_path, 'w', encoding='utf-8') as f:
                         f.write(new_content)
                     cleaned[idx] = clean_path
-                    self.log(f"✂️ 字幕轨 #{idx} 剔除命中行 {removed} 行，保留该轨")
+                    self.log(f"✂️ 字幕轨 #{idx} 剔除命中事件（共 {removed} 行文本），保留该轨")
                 else:
-                    self.log(f"⚠️ 字幕轨 #{idx} 无法逐行清理，整轨剔除")
+                    self.log(f"⚠️ 字幕轨 #{idx} 无法按事件清理，整轨剔除")
                     dirty_idxs.add(idx)
 
             self.log(f"⏱️ 字幕分析完成: {len(streams)}轨/命中{len(dirty_idxs) + len(cleaned)}轨，"

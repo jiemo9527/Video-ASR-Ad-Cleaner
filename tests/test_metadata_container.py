@@ -1,4 +1,7 @@
+import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -36,6 +39,31 @@ class MetadataContainerTests(unittest.TestCase):
         })
 
         self.assertEqual(core.find_keywords(scan_text, ['xinghanWEB']), ['xinghanWEB'])
+
+    def test_track_title_removes_only_keyword_segments(self):
+        core = ScannerCore()
+        self.assertEqual(core.clean_track_title('gyweb..国语', ['GyWEB']), '国语')
+        self.assertEqual(core.clean_track_title('双语特效@KKYY', ['KKYY']), '双语特效')
+        self.assertEqual(core.clean_track_title('XX资源群 简体', ['资源群']), 'XX 简体')
+        self.assertEqual(core.clean_track_title('简体 [TG@abc]', ['TG@abc']), '简体')
+        self.assertEqual(core.clean_track_title('English', ['GyWEB']), 'English')
+        self.assertEqual(core.clean_track_title('GyWEB', ['GyWEB']), '')
+        self.assertEqual(core.clean_track_title('', ['GyWEB']), '')
+
+    def test_track_title_without_keyword_hit_is_untouched(self):
+        core = ScannerCore()
+        for title in ('English [SDH]', '中文（简体）', 'Português (Brasil)', '???',
+                      'English [Dolby Digital Plus 5.1]'):
+            self.assertEqual(core.clean_track_title(title, ['GyWEB', '资源群']), title)
+
+    def test_track_title_keeps_balanced_brackets_after_removal(self):
+        core = ScannerCore()
+        self.assertEqual(core.clean_track_title('GyWEB..English [SDH]', ['GyWEB']), 'English [SDH]')
+        self.assertEqual(core.clean_track_title('中文（简体）@KKYY', ['KKYY']), '中文（简体）')
+
+    def test_track_title_handles_zero_width_obfuscation(self):
+        core = ScannerCore()
+        self.assertEqual(core.clean_track_title('Gy\u200bWEB..国语', ['GyWEB']), '国语')
 
     def test_stream_metadata_cleanup_clears_mp4_name_tag(self):
         core = ScannerCore()
@@ -87,6 +115,47 @@ class MetadataContainerTests(unittest.TestCase):
 
         self.assertEqual(calls, ['/media/episode.mp4'])
 
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg not installed')
+    def test_metadata_cleanup_restores_cleaned_track_labels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = os.path.join(tmp, 'sample.mkv')
+            srt = os.path.join(tmp, 'one.srt')
+            srt2 = os.path.join(tmp, 'two.srt')
+            srt3 = os.path.join(tmp, 'three.srt')
+            with open(srt, 'w', encoding='utf-8') as f:
+                f.write('1\n00:00:00,000 --> 00:00:01,000\nHello\n')
+            with open(srt2, 'w', encoding='utf-8') as f:
+                f.write('1\n00:00:00,000 --> 00:00:01,000\nCiao\n')
+            with open(srt3, 'w', encoding='utf-8') as f:
+                f.write('1\n00:00:00,000 --> 00:00:01,000\n你好\n')
+            subprocess.run([
+                'ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'color=d=2:s=64x64',
+                '-f', 'lavfi', '-i', 'sine=d=2', '-f', 'lavfi', '-i', 'sine=d=2',
+                '-i', srt, '-i', srt2, '-i', srt3,
+                '-map', '0:v', '-map', '1:a', '-map', '2:a',
+                '-map', '3:s', '-map', '4:s', '-map', '5:s',
+                '-c:v', 'mpeg4', '-c:a', 'aac', '-c:s', 'copy', '-metadata', 'comment=blocked-marker',
+                '-metadata:s:a:0', 'language=eng', '-metadata:s:a:0', 'title=English',
+                '-metadata:s:a:1', 'language=chi', '-metadata:s:a:1', 'title=GyWEB..国语',
+                '-metadata:s:s:0', 'language=eng', '-metadata:s:s:0', 'title=English',
+                '-metadata:s:s:1', 'language=ita', '-metadata:s:s:1', 'title=GyWEB..Italian',
+                '-metadata:s:s:2', 'language=chi', '-metadata:s:s:2', 'title=GyWEB',
+                '-y', source], check=True)
+            core = ScannerCore()
+            self.assertTrue(core.sanitize_metadata(source, ['blocked-marker', 'GyWEB']))
+
+            def tags(selector):
+                info = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', selector,
+                                       '-show_entries', 'stream_tags=language,title', '-of', 'json', source],
+                                      capture_output=True, text=True, check=True)
+                return [s.get('tags', {}) for s in json.loads(info.stdout)['streams']]
+
+            self.assertEqual(tags('a'), [{'language': 'eng', 'title': 'English'},
+                                         {'language': 'chi', 'title': '国语'}])
+            self.assertEqual(tags('s'), [{'language': 'eng', 'title': 'English'},
+                                         {'language': 'ita', 'title': 'Italian'},
+                                         {'language': 'chi'}])
 
 if __name__ == '__main__':
     unittest.main()

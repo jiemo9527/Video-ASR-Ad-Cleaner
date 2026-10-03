@@ -186,6 +186,8 @@ Behavior:
 - Normalizes zero-width characters before matching.
 - If dirty metadata is found, remuxes with cleaned metadata.
 - Uses safe audio mapping to skip unknown/unsupported audio streams.
+- The remux clears all stream tags, then `get_track_label_restore_args()` re-applies audio and subtitle track labels so players (Jellyfin) can still tell tracks apart: `language` codes are restored as-is, and `title` goes through `clean_track_title()`, which removes only the metadata-keyword hits plus adjacent separators (`..`, `@`, `|`, spaces) and keeps the rest (`GyWEB..国语` -> `国语`, `双语特效@KKYY` -> `双语特效`). Titles with no hit are kept verbatim; a title left empty is dropped while the language stays. Audio output indexes follow the mapped (copyable) audio streams.
+- Do not hardcode ad markers or language-name allowlists in code. New markers belong in the metadata keyword table; a keyword that is really a language descriptor (e.g. `Mandarin`, removed from the defaults) must be removed from the table instead.
 
 Important: unknown audio streams such as `av3a` may make MP4 remux fail if mapped blindly. Keep `get_safe_audio_map_args()` in metadata/subtitle-remux paths.
 
@@ -196,12 +198,12 @@ Implemented in `ScannerCore.check_subtitles()`.
 Current optimized flow:
 
 1. `get_subtitle_streams()` uses one `ffprobe` JSON call to collect subtitle `index`, `codec`, `language`, `title`, and `handler_name`.
-2. Subtitle metadata is scanned first. If metadata hits a keyword, that track is marked dirty without extracting text.
+2. Track labels (`language`, `title`, `handler_name`) are never used to remove a subtitle track. A keyword hit in a label is not evidence the dialogue is dirty, and labels are what players use to tell languages apart. Ad text in titles is handled by metadata cleanup (see above).
 3. Text subtitle tracks are batch-exported with one `ffmpeg` command into temporary files in their own format (`ass`/`ssa` -> `.ass`, `webvtt` -> `.vtt`, others such as `subrip`/`mov_text` -> `.srt`).
 4. Only cue/dialogue text (override tags stripped) is scanned for subtitle keywords after zero-width normalization.
-5. Image subtitle tracks are not OCR-scanned. Only their metadata is scanned.
-6. A text track whose content hits a keyword is modified, not removed: `clean_subtitle_content()` drops each hit line (ASS splits on `\N`), and a cue left empty is dropped. If nothing remains or the cleaned text still hits (e.g. a keyword split across lines), the whole track is removed as before. Tracks hit by metadata are still removed.
-7. One remux writes video, safe audio streams, untouched subtitle tracks, and the cleaned files in the original track order. Cleaned tracks keep language/title via `-map_metadata` and `default`/`forced` disposition; MP4/MOV outputs encode them as `mov_text`. Logs report `✂️ 字幕轨 #N 剔除命中行 X 行` and the remux time in `✅ 字幕清洗完成，用时 Xs`.
+5. Image subtitle tracks are not OCR-scanned and not modified.
+6. A text track whose content hits a keyword is modified, not removed: `clean_subtitle_content()` drops every timed cue / ASS `Dialogue` event in which any line hits, including the other lines of that event (e.g. a 3-line ad event `永裴资源君\N更多实时同步更新优品资源\Nhttps://link3.cc/...` is removed as a whole). Events at other times stay. Losing a normal line that shares an event with an ad line is an accepted cost. If no dialogue remains or the cleaned text still hits, the whole track is removed.
+7. One remux writes video, safe audio streams, untouched subtitle tracks, and the cleaned files in the original track order. Cleaned tracks keep language/title via `-map_metadata` and `default`/`forced` disposition; MP4/MOV outputs encode them as `mov_text`. Logs report `✂️ 字幕轨 #N 剔除命中事件（共 X 行文本），保留该轨` and the remux time in `✅ 字幕清洗完成，用时 Xs`.
 
 Image subtitle codecs currently treated as non-text:
 
@@ -212,7 +214,7 @@ Image subtitle codecs currently treated as non-text:
 
 Important behavior for PGS/image subtitles:
 
-- Track titles can be checked and dirty tracks can be removed (image tracks cannot be line-edited).
+- Track titles are not used to remove image tracks; image tracks cannot be edited and are kept.
 - Subtitle image content is not checked.
 - OCR is not implemented and should not be added casually because full OCR can be very slow.
 
