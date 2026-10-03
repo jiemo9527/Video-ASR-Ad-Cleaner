@@ -1278,17 +1278,30 @@ class ScannerCore:
                 clean_inputs[idx] = len(clean_inputs) + 1
                 cmd.extend(['-i', clean_path])
             cmd.extend(['-map', '0:v:0'])
-            cmd.extend(self.get_safe_audio_map_args(source))
-            stream_args = []
+            audio_map_args = self.get_safe_audio_map_args(source)
+            cmd.extend(audio_map_args)
+            # Any per-stream -map_metadata disables ffmpeg's default per-stream
+            # metadata copy for ALL streams, so map every output stream explicitly;
+            # otherwise untouched tracks lose their language/title labels.
+            stream_args = ['-map_metadata', '0', '-map_metadata:s:v:0', '0:s:v:0']
+            audio_indexes = [arg.split(':', 1)[1] for arg in audio_map_args[1::2]
+                             if re.fullmatch(r'0:\d+', arg)]
+            if audio_indexes:
+                for out_index, src_index in enumerate(audio_indexes):
+                    stream_args.extend([f'-map_metadata:s:a:{out_index}', f'0:s:{src_index}'])
+            else:
+                for out_index, src_index in enumerate(
+                        idx for idx, info in self.get_track_label_tags(source).items() if info['type'] == 'audio'):
+                    stream_args.extend([f'-map_metadata:s:a:{out_index}', f'0:s:{src_index}'])
             sub_out = 0
             for stream in streams:
                 idx = stream['index']
                 if idx in dirty_idxs:
                     continue
+                stream_args.extend([f'-map_metadata:s:s:{sub_out}', f'0:s:{idx}'])
                 if idx in clean_inputs:
                     cmd.extend(['-map', f'{clean_inputs[idx]}:0'])
-                    stream_args.extend([f'-map_metadata:s:s:{sub_out}', f'0:s:{idx}',
-                                        f'-disposition:s:{sub_out}', stream.get('disposition') or '0'])
+                    stream_args.extend([f'-disposition:s:{sub_out}', stream.get('disposition') or '0'])
                     if ext.lower() in MOV_TEXT_EXTENSIONS:
                         stream_args.extend([f'-c:s:{sub_out}', 'mov_text'])
                 else:

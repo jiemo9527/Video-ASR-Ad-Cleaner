@@ -183,6 +183,42 @@ class SubtitleTrackRemuxTests(unittest.TestCase):
             self.assertIn('仅含广告（1 条事件全部命中），整轨剔除', joined)
             self.assertNotIn('无法按事件清理', joined)
 
+    def test_editing_one_track_keeps_labels_of_all_tracks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            clean = os.path.join(tmp, 'clean.srt')
+            dirty = os.path.join(tmp, 'dirty.srt')
+            with open(clean, 'w', encoding='utf-8') as f:
+                f.write('1\n00:00:00,000 --> 00:00:01,000\nHello\n')
+            with open(dirty, 'w', encoding='utf-8') as f:
+                f.write('1\n00:00:00,000 --> 00:00:01,000\nvisit x.com\n\n'
+                        '2\n00:00:01,000 --> 00:00:02,000\nok\n')
+            source = os.path.join(tmp, 'v.mkv')
+            subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'color=d=2:s=64x64',
+                            '-f', 'lavfi', '-i', 'sine=d=2', '-i', clean, '-i', dirty, '-i', clean,
+                            '-map', '0:v', '-map', '1:a', '-map', '2:s', '-map', '3:s', '-map', '4:s',
+                            '-c:v', 'mpeg4', '-c:a', 'aac', '-c:s', 'copy',
+                            '-metadata:s:a:0', 'language=eng', '-metadata:s:a:0', 'title=English',
+                            '-metadata:s:s:0', 'language=ara', '-metadata:s:s:0', 'title=Arabic',
+                            '-metadata:s:s:1', 'language=dut', '-metadata:s:s:1', 'title=Dutch',
+                            '-metadata:s:s:2', 'language=fin', '-metadata:s:s:2', 'title=Finnish',
+                            '-disposition:s:2', 'default', '-y', source], check=True)
+            output = ScannerCore().check_subtitles(source, ['.com'])
+            self.assertTrue(output and os.path.isfile(output))
+            assert output is not None
+            probe = subprocess.run(['ffprobe', '-v', 'error', '-show_entries',
+                                    'stream=codec_type:stream_tags=language,title:stream_disposition=default',
+                                    '-of', 'json', output], capture_output=True, text=True, check=True)
+            streams = [s for s in json.loads(probe.stdout)['streams'] if s['codec_type'] != 'video']
+            labels = [(s['codec_type'], s.get('tags', {}).get('language'), s.get('tags', {}).get('title'))
+                      for s in streams]
+            self.assertEqual(labels, [('audio', 'eng', 'English'), ('subtitle', 'ara', 'Arabic'),
+                                      ('subtitle', 'dut', 'Dutch'), ('subtitle', 'fin', 'Finnish')])
+            self.assertEqual(streams[3]['disposition']['default'], 1)
+            text = subprocess.run(['ffmpeg', '-v', 'error', '-i', output, '-map', '0:s:1', '-f', 'srt', '-'],
+                                  capture_output=True, text=True).stdout
+            self.assertNotIn('x.com', text)
+            self.assertIn('ok', text)
+
     def test_handler_name_keyword_alone_does_not_remove_track(self):
         with tempfile.TemporaryDirectory() as tmp:
             srt = os.path.join(tmp, 'a.srt')
