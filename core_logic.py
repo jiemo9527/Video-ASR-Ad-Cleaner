@@ -763,13 +763,26 @@ class ScannerCore:
         return "\n".join(SUBTITLE_TAG_RE.sub('', text)
                          for _, _, texts in self._subtitle_cues(lines, fmt) for text in texts)
 
+    def subtitle_event_scan_text(self, texts):
+        """Join all lines of one subtitle event so a keyword split by a line break still matches."""
+        return ''.join(SUBTITLE_TAG_RE.sub('', text) for text in texts)
+
+    def find_subtitle_content_keywords(self, content, fmt, keywords):
+        """Keywords hit by any subtitle event, matched per event (never across events)."""
+        hits = []
+        for _, _, texts in self._subtitle_cues(content.splitlines(), fmt):
+            for kw in self.find_keywords(self.subtitle_event_scan_text(texts), keywords):
+                if kw not in hits:
+                    hits.append(kw)
+        return hits
+
     def clean_subtitle_content(self, content, fmt, keywords):
         """删除命中关键词的整条字幕事件，保留其他时段；返回 (新内容, 删除的文本行数)。"""
         lines = content.splitlines()
         removed = 0
         replacements = []
         for start, end, texts in self._subtitle_cues(lines, fmt):
-            if not any(self.find_keywords(SUBTITLE_TAG_RE.sub('', text), keywords) for text in texts):
+            if not self.find_keywords(self.subtitle_event_scan_text(texts), keywords):
                 continue
             removed += len(texts)
             if fmt == 'ass':
@@ -1228,20 +1241,25 @@ class ScannerCore:
                 if idx not in exported:
                     continue
                 path, fmt, content = exported[idx]
-                hit_words = self.find_keywords(self.subtitle_dialogue_text(content, fmt), sub_keywords)
+                hit_words = self.find_subtitle_content_keywords(content, fmt, sub_keywords)
                 if not hit_words:
                     continue
                 self.log(f"🚫 字幕轨 #{idx} 内容命中: {', '.join(hit_words)}")
                 new_content, removed = self.clean_subtitle_content(content, fmt, sub_keywords)
-                new_text = self.subtitle_dialogue_text(new_content, fmt)
-                if removed and new_text.strip() and not self.find_keywords(new_text, sub_keywords):
+                remaining = sum(1 for _, _, texts in self._subtitle_cues(new_content.splitlines(), fmt)
+                                if self.subtitle_event_scan_text(texts).strip())
+                if removed and remaining:
                     clean_path = os.path.join(tmp_dir, f"clean_{os.path.basename(path)}")
                     with open(clean_path, 'w', encoding='utf-8') as f:
                         f.write(new_content)
                     cleaned[idx] = clean_path
                     self.log(f"✂️ 字幕轨 #{idx} 剔除命中事件（共 {removed} 行文本），保留该轨")
                 else:
-                    self.log(f"⚠️ 字幕轨 #{idx} 无法按事件清理，整轨剔除")
+                    # Detection and cleaning share the same per-event rule, so a hit
+                    # always removes at least one event; an empty result means the
+                    # track contained nothing but ad events.
+                    total_events = sum(1 for _ in self._subtitle_cues(content.splitlines(), fmt))
+                    self.log(f"🗑️ 字幕轨 #{idx} 仅含广告（{total_events} 条事件全部命中），整轨剔除")
                     dirty_idxs.add(idx)
 
             self.log(f"⏱️ 字幕分析完成: {len(streams)}轨/命中{len(dirty_idxs) + len(cleaned)}轨，"

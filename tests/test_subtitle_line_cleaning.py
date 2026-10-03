@@ -74,6 +74,29 @@ class SubtitleLineCleaningTests(unittest.TestCase):
         self.assertNotIn('全是', cleaned)
         self.assertIn('Format: Layer, Start, End', cleaned)
 
+    def test_keyword_split_across_lines_in_same_event_is_removed(self):
+        bs = chr(92)
+        ass = ('[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n'
+               'Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,加入资源' + bs + 'N群123\n'
+               'Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,正常台词\n')
+        self.assertEqual(self.core.find_subtitle_content_keywords(ass, 'ass', ['资源群']), ['资源群'])
+        cleaned, removed = self.core.clean_subtitle_content(ass, 'ass', ['资源群'])
+        self.assertEqual(removed, 2)
+        self.assertNotIn('加入资源', cleaned)
+        self.assertIn('正常台词', cleaned)
+
+        srt = '1\n00:00:01,000 --> 00:00:02,000\n更多link3\n.cc/vip\n\n2\n00:00:03,000 --> 00:00:04,000\n正常\n'
+        self.assertEqual(self.core.find_subtitle_content_keywords(srt, 'srt', ['link3.cc']), ['link3.cc'])
+        cleaned, removed = self.core.clean_subtitle_content(srt, 'srt', ['link3.cc'])
+        self.assertEqual(removed, 2)
+        self.assertIn('正常', cleaned)
+
+    def test_keyword_split_across_different_events_is_not_joined(self):
+        srt = '1\n00:00:01,000 --> 00:00:02,000\n加入资源\n\n2\n00:00:02,000 --> 00:00:03,000\n群123\n'
+        self.assertEqual(self.core.find_subtitle_content_keywords(srt, 'srt', ['资源群']), [])
+        cleaned, removed = self.core.clean_subtitle_content(srt, 'srt', ['资源群'])
+        self.assertEqual(removed, 0)
+
     def test_real_sample_removes_whole_ad_event(self):
         sample = os.path.join(os.path.dirname(__file__), 'fixtures', 'sample_37_ad.ass')
         with open(sample, encoding='utf-8') as f:
@@ -146,6 +169,19 @@ class SubtitleTrackRemuxTests(unittest.TestCase):
                                    capture_output=True, text=True, check=True)
             self.assertEqual(json.loads(probe.stdout)['streams'][0]['tags'],
                              {'language': 'chi', 'title': '国语'})
+
+    def test_ad_only_track_logs_clear_reason(self):
+        sample = os.path.join(os.path.dirname(__file__), 'fixtures', 'sample_37_ad.ass')
+        with tempfile.TemporaryDirectory() as tmp:
+            source = os.path.join(tmp, 'v.mkv')
+            subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'color=d=2:s=64x64',
+                            '-i', sample, '-map', '0:v', '-map', '1:s', '-c:v', 'mpeg4',
+                            '-c:s', 'copy', '-y', source], check=True)
+            logs = []
+            ScannerCore(logger_callback=logs.append).check_subtitles(source, ['link3.cc'])
+            joined = '\n'.join(logs)
+            self.assertIn('仅含广告（1 条事件全部命中），整轨剔除', joined)
+            self.assertNotIn('无法按事件清理', joined)
 
     def test_handler_name_keyword_alone_does_not_remove_track(self):
         with tempfile.TemporaryDirectory() as tmp:
