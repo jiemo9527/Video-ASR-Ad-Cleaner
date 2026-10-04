@@ -58,6 +58,17 @@ class AriaNgMobileSearchTests(unittest.TestCase):
         page.locator('#task-table').wait_for(state='attached')
         return page
 
+    def test_mobile_logo_row_is_hidden_without_leaving_a_gap(self):
+        for width in (320, 375, 430, 767):
+            with self.subTest(width=width):
+                page = self.open_page(width)
+                self.assertFalse(page.locator('.main-header > .logo').is_visible())
+                self.assertEqual(page.locator('.main-header .navbar').bounding_box()['y'], 0)
+                header = page.locator('.main-header').bounding_box()
+                self.assertLessEqual(header['height'], 118)
+                self.assertAlmostEqual(page.locator('#content-body').bounding_box()['y'],
+                                       header['height'], delta=1)
+
     def test_mobile_search_is_visible_wide_and_filters_tasks(self):
         for width in (320, 375, 430, 767):
             with self.subTest(width=width):

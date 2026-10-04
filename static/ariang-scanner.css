@@ -126,8 +126,12 @@ body.skin-aria-ng {
 
 @media (max-width: 767.98px) {
     .skin-aria-ng {
-        /* Logo (50) + native toolbar (56) + search row (61). */
-        --scanner-mobile-header-height: 167px;
+        /* Native toolbar (56) + search row (61); no mobile logo row. */
+        --scanner-mobile-header-height: 117px;
+    }
+
+    .skin-aria-ng .main-header > .logo {
+        display: none;
     }
 
     .skin-aria-ng .main-header {
