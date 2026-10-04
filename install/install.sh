@@ -199,11 +199,22 @@ function deploy_project_archive() {
     echo -e "${YELLOW}>>> 项目根目录确认: $PROJECT_ROOT${NC}"
 }
 
-# 旧版本嵌入的第三方 AriaNg 已由 Scanner 内置下载器取代，更新时清理遗留资源
+# 旧版本嵌入的第三方 AriaNg 已由 Scanner 内置下载器取代，安装/更新时清理遗留资源。
+# 部署只覆盖文件、不删除旧文件，所以已从仓库移除的 AriaNg 适配文件也要在这里删掉。
 function remove_legacy_ariang_assets() {
     local project_root="$1"
+    local removed=0 legacy
     if [ -d "$project_root/ariang" ]; then
         rm -rf "$project_root/ariang"
+        removed=1
+    fi
+    for legacy in templates/ariang.html static/ariang-scanner.css static/ariang-scanner-quiet-dialogs.js tests/test_ariang_mobile_search.py; do
+        if [ -f "$project_root/$legacy" ]; then
+            rm -f "$project_root/$legacy"
+            removed=1
+        fi
+    done
+    if [ "$removed" = 1 ]; then
         echo -e "${GREEN}>>> 已移除旧版 AriaNg 资源（改用内置下载器）。${NC}"
     fi
 }

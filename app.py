@@ -26,6 +26,8 @@ app = Flask(__name__)
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 ARIA2_CONFIG_PATH = os.environ.get('SCANNER_ARIA2_CONFIG_PATH', '/root/.aria2c/aria2.conf')
 PROJECT_URL = 'https://github.com/jiemo9527/Video-ASR-Ad-Cleaner'
+# Settings that no longer exist; removed from the DB at startup.
+LEGACY_CONFIG_KEYS = ('downloader_ui',)
 
 # ================= 🔐 Session 密钥持久化 =================
 secret_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.flask_secret')
@@ -1901,6 +1903,17 @@ def login():
 def logout(): logout_user(); return redirect(url_for('login'))
 
 
+def remove_legacy_config():
+    """Delete settings rows for features that were removed (run once at startup)."""
+    try:
+        removed = Config.query.filter(Config.key.in_(LEGACY_CONFIG_KEYS)).delete(synchronize_session=False)
+        db.session.commit()
+        return removed
+    except Exception:
+        db.session.rollback()
+        return 0
+
+
 def downloader_template_context():
     config = get_final_config(None)
     return {
@@ -3051,6 +3064,9 @@ if __name__ == '__main__':
                 pass
 
         seed_default_keywords()
+
+        # 旧版「下载器界面」切换已移除，清掉遗留的设置记录
+        remove_legacy_config()
 
         # 🔥 开启 WAL 模式 (大幅优化 I/O)
         try:

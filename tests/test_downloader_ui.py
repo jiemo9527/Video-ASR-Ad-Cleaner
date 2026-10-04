@@ -80,6 +80,16 @@ class DownloaderPageTests(unittest.TestCase):
         self.assertNotIn('下载器界面', settings_page)
         self.assertNotIn("id: 'ui'", settings_page)
 
+    def test_startup_removes_legacy_downloader_ui_row(self):
+        from database import Config
+        db.session.merge(Config(key='downloader_ui', value='classic'))  # pyright: ignore[reportCallIssue]
+        db.session.merge(Config(key='scan_path', value='/root/downloads'))  # pyright: ignore[reportCallIssue]
+        db.session.commit()
+        self.assertEqual(scanner.remove_legacy_config(), 1)
+        self.assertIsNone(db.session.get(Config, 'downloader_ui'))
+        self.assertIsNotNone(db.session.get(Config, 'scan_path'), 'other settings are kept')
+        self.assertEqual(scanner.remove_legacy_config(), 0)
+
 
 if __name__ == '__main__':
     unittest.main()
