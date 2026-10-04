@@ -132,6 +132,7 @@ body.skin-aria-ng {
 
     .skin-aria-ng .main-header {
         height: auto;
+        max-height: none;
     }
 
     .skin-aria-ng .main-header .navbar {

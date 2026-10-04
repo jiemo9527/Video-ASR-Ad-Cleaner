@@ -36,20 +36,26 @@ class AriaNgMobileSearchTests(unittest.TestCase):
         cls.playwright.stop()
 
     def open_page(self, width, theme=True):
-        page = self.browser.new_page(viewport={'width': width, 'height': 812})
+        page = self.browser.new_page(viewport={'width': width, 'height': 812},
+                                     is_mobile=width < 768, has_touch=width < 768)
         self.addCleanup(page.close)
 
         def serve(route):
             if route.request.resource_type == 'document':
-                route.fulfill(content_type='text/html', body=self.upstream)
+                page_html = self.upstream
+                if theme:
+                    page_html = page_html.replace('</head>', '<link rel="stylesheet" href="/static/ariang-scanner.css"><script defer src="/static/ariang-scanner-quiet-dialogs.js"></script></head>')
+                route.fulfill(content_type='text/html', body=page_html)
+            elif route.request.url.endswith('/static/ariang-scanner.css'):
+                route.fulfill(content_type='text/css', body=(ROOT / 'static/ariang-scanner.css').read_text(encoding='utf-8'))
+            elif route.request.url.endswith('/static/ariang-scanner-quiet-dialogs.js'):
+                route.fulfill(content_type='application/javascript', body=(ROOT / 'static/ariang-scanner-quiet-dialogs.js').read_text(encoding='utf-8'))
             else:
                 route.abort()
 
         page.route('http://ariang.test/**', serve)
         page.goto('http://ariang.test/#!/downloading')
         page.locator('#task-table').wait_for(state='attached')
-        if theme:
-            page.add_style_tag(path=str(ROOT / 'static/ariang-scanner.css'))
         return page
 
     def test_mobile_search_is_visible_wide_and_filters_tasks(self):
@@ -86,6 +92,44 @@ class AriaNgMobileSearchTests(unittest.TestCase):
                 page.wait_for_function("document.querySelectorAll('#task-table [data-gid]').length === 2")
                 if width == 375 and os.environ.get('SCANNER_ARIANG_TEST_SCREENSHOT'):
                     page.screenshot(path=os.environ['SCANNER_ARIANG_TEST_SCREENSHOT'])
+
+    def test_mobile_menu_stays_in_viewport_and_opens(self):
+        for width in (320, 375, 430, 767):
+            with self.subTest(width=width):
+                page = self.open_page(width)
+                toggle = page.locator('[data-toggle="push-menu"]')
+                box = toggle.bounding_box()
+                self.assertLessEqual(box['y'] + box['height'], 812,
+                                     'menu toggle must remain inside the viewport')
+                toggle.click()
+                page.wait_for_function("document.body.classList.contains('sidebar-open')")
+                page.locator('.sidebar-menu a[href="#!/waiting"]').click()
+                page.wait_for_url('**/#!/waiting')
+                self.assertTrue(page.locator('[data-toggle="push-menu"]').is_visible())
+
+    def test_mobile_chinese_composition_filters_visible_tasks(self):
+        page = self.open_page(375)
+        page.evaluate("""() => {
+            const scope = angular.element(document.querySelector('[ng-view]')).scope();
+            scope.$apply(() => {
+                scope.taskContext.list = ['中文电影.mkv', '其他剧集.mkv'].map((name, i) => ({
+                    gid: String(i), taskName: name, status: 'active', totalLength: 100,
+                    completedLength: 20, downloadSpeed: 0, uploadSpeed: 0, files: []
+                }));
+            });
+        }""")
+        search = page.locator('#search-box')
+        search.click()
+        search.evaluate("""e => {
+            e.dispatchEvent(new CompositionEvent('compositionstart', {bubbles: true}));
+            e.value = '中文';
+            e.dispatchEvent(new InputEvent('input', {bubbles: true, isComposing: true}));
+            e.dispatchEvent(new CompositionEvent('compositionend', {bubbles: true, data: '中文'}));
+        }""")
+        page.wait_for_function("document.querySelectorAll('#task-table [data-gid]').length === 1")
+        rows = page.locator('#task-table [data-gid]:visible')
+        self.assertEqual(rows.count(), 1)
+        self.assertIn('中文电影', rows.inner_text())
 
     def test_desktop_search_geometry_is_unchanged(self):
         for width in (768, 1280):
