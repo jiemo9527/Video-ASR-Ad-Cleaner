@@ -166,7 +166,7 @@
         <div class="sdl-meta">
           <span class="sdl-status" :class="'st-' + t.status">{{ statusText(t) }}</span>
           <span>{{ percent(t).toFixed(1) }}%</span>
-          <span class="sdl-m-size">{{ fmtBytes(t.completedLength) }} / {{ fmtBytes(t.totalLength) }}</span>
+          <span class="sdl-m-size" title="文件总大小">{{ Number(t.totalLength) > 0 ? fmtBytes(t.totalLength) : '大小未知' }}</span>
           <template v-if="t.status==='active'">
             <span class="text-success"><i class="bi bi-arrow-down"></i>{{ fmtSpeed(t.downloadSpeed) }}</span>
             <span class="d-none d-sm-inline">剩余 {{ remain(t) }}</span>

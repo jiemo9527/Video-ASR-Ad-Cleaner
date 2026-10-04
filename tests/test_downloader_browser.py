@@ -597,6 +597,14 @@ class DownloaderBrowserTests(unittest.TestCase):
         self.assertEqual(stored['newTaskSplit'], 4)
         self.assertEqual(stored['defaultList'], 'stopped')
 
+    def test_row_shows_total_size_not_downloaded(self):
+        page = self.open()
+        size = page.locator('.sdl-item', has_text='Alpha.Show').locator('.sdl-m-size')
+        self.assertEqual(size.inner_text().strip(), '4.00 GB')  # 1 GB of 4 GB downloaded
+        self.assertNotIn('/', size.inner_text())
+        self.fake.find('a2')['totalLength'] = '0'  # e.g. a magnet before metadata arrives
+        page.wait_for_function("[...document.querySelectorAll('.sdl-m-size')].some(e => e.textContent.trim() === '大小未知')")
+
     def test_progress_is_full_height_row_fill(self):
         for width in (1280, 375):
             with self.subTest(width=width):
