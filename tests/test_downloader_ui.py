@@ -91,5 +91,35 @@ class DownloaderPageTests(unittest.TestCase):
         self.assertEqual(scanner.remove_legacy_config(), 0)
 
 
+class Aria2ConfigPathTests(unittest.TestCase):
+    def test_default(self):
+        self.assertEqual(scanner.resolve_aria2_config_path({}), '/root/.aria2c/aria2.conf')
+
+    def test_installer_config_dir_from_scanner_env(self):
+        # install.sh writes SCANNER_ARIA2_CONFIG_DIR when /root/.aria2c belongs to another Aria2
+        env = {'SCANNER_ARIA2_CONFIG_DIR': '/opt/scanner-aria2'}
+        self.assertEqual(scanner.resolve_aria2_config_path(env).replace('\\', '/'), '/opt/scanner-aria2/aria2.conf')
+
+    def test_explicit_path_wins(self):
+        env = {'SCANNER_ARIA2_CONFIG_PATH': '/etc/aria2/custom.conf', 'SCANNER_ARIA2_CONFIG_DIR': '/opt/x'}
+        self.assertEqual(scanner.resolve_aria2_config_path(env), '/etc/aria2/custom.conf')
+
+    def test_blank_values_fall_back(self):
+        env = {'SCANNER_ARIA2_CONFIG_PATH': ' ', 'SCANNER_ARIA2_CONFIG_DIR': ''}
+        self.assertEqual(scanner.resolve_aria2_config_path(env), '/root/.aria2c/aria2.conf')
+
+
+class PinnedCdnTests(unittest.TestCase):
+    def test_vue_and_axios_versions_are_pinned(self):
+        root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'templates')
+        for name in ('index.html', 'settings.html', 'downloader.html'):
+            with open(os.path.join(root, name), encoding='utf-8') as f:
+                html = f.read()
+            self.assertNotIn('unpkg.com/vue@3/', html, name)
+            self.assertNotIn('unpkg.com/axios/', html, name)
+            self.assertIn('unpkg.com/vue@3.5.43/', html, name)
+            self.assertIn('unpkg.com/axios@1.20.0/', html, name)
+
+
 if __name__ == '__main__':
     unittest.main()

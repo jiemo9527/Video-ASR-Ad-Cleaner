@@ -24,7 +24,20 @@ from sqlalchemy import text
 
 app = Flask(__name__)
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
-ARIA2_CONFIG_PATH = os.environ.get('SCANNER_ARIA2_CONFIG_PATH', '/root/.aria2c/aria2.conf')
+def resolve_aria2_config_path(env=None):
+    """Locate aria2.conf: an explicit file path wins, then the installer's config dir."""
+    env = os.environ if env is None else env
+    path = (env.get('SCANNER_ARIA2_CONFIG_PATH') or '').strip()
+    if path:
+        return path
+    config_dir = (env.get('SCANNER_ARIA2_CONFIG_DIR') or '').strip()
+    if config_dir:
+        # install.sh writes SCANNER_ARIA2_CONFIG_DIR to scanner.env (a non-default dir when /root/.aria2c is taken)
+        return os.path.join(config_dir, 'aria2.conf')
+    return '/root/.aria2c/aria2.conf'
+
+
+ARIA2_CONFIG_PATH = resolve_aria2_config_path()
 PROJECT_URL = 'https://github.com/jiemo9527/Video-ASR-Ad-Cleaner'
 # Settings that no longer exist; removed from the DB at startup.
 LEGACY_CONFIG_KEYS = ('downloader_ui',)
