@@ -11,6 +11,8 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='downloader.css', v=downloader_asset_version) }}">
+    <script src="{{ url_for('static', filename='downloader.js', v=downloader_asset_version) }}"></script>
     <style>
         body { background: #f3f5f8; }
         .task-log-box {
@@ -34,9 +36,6 @@
         @keyframes pulse { 0% { opacity: 0.5; } 50% { opacity: 1; } 100% { opacity: 0.5; } }
         .full-log-content { background: #0d1117; color: #e6edf3; font-family: 'Consolas', monospace; font-size: 13px; padding: 20px; height: 75vh; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
         .progress-bar { transition: width 0.5s ease; }
-        .aria-ng-frame { display: block; width: 100%; height: calc(100vh - 225px); min-height: 640px; border: 1px solid #dee2e6; border-radius: 5px; background: #fff; }
-        .aria-ng-options-import summary { cursor: pointer; }
-        .aria-ng-options-import textarea { min-height: 64px; resize: vertical; font-size: .78rem; }
 
         /* 顶部栏 */
         .dash-header { background: #fff; border: 1px solid #e5e7eb; border-radius: 1rem; padding: .55rem .8rem; box-shadow: 0 1px 3px rgba(0,0,0,.04); }
@@ -49,8 +48,6 @@
         .dashboard-tabs .nav-link { border-radius: .7rem .7rem 0 0; }
         .modal-content { border-radius: 1rem; overflow: hidden; }
         .toast { border-radius: .8rem; }
-        .aria-ng-frame { border-radius: .8rem; }
-        .aria-ng-options-import { border-radius: .8rem !important; }
         .dash-title { font-size: 1.15rem; }
         .hijack-group { width: 330px; }
         .hijack-group .input-group-text { font-size: .8rem; }
@@ -77,7 +74,8 @@
         .m-meta { display: flex; flex-wrap: wrap; align-items: center; column-gap: .55rem; row-gap: .1rem; margin-top: .2rem; font-size: .74rem; color: #6c757d; }
         .progress-row { position: relative; }
         .progress-row .row-progress { position: absolute; left: 0; top: 0; bottom: 0; max-width: 100%; opacity: .14; pointer-events: none; transition: width .5s ease; }
-        .m-item .row-progress { position: absolute; left: .55rem; bottom: 2px; height: 3px; max-width: calc(100% - 1.1rem); border-radius: 3px; }
+        .m-item .row-progress { position: absolute; left: 0; top: 0; bottom: 0; max-width: 100%; opacity: .14; pointer-events: none; transition: width .5s ease; border-radius: calc(.8rem - 1px) 0 0 calc(.8rem - 1px); }
+        .m-item .row-progress[style*="width: 100%"] { border-radius: calc(.8rem - 1px); }
         .m-item .dropdown-menu { border-radius: .8rem; }
         .m-speed { font-size: .68rem; white-space: nowrap; }
         @media (max-width: 359.98px) { .m-ip { display: none !important; } }
@@ -91,7 +89,6 @@
             .dash-header .gap-2 { gap: .35rem !important; }
             .dash-header .btn-sm { padding-left: .4rem; padding-right: .4rem; }
             .queue-toolbar { gap: .35rem !important; }
-            .aria-ng-frame { height: calc(100vh - 170px); min-height: 480px; }
             .sys-log-box { height: calc(100vh - 230px); padding: 10px; font-size: 12px; }
         }
     </style>
@@ -103,7 +100,7 @@
     <header class="dash-header mb-3">
         <div class="d-flex align-items-center gap-2 flex-nowrap flex-md-wrap">
             <div class="d-flex align-items-center gap-2 me-auto me-lg-3 min-w-0">
-                <img src="{{ url_for('static', filename='favicon.png') }}" width="26" height="26" style="border-radius: 5px;" alt="">
+                <a href="{{ project_url }}" target="_blank" rel="noopener" class="d-inline-flex flex-shrink-0" title="GitHub 项目主页"><img src="{{ url_for('static', filename='favicon.png') }}" width="26" height="26" style="border-radius: 5px;" alt="GitHub 项目主页"></a>
                 <span class="dash-title fw-bold text-primary text-nowrap"><span class="d-none d-sm-inline">Scanner Pro Dashboard</span></span>
                 <span class="badge bg-light text-muted border font-monospace d-none d-md-inline" title="服务器公网 IP（后两段已隐藏）"><i class="bi bi-globe2"></i> [[ serverIp ]]</span>
                 <span class="badge bg-light border font-monospace d-none d-md-inline" :class="diskLow ? 'text-danger border-danger' : 'text-muted'" :title="diskTitle()" v-if="serverDisk.free != null"><i class="bi bi-hdd"></i> 可用 [[ formatSize(serverDisk.free) ]]</span>
@@ -303,26 +300,7 @@
             </div>
 
             <div v-show="view==='aria2'" class="p-2 p-md-3 bg-light">
-                <div class="aria-ng-toolbar d-flex justify-content-between align-items-center mb-2"><span class="fw-bold text-primary"><i class="bi bi-download me-1"></i>Aria2 下载器</span><a href="{{ url_for('aria_ng_launcher') }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary"><i class="bi bi-box-arrow-up-right me-1"></i>新窗口</a></div>
-                {% if aria_ng_available %}
-                <iframe id="ariaNgFrame" class="aria-ng-frame" src="{{ url_for('aria_ng_launcher') }}" title="AriaNg 下载器" @load="attachFrameHotkey"></iframe>
-                <details class="aria-ng-options-import mt-2 border rounded bg-white">
-                    <summary class="small fw-bold px-2 py-1"><i class="bi bi-box-arrow-in-down me-1"></i>导入 AriaNg 设置</summary>
-                    <div class="p-2 border-top">
-                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
-                            <label for="ariaNgOptionsImport" class="small text-muted mb-0">AriaNg.Options JSON</label>
-                            <div class="d-flex gap-1">
-                                <button class="btn btn-sm btn-outline-secondary" @click="exportAriaNgOptions"><i class="bi bi-clipboard me-1"></i>导出到剪贴板</button>
-                                <button class="btn btn-sm btn-outline-primary" :disabled="!ariaNgOptionsImport.trim()" @click="importAriaNgOptions"><i class="bi bi-arrow-repeat me-1"></i>导入并刷新</button>
-                            </div>
-                        </div>
-                        <textarea id="ariaNgOptionsImport" class="form-control font-monospace" v-model="ariaNgOptionsImport" placeholder='粘贴 localStorage 中 AriaNg.Options 的完整 JSON 值，例如 {"language":"zh_Hans"}'></textarea>
-                        <div class="form-text">仅写入当前浏览器的 <code>AriaNg.Options</code>；导入后会刷新下载器，内置下载器的本机 Aria2 RPC 连接由 Scanner 自动管理。</div>
-                    </div>
-                </details>
-                {% else %}
-                <div class="alert alert-warning mb-0">AriaNg 资源未安装。请运行安装脚本后重试。</div>
-                {% endif %}
+                <scanner-downloader :active="view==='aria2'" :notify="downloaderNotify" :confirm="confirmAction" default-dir="{{ downloader_default_dir }}" standalone-url="{{ url_for('downloader_page') }}"></scanner-downloader>
             </div>
 
             <div v-if="view==='syslog'" class="p-0">
@@ -353,7 +331,7 @@
 let modalConfig, modalLog, modalConfirm, toastInstance;
 Vue.createApp({
     delimiters: ['[[', ']]'],
-    data(){ return { tasks:[], serverIp:{{ server_ip|tojson }}, serverDisk:{path:'', total:null, used:null, free:null}, view:'detect', curTask:{}, sysLogs:'', sysLogFilter:'', autoRefreshLogs:true, currentLogTitle:'', currentLogContent:'', uploadHijackRemote:'', uploadHijackCandidates:[], newHijackRemote:'', addingHijackRemote:false, uploadHijackEnabled:false, hijackLoadedAt:0, showHijackPanel:false, lastSpaceAt:0, filterText:'', filterStatus:{detect:'all', upload:'all'}, statusFilters:{detect:[{id:'all',label:'全部'},{id:'active',label:'进行中',statuses:['pending','processing']},{id:'dirty',label:'已拦截',statuses:['dirty']},{id:'failed',label:'出错/停止',statuses:['error','cancelled']}], upload:[{id:'all',label:'全部'},{id:'active',label:'进行中',statuses:['pending_upload','uploading']},{id:'done',label:'已完成',statuses:['uploaded']},{id:'failed',label:'出错/停止',statuses:['error','cancelled','dirty']}]}, ariaNgOptionsImport:'', selectedTaskIds:[], aria2Stats:{active:0, waiting:0, stopped:0, downloadSpeed:0}, statusText:{'pending':'⏳ 等待中','processing':'🔄 检测中','pending_upload':'✅ 待上传','uploading':'☁️ 上传中','uploaded':'🎉 已完成','dirty':'🚫 已拦截','error':'❌ 出错了','cancelled':'⏹ 已停止'}, toastMsg:'', toastClass:'bg-primary', toastIcon:'bi-info-circle', confirmMsg:'', confirmCallback:null, pollTimer: null }},
+    data(){ return { tasks:[], serverIp:{{ server_ip|tojson }}, serverDisk:{path:'', total:null, used:null, free:null}, view:'detect', curTask:{}, sysLogs:'', sysLogFilter:'', autoRefreshLogs:true, currentLogTitle:'', currentLogContent:'', uploadHijackRemote:'', uploadHijackCandidates:[], newHijackRemote:'', addingHijackRemote:false, uploadHijackEnabled:false, hijackLoadedAt:0, showHijackPanel:false, lastSpaceAt:0, filterText:'', filterStatus:{detect:'all', upload:'all'}, statusFilters:{detect:[{id:'all',label:'全部'},{id:'active',label:'进行中',statuses:['pending','processing']},{id:'dirty',label:'已拦截',statuses:['dirty']},{id:'failed',label:'出错/停止',statuses:['error','cancelled']}], upload:[{id:'all',label:'全部'},{id:'active',label:'进行中',statuses:['pending_upload','uploading']},{id:'done',label:'已完成',statuses:['uploaded']},{id:'failed',label:'出错/停止',statuses:['error','cancelled','dirty']}]},  selectedTaskIds:[], aria2Stats:{active:0, waiting:0, stopped:0, downloadSpeed:0}, statusText:{'pending':'⏳ 等待中','processing':'🔄 检测中','pending_upload':'✅ 待上传','uploading':'☁️ 上传中','uploaded':'🎉 已完成','dirty':'🚫 已拦截','error':'❌ 出错了','cancelled':'⏹ 已停止'}, toastMsg:'', toastClass:'bg-primary', toastIcon:'bi-info-circle', confirmMsg:'', confirmCallback:null, pollTimer: null }},
     computed: {
         filteredSystemLogs() { if(!this.sysLogs)return[]; const l=this.sysLogs.split('\n'); if(!this.sysLogFilter.trim())return l; const k=this.sysLogFilter.toLowerCase(); return l.filter(x=>x.toLowerCase().includes(k)) },
         detectTasks() { return this.tasks.filter(t => !this.isUploadTask(t)) },
@@ -380,7 +358,6 @@ Vue.createApp({
         modalConfirm=new bootstrap.Modal(document.getElementById('confirmModal'));
         toastInstance=new bootstrap.Toast(document.getElementById('liveToast'));
         window.addEventListener('keydown', this.onQueueHotkey);
-        this.attachFrameHotkey();
     },
     watch: { filterText() { this.pruneSelection() }, view(n) { if(n==='syslog') { if(!this.sysLogs)this.loadSysLogs(); this.$nextTick(()=>{ const b=document.getElementById('sysLogBox'); if(b)b.scrollTop=b.scrollHeight }) } if(n==='aria2')this.loadAria2Stats() } },
     methods:{
@@ -462,48 +439,7 @@ Vue.createApp({
             return `${speed.toFixed(digits)} ${units[unit]}`;
         },
 
-        importAriaNgOptions(){
-            const value=this.ariaNgOptionsImport.trim();
-            try {
-                const options=JSON.parse(value);
-                if(!options || typeof options!=='object' || Array.isArray(options)) throw new Error('not an object');
-            } catch (_) {
-                this.showToast('AriaNg.Options 必须是有效的 JSON 对象','error');
-                return;
-            }
-            this.confirmAction('确定导入 AriaNg 设置吗？\n当前浏览器的 AriaNg 设置将被覆盖，下载器会立即刷新。', () => {
-                localStorage.setItem('AriaNg.Options', value);
-                const frame=document.getElementById('ariaNgFrame');
-                if(frame) frame.src=frame.getAttribute('src') || frame.src;
-                this.showToast('AriaNg 设置已导入，下载器正在刷新');
-            });
-        },
 
-        async exportAriaNgOptions(){
-            const value=localStorage.getItem('AriaNg.Options');
-            if(!value) {
-                this.showToast('当前浏览器没有 AriaNg.Options 设置','error');
-                return;
-            }
-            try {
-                if(navigator.clipboard && window.isSecureContext) {
-                    await navigator.clipboard.writeText(value);
-                } else {
-                    const field=document.createElement('textarea');
-                    field.value=value;
-                    field.setAttribute('readonly','');
-                    field.style.cssText='position:fixed;opacity:0;pointer-events:none';
-                    document.body.appendChild(field);
-                    field.select();
-                    const copied=document.execCommand('copy');
-                    field.remove();
-                    if(!copied) throw new Error('copy failed');
-                }
-                this.showToast('AriaNg 设置已复制到剪贴板');
-            } catch (_) {
-                this.showToast('无法写入剪贴板，请检查浏览器权限','error');
-            }
-        },
 
         loadUploadRemoteHijack(){
             return axios.get('/api/upload_remote_hijack').then(r=>{
@@ -604,6 +540,7 @@ Vue.createApp({
             if(t.status==='processing'){ if(type==='meta')return p>=10?'dot-on':'dot-processing'; if(type==='subtitle')return p>=30?'dot-on':(p>=10?'dot-processing':'dot-off'); if(type==='audio'){ const count=this.audioDotCount(t); const step=45/count; const start=Math.floor(50+(idx-1)*step); const done=Math.floor(50+idx*step); if(p>=done)return 'dot-on'; if(p>=start)return 'dot-processing'; return 'dot-off' } } return 'dot-off';
         },
         showToast(m,t='success'){ this.toastMsg=m; this.toastClass=t==='success'?'bg-success':'bg-danger'; this.toastIcon=t==='success'?'bi-check-circle-fill':'bi-exclamation-triangle-fill'; toastInstance.show() },
+        downloaderNotify(m,t='success'){ this.showToast(m,t); this.loadAria2Stats() },
         confirmAction(m,a){ this.confirmMsg=m; this.confirmCallback=a; modalConfirm.show() },
         executeConfirm(){ if(this.confirmCallback)this.confirmCallback(); modalConfirm.hide() },
         loadSysLogs(s=false){ if(!s)this.sysLogs='读取中...'; axios.get('/api/system_logs?lines=9999&t='+Date.now()).then(r=>{ this.sysLogs=r.data.data; const b=document.getElementById('sysLogBox'); if(b&&(b.scrollHeight-b.scrollTop-b.clientHeight<100||!s))this.$nextTick(()=>b.scrollTop=b.scrollHeight) }) },
@@ -674,16 +611,6 @@ Vue.createApp({
         doubleSample(id){ axios.post(`/api/task/${id}/double_sample`).then(()=>{ this.load(); this.showToast('已切换动态抽样') }).catch(e=>this.showToast(e.response?.data?.msg || '切换失败','error')) },
         directUpload(id){ axios.post(`/api/task/${id}/direct_upload`).then(()=>{ this.load(); this.showToast('切换直传') }) },
         deleteTask(id){ axios.post(`/api/task/${id}/delete`).then(r=>{ this.showToast(r.data.msg); this.load() }).catch(e=>this.showToast(e.response?.data?.msg || '删除失败','error')) },
-        // 下载器是同源 iframe，焦点在其中时按键不会冒泡到外层，需要在框架内也挂监听（每次加载后重挂）
-        attachFrameHotkey(){
-            const frame=document.getElementById('ariaNgFrame');
-            try {
-                const win=frame && frame.contentWindow;
-                if(!win || win.__scannerHotkey) return;
-                win.addEventListener('keydown', this.onQueueHotkey);
-                win.__scannerHotkey=true;
-            } catch (_) {}
-        },
         // 队列页与下载器页快速连按两下空格：直接按“设置 > 清理”清空历史，跳过确认框
         onQueueHotkey(e){
             if(e.code !== 'Space' && e.key !== ' ') return;
@@ -691,8 +618,6 @@ Vue.createApp({
             const el=e.target;
             if(el && (el.isContentEditable || ['INPUT','TEXTAREA','SELECT'].includes(el.tagName) && !(el.type === 'checkbox'))) return;
             if(document.querySelector('.modal.show, .dropdown-menu.show')) return;
-            const frameDoc=(() => { try { return document.getElementById('ariaNgFrame')?.contentDocument; } catch (_) { return null; } })();
-            if(frameDoc && frameDoc.querySelector('.modal.in, .modal.show, .open > .dropdown-menu, .dropdown-menu.show')) return;
             e.preventDefault();
             if(el && typeof el.blur === 'function' && el !== (el.ownerDocument && el.ownerDocument.body)) el.blur();
             const now=Date.now();
@@ -742,7 +667,7 @@ Vue.createApp({
             });
         }
     }
-}).mount('#app')
+}).component('scanner-downloader', window.ScannerDownloader).mount('#app')
 </script>
 </body>
 </html>

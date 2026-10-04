@@ -36,7 +36,8 @@
 * **低速自动重连**：大文件持续低速时自动重启上传连接。
 
 ### 5. 📥 内置下载器
-* Dashboard 内嵌 AriaNg，通过 Scanner 鉴权代理连接本机 Aria2，浏览器端不暴露 `rpc-secret`。
+* Dashboard 内置下载器（不依赖第三方 AriaNg），通过 Scanner 鉴权代理连接本机 Aria2，浏览器端不暴露 `rpc-secret`；可在下载器底部「单独打开」为独立页面。
+* 支持链接/磁力/种子新建任务（可设分片数、连接数、User-Agent、Referer、Cookie、自定义请求头）、单任务限速与连接数调整、等待队列置顶、失败任务一键重试，以及写入 aria2.conf 的全局下载设置。
 * 可选通过 Nginx 暴露 `wss://<域名>/jsonrpc`，供外部 Aria2 客户端使用。
 * 可自动丢弃图片、NFO 及自定义扩展名的单文件下载。
 
@@ -123,7 +124,7 @@ sudo bash -c 'bash <(curl -fsSL https://raw.githubusercontent.com/jiemo9527/Vide
 安装完成后，终端会一次性显示随机 Dashboard 用户名与密码。忘记密码时，在项目目录运行 `install/install.sh`，选择 `4. 重置 Dashboard 密码`；工具会生成并打印新的随机密码。
 
 ### 更新
-再次运行安装命令后选择 `2. 更新`。更新模式会下载最新项目代码、更新依赖并重启 Scanner；保留数据库、`scanner.env`、Aria2 配置与 `rpc-secret`、Nginx、模型和 AriaNg 数据，不重新进入网络或 Nginx 配置。
+再次运行安装命令后选择 `2. 更新`。更新模式会下载最新项目代码、更新依赖并重启 Scanner；保留数据库、`scanner.env`、Aria2 配置与 `rpc-secret`、Nginx 和模型（旧版遗留的 AriaNg 资源会被清理），不重新进入网络或 Nginx 配置。
 
 ### 基本配置
 登录后进入 `设置`：
@@ -136,14 +137,14 @@ sudo bash -c 'bash <(curl -fsSL https://raw.githubusercontent.com/jiemo9527/Vide
 
 ### 下载与清洗
 
-1. 在 Dashboard `下载器` 标签中添加下载任务。嵌入的 AriaNg 自动连接本机 Aria2，不能改为远程 RPC。
+1. 在 Dashboard `下载` 标签（或独立的 `/downloader` 页面）中添加下载任务。内置下载器自动连接本机 Aria2，不能改为远程 RPC。
 2. Aria2 下载完成后，通过 `trigger.sh` 将文件加入 Scanner 队列。项目不在默认目录 `/www/wwwroot/scanner_web` 或使用自定义 Aria2 配置时，请确认 `on-download-complete=<项目目录>/trigger.sh`。
 3. 想上传到某个 remote，就把文件下载到 `<下载根目录>/<remote 名>/` 下。
 4. Scanner 按设置检查元数据、字幕和音频；干净文件进入上传队列，语音命中关键词的文件被拦截。
 5. 外部 Aria2 客户端使用 `https://<域名>/jsonrpc` 或 `wss://<域名>/jsonrpc`，并自行配置安装时显示的 `rpc-secret`。
 
 ### 配置备份与恢复
-`设置` -> `账户安全` 中可导出或恢复备份。备份包含全局设置和关键词，且含 API Key、通知 Token 等敏感项；不包含 Aria2 配置、下载任务、AriaNg 浏览器设置和账户密码。AriaNg 浏览器设置可在 `下载器` 标签中单独导入/导出。迁移服务器时，先导出备份，重新安装后再恢复。
+`设置` -> `账户安全` 中可导出或恢复备份。备份包含全局设置和关键词，且含 API Key、通知 Token 等敏感项；不包含 Aria2 配置、下载任务、下载器浏览器偏好和账户密码。下载器偏好可在下载器的「偏好设置」中单独导入/导出。迁移服务器时，先导出备份，重新安装后再恢复。
 
 
 ### ⚖️ 免责声明

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>下载器 · Scanner Pro</title>
+    <link rel="icon" href="{{ url_for('static', filename='favicon.png') }}" type="image/png">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.8.0/font/bootstrap-icons.css">
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='downloader.css', v=downloader_asset_version) }}">
+    <script src="{{ url_for('static', filename='downloader.js', v=downloader_asset_version) }}"></script>
+    <style>
+        body { background: #f3f5f8; }
+        .dl-header { background: #fff; border: 1px solid #e5e7eb; border-radius: 1rem; padding: .55rem .8rem; box-shadow: 0 1px 3px rgba(0,0,0,.04); }
+        .modal-content { border-radius: 1rem; overflow: hidden; }
+        .toast { border-radius: .8rem; }
+    </style>
+</head>
+<body>
+<div id="app" class="container-fluid py-2 py-md-3" style="max-width: 1200px;">
+    <header class="dl-header d-flex align-items-center gap-2 mb-3">
+        <a href="{{ project_url }}" target="_blank" rel="noopener" class="d-inline-flex flex-shrink-0" title="GitHub 项目主页"><img src="{{ url_for('static', filename='favicon.png') }}" width="26" height="26" style="border-radius: 5px;" alt="GitHub 项目主页"></a>
+        <span class="fw-bold text-primary me-auto text-nowrap"><i class="bi bi-download me-1"></i>下载器</span>
+        <a href="{{ url_for('index') }}" class="btn btn-sm btn-outline-primary" title="返回控制台"><i class="bi bi-speedometer2"></i><span class="d-none d-sm-inline ms-1">控制台</span></a>
+    </header>
+
+    <div class="sdl-standalone">
+        <scanner-downloader :notify="notify" :confirm="confirmAction" default-dir="{{ downloader_default_dir }}"></scanner-downloader>
+    </div>
+
+    <div class="toast-container position-fixed bottom-0 end-0 p-3" style="z-index: 1100"><div id="liveToast" class="toast align-items-center text-white border-0" :class="toastClass" role="alert"><div class="d-flex"><div class="toast-body fs-6"><i :class="toastIcon" class="me-2 fs-5" style="vertical-align: middle;"></i>[[ toastMsg ]]</div><button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button></div></div></div>
+    <div class="modal fade" id="confirmModal" tabindex="-1"><div class="modal-dialog modal-sm modal-dialog-centered"><div class="modal-content shadow"><div class="modal-header border-0 pb-0"><h6 class="modal-title fw-bold text-danger"><i class="bi bi-exclamation-triangle-fill me-1"></i> 确认操作</h6></div><div class="modal-body text-center py-3" style="white-space: pre-line;">[[ confirmMsg ]]</div><div class="modal-footer border-0 pt-0 justify-content-center"><button type="button" class="btn btn-sm btn-light border px-3" data-bs-dismiss="modal">取消</button><button type="button" class="btn btn-sm btn-danger px-3" @click="executeConfirm">确定执行</button></div></div></div></div>
+</div>
+
+<script>
+let modalConfirm, toastInstance;
+Vue.createApp({
+    delimiters: ['[[', ']]'],
+    data(){ return { toastMsg:'', toastClass:'bg-success', toastIcon:'bi-check-circle-fill', confirmMsg:'', confirmCallback:null } },
+    mounted(){
+        modalConfirm=new bootstrap.Modal(document.getElementById('confirmModal'));
+        toastInstance=new bootstrap.Toast(document.getElementById('liveToast'));
+    },
+    methods:{
+        notify(m,t='success'){ this.toastMsg=m; this.toastClass=t==='success'?'bg-success':'bg-danger'; this.toastIcon=t==='success'?'bi-check-circle-fill':'bi-exclamation-triangle-fill'; toastInstance.show() },
+        confirmAction(m,a){ this.confirmMsg=m; this.confirmCallback=a; modalConfirm.show() },
+        executeConfirm(){ if(this.confirmCallback)this.confirmCallback(); modalConfirm.hide() }
+    }
+}).component('scanner-downloader', window.ScannerDownloader).mount('#app');
+</script>
+</body>
+</html>

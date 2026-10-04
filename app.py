@@ -14,7 +14,7 @@ import ipaddress
 import concurrent.futures
 import requests
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify, render_template, redirect, url_for, send_from_directory
+from flask import Flask, request, jsonify, render_template, redirect, url_for
 from flask_login import LoginManager, login_user, login_required, logout_user, current_user
 from werkzeug.security import check_password_hash, generate_password_hash
 from database import db, Task, Config, Keyword, User
@@ -24,8 +24,8 @@ from sqlalchemy import text
 
 app = Flask(__name__)
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
-ARIA_NG_DIR = os.path.join(APP_ROOT, 'ariang')
 ARIA2_CONFIG_PATH = os.environ.get('SCANNER_ARIA2_CONFIG_PATH', '/root/.aria2c/aria2.conf')
+PROJECT_URL = 'https://github.com/jiemo9527/Video-ASR-Ad-Cleaner'
 
 # ================= 🔐 Session 密钥持久化 =================
 secret_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.flask_secret')
@@ -1901,45 +1901,37 @@ def login():
 def logout(): logout_user(); return redirect(url_for('login'))
 
 
+def downloader_template_context():
+    config = get_final_config(None)
+    return {
+        # New downloads default to Scanner's own download root so they get scanned.
+        'downloader_default_dir': str(config.get('scan_path') or '').strip(),
+        'downloader_asset_version': int(max(
+            os.path.getmtime(os.path.join(APP_ROOT, 'static', name))
+            for name in ('downloader.js', 'downloader.css')
+        )),
+        'project_url': PROJECT_URL,
+    }
+
+
 @app.route('/')
 @login_required
 def index():
-    return render_template(
-        'index.html',
-        server_ip=get_masked_server_ip(),
-        aria_ng_available=os.path.isfile(os.path.join(ARIA_NG_DIR, 'index.html'))
-    )
+    return render_template('index.html', server_ip=get_masked_server_ip(), **downloader_template_context())
+
+
+@app.route('/downloader')
+@login_required
+def downloader_page():
+    """内置下载器单独成页（下载器底部「单独打开」）。"""
+    return render_template('downloader.html', **downloader_template_context())
 
 
 @app.route('/aria2/')
 @login_required
-def aria_ng_launcher():
-    if not os.path.isfile(os.path.join(ARIA_NG_DIR, 'index.html')):
-        return 'AriaNg is not installed. Run the Scanner installer to download it.', 503
-    return render_template('ariang.html')
-
-
-@app.route('/ariang/')
-@app.route('/ariang/<path:filename>')
-@login_required
-def aria_ng(filename='index.html'):
-    if not os.path.isfile(os.path.join(ARIA_NG_DIR, 'index.html')):
-        return 'AriaNg is not installed. Run the Scanner installer to download it.', 503
-    if filename == 'index.html':
-        with open(os.path.join(ARIA_NG_DIR, filename), encoding='utf-8') as index_file:
-            page = index_file.read()
-        theme_path = os.path.join(APP_ROOT, 'static', 'ariang-scanner.css')
-        theme_version = int(os.path.getmtime(theme_path)) if os.path.isfile(theme_path) else 0
-        theme_link = f'<link rel="stylesheet" href="{url_for("static", filename="ariang-scanner.css", v=theme_version)}">'
-        quiet_dialogs_path = os.path.join(APP_ROOT, 'static', 'ariang-scanner-quiet-dialogs.js')
-        quiet_dialogs_version = int(os.path.getmtime(quiet_dialogs_path)) if os.path.isfile(quiet_dialogs_path) else 0
-        quiet_dialogs_script = (
-            f'<script defer src="{url_for("static", filename="ariang-scanner-quiet-dialogs.js", v=quiet_dialogs_version)}"></script>'
-        )
-        return page.replace('</head>', f'{theme_link}{quiet_dialogs_script}</head>'), 200, {
-            'Content-Type': 'text/html; charset=utf-8'
-        }
-    return send_from_directory(ARIA_NG_DIR, filename)
+def legacy_aria2_page():
+    # 旧版 AriaNg 入口已移除，书签跳到独立下载器页面
+    return redirect(url_for('downloader_page'))
 
 
 def get_scanner_api_token():
@@ -2126,6 +2118,154 @@ def aria2_jsonrpc_proxy():
 @app.route('/settings_page')
 @login_required
 def settings_page(): return render_template('settings.html', app_version=APP_VERSION)
+
+
+DOWNLOADER_TASK_FIELDS = [
+    'gid', 'status', 'totalLength', 'completedLength', 'downloadSpeed', 'uploadSpeed',
+    'connections', 'numSeeders', 'errorCode', 'errorMessage', 'dir', 'bittorrent',
+    'infoHash', 'followedBy', 'belongsTo',
+]
+DOWNLOADER_LIST_CALLS = {
+    'active': lambda: ('aria2.tellActive', [DOWNLOADER_TASK_FIELDS]),
+    'waiting': lambda: ('aria2.tellWaiting', [0, 1000, DOWNLOADER_TASK_FIELDS]),
+    'stopped': lambda: ('aria2.tellStopped', [0, 1000, DOWNLOADER_TASK_FIELDS]),
+}
+# Reading `files` costs Aria2 ~2ms per task (hundreds of mirror URIs), so list rows
+# reuse a per-GID summary of the first file; it is only fetched for unseen GIDs.
+DOWNLOADER_FILE_CACHE_MAX = 5000
+downloader_file_cache = {}
+downloader_file_cache_lock = threading.Lock()
+
+
+def aria2_multicall(calls):
+    """Run several Aria2 RPC calls in one request; returns each call's result in order."""
+    port, secret = get_aria2_rpc_config()
+    command = {'jsonrpc': '2.0', 'id': 'scanner-downloader', 'method': 'system.multicall',
+               'params': [[{'methodName': method, 'params': list(params)} for method, params in calls]]}
+    add_aria2_rpc_token(command, secret)
+    response = requests.post(f'http://127.0.0.1:{port}/jsonrpc', json=command, timeout=(3, 30))
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get('error'):
+        raise RuntimeError(payload['error'].get('message') or 'Aria2 RPC 返回错误')
+    return [item[0] if isinstance(item, list) and item else item for item in payload.get('result') or []]
+
+
+def summarize_aria2_files(files):
+    files = files or []
+    summary = {'fileCount': len(files), 'files': []}
+    if files:
+        first = dict(files[0])
+        first['uris'] = (first.get('uris') or [])[:1]
+        summary['files'] = [first]
+    return summary
+
+
+def attach_aria2_file_summaries(tasks):
+    """Add the first-file summary to each task, calling aria2.getFiles only for unseen GIDs.
+
+    The summary is used for the row name and retry/detail fetch the full task, so the
+    cached per-file progress may be stale without affecting the list.
+    """
+    with downloader_file_cache_lock:
+        summaries = {t['gid']: downloader_file_cache[t['gid']] for t in tasks if t.get('gid') in downloader_file_cache}
+    missing = [t['gid'] for t in tasks if t.get('gid') and t['gid'] not in summaries]
+    for start in range(0, len(missing), 200):
+        batch = missing[start:start + 200]
+        for gid, files in zip(batch, aria2_multicall([('aria2.getFiles', [gid]) for gid in batch])):
+            if isinstance(files, list):
+                summaries[gid] = summarize_aria2_files(files)
+    with downloader_file_cache_lock:
+        for gid in missing:
+            summary = summaries.get(gid)
+            # Names are unresolved until Aria2 learns them (e.g. magnets); re-read those later.
+            if summary and summary['files'] and summary['files'][0].get('path'):
+                downloader_file_cache[gid] = summary
+        while len(downloader_file_cache) > DOWNLOADER_FILE_CACHE_MAX:
+            downloader_file_cache.pop(next(iter(downloader_file_cache)))
+    for task in tasks:
+        task.update(summaries.get(task.get('gid')) or {'fileCount': 0, 'files': []})
+    return tasks
+
+
+def slim_aria2_task(task):
+    slim = dict(task)
+    bittorrent = task.get('bittorrent')
+    if isinstance(bittorrent, dict):
+        slim['bittorrent'] = {'info': bittorrent.get('info') or {}, 'mode': bittorrent.get('mode')}
+    return slim
+
+
+# Global Aria2 options the built-in downloader may change. They are applied with
+# aria2.changeGlobalOption and also written to aria2.conf so they survive restarts.
+ARIA2_PERSISTED_OPTIONS = {
+    'max-concurrent-downloads': re.compile(r'^[1-9]\d{0,2}$'),
+    'max-overall-download-limit': re.compile(r'^\d{1,10}[KM]?$'),
+    'max-overall-upload-limit': re.compile(r'^\d{1,10}[KM]?$'),
+    'user-agent': re.compile(r'^[^\r\n\x00]{1,512}$'),
+}
+
+
+def write_aria2_config_options(path, options):
+    """Replace or append `key=value` lines in aria2.conf, keeping comments and order."""
+    with open(path, encoding='utf-8') as config_file:
+        lines = config_file.read().splitlines()
+    pending = dict(options)
+    for index, raw_line in enumerate(lines):
+        key = raw_line.split('=', 1)[0].strip()
+        if '=' in raw_line and not raw_line.lstrip().startswith('#') and key in pending:
+            lines[index] = f'{key}={pending.pop(key)}'
+    if pending:
+        lines.append('')
+        lines.append('# Scanner 下载器设置')
+        lines.extend(f'{key}={value}' for key, value in pending.items())
+    tmp_path = path + '.scanner-tmp'
+    with open(tmp_path, 'w', encoding='utf-8') as config_file:
+        config_file.write('\n'.join(lines) + '\n')
+    shutil.copymode(path, tmp_path)
+    os.replace(tmp_path, path)
+
+
+@app.route('/api/aria2/global_options', methods=['POST'])
+@login_required
+def aria2_save_global_options():
+    data = request.get_json(silent=True) or {}
+    options = {}
+    for key, value in data.items():
+        pattern = ARIA2_PERSISTED_OPTIONS.get(key)
+        value = str(value).strip()
+        if not pattern or not pattern.match(value):
+            return jsonify({'code': 400, 'msg': f'无效的 Aria2 设置: {key}'}), 400
+        options[key] = value
+    if not options:
+        return jsonify({'code': 400, 'msg': '没有需要保存的设置'}), 400
+    try:
+        aria2_multicall([('aria2.changeGlobalOption', [options])])
+    except (requests.RequestException, ValueError, RuntimeError) as e:
+        return jsonify({'code': 502, 'msg': f'Aria2 应用设置失败: {e}'}), 502
+    try:
+        write_aria2_config_options(ARIA2_CONFIG_PATH, options)
+    except OSError as e:
+        return jsonify({'code': 500, 'msg': f'已即时生效，但写入配置文件失败: {e}', 'applied': True}), 500
+    return jsonify({'code': 200, 'msg': '设置已生效并写入配置文件'})
+
+
+@app.route('/api/aria2/task_list', methods=['POST'])
+@login_required
+def aria2_task_list():
+    list_id = str((request.get_json(silent=True) or {}).get('list') or 'active')
+    if list_id not in DOWNLOADER_LIST_CALLS:
+        return jsonify({'code': 400, 'msg': '未知的下载列表'}), 400
+    try:
+        stat, tasks = aria2_multicall([('aria2.getGlobalStat', []), DOWNLOADER_LIST_CALLS[list_id]()])
+        if not isinstance(tasks, list):
+            return jsonify({'code': 502, 'msg': (tasks or {}).get('message') or 'Aria2 返回异常'}), 502
+        if list_id == 'waiting':
+            tasks = [task for task in tasks if task.get('status') != 'active']
+        tasks = attach_aria2_file_summaries([slim_aria2_task(task) for task in tasks])
+    except (requests.RequestException, ValueError, RuntimeError) as e:
+        return jsonify({'code': 502, 'msg': f'无法读取 Aria2 任务: {e}'}), 502
+    return jsonify({'code': 200, 'stat': stat, 'tasks': tasks})
 
 
 @app.route('/api/trigger', methods=['POST'])

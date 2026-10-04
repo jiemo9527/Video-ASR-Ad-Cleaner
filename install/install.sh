@@ -199,37 +199,13 @@ function deploy_project_archive() {
     echo -e "${YELLOW}>>> 项目根目录确认: $PROJECT_ROOT${NC}"
 }
 
-function ensure_ariang_assets() {
+# 旧版本嵌入的第三方 AriaNg 已由 Scanner 内置下载器取代，更新时清理遗留资源
+function remove_legacy_ariang_assets() {
     local project_root="$1"
-    local ariang_dir marker ariang_tmp ariang_index ariang_views
-
-    ariang_dir="$project_root/ariang"
-    marker="$ariang_dir/.scanner_ariang_allinone_1.3.14"
-    if [ -f "$ariang_dir/index.html" ] && [ -f "$ariang_dir/views/settings-ariang.html" ] && [ -f "$marker" ]; then
-        return
+    if [ -d "$project_root/ariang" ]; then
+        rm -rf "$project_root/ariang"
+        echo -e "${GREEN}>>> 已移除旧版 AriaNg 资源（改用内置下载器）。${NC}"
     fi
-
-    echo -e "${GREEN}>>> 下载/修复 AriaNg 下载器资源...${NC}"
-    ariang_tmp=$(mktemp -d)
-    if curl -fL --retry 3 -o "$ariang_tmp/ariang.zip" "https://github.com/mayswind/AriaNg/releases/download/1.3.14/AriaNg-1.3.14-AllInOne.zip" \
-        && unzip -q "$ariang_tmp/ariang.zip" -d "$ariang_tmp/extract" \
-        && curl -fL --retry 3 -o "$ariang_tmp/source.zip" "https://github.com/mayswind/AriaNg/archive/refs/tags/1.3.14.zip" \
-        && unzip -q "$ariang_tmp/source.zip" -d "$ariang_tmp/source"; then
-        ariang_index=$(find "$ariang_tmp/extract" -type f -name index.html -print -quit)
-        ariang_views=$(find "$ariang_tmp/source" -type d -path '*/src/views' -print -quit)
-        if [ -n "$ariang_index" ] && [ -n "$ariang_views" ]; then
-            mkdir -p "$ariang_dir"
-            cp -a "$(dirname "$ariang_index")"/. "$ariang_dir/"
-            cp -a "$ariang_views" "$ariang_dir/"
-            touch "$marker"
-            echo -e "${GREEN}✅ AriaNg 资源已就绪。${NC}"
-        else
-            echo -e "${YELLOW}⚠️ AriaNg 压缩包中未找到网页资源或设置模板，跳过。${NC}"
-        fi
-    else
-        echo -e "${YELLOW}⚠️ AriaNg 下载失败，安装后可重新运行脚本补齐。${NC}"
-    fi
-    rm -rf "$ariang_tmp"
 }
 
 function install_python_dependencies() {
@@ -694,7 +670,7 @@ function install_app() {
     ARIA2_CONFIG_ARCHIVE="$PROJECT_ROOT/$ARIA2_CONFIG_ARCHIVE_RELATIVE"
     initialize_scanner_aria2_config "$ARIA2_CONFIG_ARCHIVE" "$ARIA2_CONF" || return
 
-    ensure_ariang_assets "$PROJECT_ROOT"
+    remove_legacy_ariang_assets "$PROJECT_ROOT"
 
     # 5. 配置监听地址
     echo -e "${GREEN}>>> [Extra] 配置网络监听...${NC}"
@@ -879,7 +855,7 @@ function update_app() {
     echo -e "${CYAN}>>> 更新 Scanner Pro...${NC}"
     project_root=$(get_installed_project_root) || return
     echo -e "${YELLOW}>>> 更新目录: $project_root${NC}"
-    echo -e "${YELLOW}>>> 保留数据库、scanner.env、Aria2 配置/rpc-secret、Nginx、模型和 AriaNg 数据。${NC}"
+    echo -e "${YELLOW}>>> 保留数据库、scanner.env、Aria2 配置/rpc-secret、Nginx 和模型。${NC}"
 
     echo -e "${GREEN}>>> [1/4] 检查系统依赖...${NC}"
     install_system_dependencies || return
@@ -887,7 +863,7 @@ function update_app() {
     echo -e "${GREEN}>>> [2/4] 下载并更新代码...${NC}"
     deploy_project_archive "$project_root" || return
     chmod +x "$PROJECT_ROOT/trigger.sh"
-    ensure_ariang_assets "$PROJECT_ROOT"
+    remove_legacy_ariang_assets "$PROJECT_ROOT"
 
     echo -e "${GREEN}>>> [3/4] 更新 rclone...${NC}"
     if ! rclone selfupdate; then
