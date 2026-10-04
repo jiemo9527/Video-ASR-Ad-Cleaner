@@ -26,7 +26,7 @@ The current app version is defined in `app.py` as `APP_VERSION` and displayed on
 - `templates/settings.html`: Settings UI, version badge, keyword management. Sections (desktop left nav, mobile sticky horizontal nav; last section remembered in `localStorage`): `检测`, `识别模型`, `关键词`, `下载与上传`, `队列并发`, `通知`, `清理`, `账户安全`. Every settings row uses the `.set-row` label/description/control layout. One sticky save bar saves all sections (including the Trigger API Token); it tracks unsaved changes against a snapshot, offers `撤销`, warns on page unload, and switches to `保存并重启` when a restart-only key (`concurrency_detect`, `concurrency_upload`) changed. Keywords save immediately, so the bar is hidden there. Account credentials keep their own button.
 - `templates/ariang.html`: AriaNg launcher that applies the Scanner-local RPC endpoint before loading AriaNg.
 - `templates/login.html`: Login UI.
-- `static/ariang-scanner.css`: Scanner-owned visual overrides for the AriaNg static UI.
+- `static/ariang-scanner.css`: Scanner-owned visual overrides for the AriaNg static UI. On phones (<768px), the native Angular-bound `#search-box` is always visible in a near-full-width row beneath the toolbar (44px input height, 16px text, violet border); desktop search geometry is unchanged. Keep header, content and sidebar offsets aligned through `--scanner-mobile-header-height` when changing this layout.
 - `trigger.sh`: Aria2 completion hook.
 - `reset_password.py`: Root-local Dashboard password reset tool. It replaces a selected account password with a newly generated one and prints it once.
 - `install/install.sh`: One-command-capable interactive install/uninstall helper. It downloads the GitHub `main` archive itself, then configures Aria2/service integration and optional Nginx HTTPS/WSS.
@@ -66,6 +66,8 @@ Upload destination override:
 AriaNg download manager:
 
 - The Dashboard `下载器` tab embeds the `/aria2/` launcher, which loads static files from `/ariang/`.
+- Mobile search adaptation belongs in `static/ariang-scanner.css`, not in the downloaded upstream bundle. Override Bootstrap's `hidden-xs` only for `.navbar-searchbar` and preserve the native `searchContext.text` binding so filtering stays upstream-owned. Account for AriaNg's fixed header and the navbar's existing left padding; do not remove native toolbar spacing to widen the search row.
+- Optional browser regression tests live in `tests/test_ariang_mobile_search.py`. Install Playwright in a separate test environment and set `SCANNER_ARIANG_TEST_INDEX` to the extracted official 1.3.14 AllInOne `index.html`; optionally set `SCANNER_TEST_CHROMIUM` to a local Chromium executable. Run `python tests/test_ariang_mobile_search.py -v`. Tests cover mobile widths 320/375/430/767px (visibility, input size, no overflow/overlap, filtering and clearing) and desktop widths 768/1280px (unchanged search geometry), with synthetic tasks and no live Aria2 connection. Without the prerequisites, these tests skip; a skip is not UI verification.
 - `/api/aria2/jsonrpc` is the authenticated same-origin RPC proxy. It reads the local Aria2 port and secret server-side; never expose the secret to browser code.
 - The launcher always resets the embedded AriaNg RPC configuration to Scanner's authenticated same-origin proxy at `api/aria2/jsonrpc` and clears the browser-side secret. The embedded RPC settings UI must remain hidden.
 - The Dashboard polls Aria2 global stats every 3 seconds regardless of the active tab so the `下载器` navigation badge remains current. The badge counts active plus waiting downloads.

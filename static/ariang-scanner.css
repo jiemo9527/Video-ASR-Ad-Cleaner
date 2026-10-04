@@ -125,11 +125,71 @@ body.skin-aria-ng {
 }
 
 @media (max-width: 767.98px) {
+    .skin-aria-ng {
+        /* Logo (50) + native toolbar (56) + search row (61). */
+        --scanner-mobile-header-height: 167px;
+    }
+
+    .skin-aria-ng .main-header {
+        height: auto;
+    }
+
     .skin-aria-ng .main-header .navbar {
         min-height: 50px;
     }
 
+    /* Bootstrap's hidden-xs hides the native, Angular-bound search on phones. */
+    .skin-aria-ng .main-header .navbar-searchbar {
+        display: block !important;
+        float: none;
+        clear: both;
+        width: calc(100% + 20px);
+        margin-left: -20px;
+        padding: 8px 12px;
+        background: var(--scanner-violet-soft);
+        border-bottom: 1px solid var(--scanner-border);
+    }
+
+    .skin-aria-ng .main-header .navbar-searchbar .navbar-nav {
+        float: none;
+        margin: 0;
+    }
+
+    .skin-aria-ng .main-header .navbar-searchbar .navbar-nav > li {
+        float: none;
+        width: 100%;
+    }
+
+    .skin-aria-ng .navbar-searchbar #search-box {
+        width: 100%;
+        height: 44px;
+        padding: 10px 38px 10px 12px;
+        font-size: 16px;
+        color: var(--scanner-ink);
+        background: #fff;
+        border: 2px solid var(--scanner-violet);
+        border-radius: 10px;
+        box-shadow: 0 2px 6px rgba(124, 92, 224, .12);
+    }
+
+    .skin-aria-ng .navbar-searchbar #search-box::placeholder {
+        color: var(--scanner-muted);
+        opacity: 1;
+    }
+
+    .skin-aria-ng .navbar-searchbar .form-control-feedback {
+        width: 38px;
+        height: 44px;
+        line-height: 44px;
+        color: var(--scanner-violet);
+    }
+
+    .skin-aria-ng .main-sidebar {
+        padding-top: var(--scanner-mobile-header-height);
+    }
+
     .skin-aria-ng .content-wrapper {
-        min-height: calc(100vh - 100px);
+        padding-top: var(--scanner-mobile-header-height);
+        min-height: calc(100vh - var(--scanner-mobile-header-height));
     }
 }
