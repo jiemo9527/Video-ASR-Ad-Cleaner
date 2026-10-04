@@ -334,7 +334,7 @@ def get_final_config(overrides_json=None):
         "cloud_asr_per_key_concurrency": 3,
         "cloud_asr_upload_timeout": 20, "cloud_asr_read_timeout": 120, "cloud_asr_long_read_timeout": 180,
         "scan_path": "/root/downloads", "rclone_remote": "s25", "upload_remote_hijack_enabled": False,
-        "upload_remote_hijack_remote": "", "upload_remote_hijack_candidates": "", "upload_remote_auto_switch": False, "upload_slow_restart": True, "api_token": "8pUoqOTHhEAhRnacl3c19",
+        "upload_remote_hijack_remote": "", "upload_remote_hijack_candidates": "", "upload_remote_auto_switch": True, "upload_slow_restart": True, "api_token": "8pUoqOTHhEAhRnacl3c19",
         "notify_upload_success": False, "notify_errors": True,
         "cleanup_scanner_history": True,
         "cleanup_scanner_uploaded": True, "cleanup_scanner_dirty": True,

@@ -80,6 +80,29 @@ class DownloaderPageTests(unittest.TestCase):
         self.assertNotIn('下载器界面', settings_page)
         self.assertNotIn("id: 'ui'", settings_page)
 
+    def test_upload_auto_switch_defaults_on_but_preserves_saved_off(self):
+        from database import Config
+        key = 'upload_remote_auto_switch'
+        row = db.session.get(Config, key)
+        previous = row.value if row else None
+
+        def restore():
+            current = db.session.get(Config, key)
+            if previous is None:
+                if current:
+                    db.session.delete(current)
+            else:
+                current.value = previous
+            db.session.commit()
+        self.addCleanup(restore)
+        if row:
+            db.session.delete(row)
+            db.session.commit()
+        self.assertTrue(scanner.get_final_config(None)[key])
+        db.session.add(Config(key=key, value='false'))
+        db.session.commit()
+        self.assertFalse(scanner.get_final_config(None)[key])
+
     def test_startup_removes_legacy_downloader_ui_row(self):
         from database import Config
         db.session.merge(Config(key='downloader_ui', value='classic'))  # pyright: ignore[reportCallIssue]
