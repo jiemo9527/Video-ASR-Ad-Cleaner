@@ -2276,6 +2276,140 @@ def aria2_save_global_options():
     return jsonify({'code': 200, 'msg': '设置已生效并写入配置文件'})
 
 
+RENAMABLE_ARIA2_STATUSES = ('active', 'waiting', 'paused')
+ARIA2_PAUSE_WAIT_SECONDS = 10
+
+
+def validate_download_filename(name):
+    """Return an error message for an unusable single-file download name, or ''."""
+    if not name:
+        return '文件名不能为空'
+    if name in ('.', '..') or any(ch in name for ch in '/\\\x00\r\n'):
+        return '文件名不能包含路径分隔符或控制字符'
+    if len(name.encode('utf-8')) > 255:
+        return '文件名过长（最多 255 字节）'
+    if name.lower().endswith('.aria2'):
+        return '文件名不能以 .aria2 结尾'
+    return ''
+
+
+def wait_aria2_paused(gid):
+    deadline = time.time() + ARIA2_PAUSE_WAIT_SECONDS
+    while time.time() < deadline:
+        if call_aria2_rpc('aria2.tellStatus', [gid, ['status']]).get('status') != 'active':
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def rename_aria2_download(gid, name):
+    """Rename an unfinished single-file download without losing progress.
+
+    Changing `out` on a running task makes Aria2 restart from zero into a new file,
+    so the task is paused first, the partial file and its .aria2 control file are
+    renamed, `out` is updated and the task is resumed. Returns (http_code, message).
+    """
+    status = call_aria2_rpc('aria2.tellStatus', [gid, ['gid', 'status', 'dir', 'files', 'bittorrent']])
+    if status.get('status') not in RENAMABLE_ARIA2_STATUSES:
+        return 400, '只能修改下载中或等待中任务的文件名'
+    files = status.get('files') or []
+    if status.get('bittorrent') or len(files) != 1:
+        return 400, 'BT 任务和多文件任务不支持修改文件名'
+    old_path = str(files[0].get('path') or '')
+    base_dir = str(status.get('dir') or '')
+    directory = os.path.dirname(old_path) if old_path else base_dir
+    if not directory:
+        return 400, '无法确定任务的保存目录'
+    new_path = os.path.join(directory, name)
+    # `out` is relative to `dir`; keep any sub-folder the original name had.
+    sub_dir = os.path.relpath(directory, base_dir) if base_dir else '.'
+    new_out = name if sub_dir in ('.', '') or sub_dir.startswith('..') else sub_dir.replace('\\', '/') + '/' + name
+    if old_path and os.path.abspath(old_path) == os.path.abspath(new_path):
+        return 200, '文件名未变化'
+    if os.path.exists(new_path) or os.path.exists(new_path + '.aria2'):
+        return 409, '目标文件已存在，请换一个文件名'
+
+    was_running = status['status'] in ('active', 'waiting')
+    resume_at_front = status['status'] == 'active'
+    active_before = set()
+    if resume_at_front:
+        active_before = {item.get('gid') for item in call_aria2_rpc('aria2.tellActive', [['gid']]) or []}
+    if was_running:
+        call_aria2_rpc('aria2.forcePause', [gid])
+        if not wait_aria2_paused(gid):
+            call_aria2_rpc('aria2.unpause', [gid])
+            return 504, 'Aria2 暂停任务超时，未修改文件名'
+    moved = []
+    try:
+        for suffix in ('', '.aria2'):
+            if old_path and os.path.exists(old_path + suffix):
+                os.rename(old_path + suffix, new_path + suffix)
+                moved.append(suffix)
+        try:
+            call_aria2_rpc('aria2.changeOption', [gid, {'out': new_out}])
+        except RuntimeError:
+            for suffix in reversed(moved):
+                os.rename(new_path + suffix, old_path + suffix)
+            raise
+    finally:
+        if was_running:
+            call_aria2_rpc('aria2.unpause', [gid])
+            if resume_at_front:
+                try:
+                    reclaim_aria2_slot(gid, active_before)
+                except RuntimeError:
+                    pass
+        with downloader_file_cache_lock:
+            downloader_file_cache.pop(gid, None)
+    return 200, '文件名已修改'
+
+
+def reclaim_aria2_slot(gid, active_before):
+    """Give the slot freed by the rename pause back to `gid`.
+
+    While the task was paused, Aria2 may have started the next waiting task. Put
+    `gid` first in line, pause the newcomers so it starts, then queue them right
+    behind it again, so the queue looks as if the rename never happened.
+    """
+    call_aria2_rpc('aria2.changePosition', [gid, 0, 'POS_SET'])
+    stolen = [item.get('gid') for item in call_aria2_rpc('aria2.tellActive', [['gid']]) or []
+              if item.get('gid') not in active_before and item.get('gid') != gid]
+    for other in stolen:
+        call_aria2_rpc('aria2.forcePause', [other])
+    for other in stolen:
+        wait_aria2_paused(other)
+    deadline = time.time() + ARIA2_PAUSE_WAIT_SECONDS
+    while stolen and time.time() < deadline:
+        if call_aria2_rpc('aria2.tellStatus', [gid, ['status']]).get('status') == 'active':
+            break
+        time.sleep(0.1)
+    for position, other in enumerate(stolen):
+        call_aria2_rpc('aria2.unpause', [other])
+        call_aria2_rpc('aria2.changePosition', [other, position, 'POS_SET'])
+
+
+@app.route('/api/aria2/rename', methods=['POST'])
+@login_required
+def aria2_rename_download():
+    data = request.get_json(silent=True) or {}
+    gid = str(data.get('gid') or '').strip()
+    name = str(data.get('name') or '').strip()
+    if not re.fullmatch(r'[0-9a-fA-F]{1,16}', gid):
+        return jsonify({'code': 400, 'msg': '无效的任务 GID'}), 400
+    error = validate_download_filename(name)
+    if not error and is_enabled_discard_name(name, get_final_config(None)):
+        error = '该后缀会被下载丢弃规则删除，请换一个文件名'
+    if error:
+        return jsonify({'code': 400, 'msg': error}), 400
+    try:
+        code, msg = rename_aria2_download(gid, name)
+    except RuntimeError as e:
+        return jsonify({'code': 502, 'msg': str(e)}), 502
+    except OSError as e:
+        return jsonify({'code': 500, 'msg': f'重命名文件失败: {e}'}), 500
+    return jsonify({'code': code, 'msg': msg}), code
+
+
 @app.route('/api/aria2/task_list', methods=['POST'])
 @login_required
 def aria2_task_list():

@@ -534,6 +534,33 @@ class DownloaderBrowserTests(unittest.TestCase):
         self.assertIn('文件（1）', text)
         self.assertIn('https://example.test/Alpha.Show.S01E01.mkv', text)
 
+    def test_detail_rename_posts_new_name(self):
+        sent = []
+        original = self.scanner.rename_aria2_download
+        self.scanner.rename_aria2_download = lambda gid, name: (sent.append((gid, name)) or (200, '文件名已修改'))
+        self.addCleanup(setattr, self.scanner, 'rename_aria2_download', original)
+        page = self.open()
+        self.items(page).first.locator('.sdl-name').click()
+        modal = page.locator('.modal.show')
+        modal.wait_for()
+        box = modal.get_by_label('新文件名')
+        self.assertEqual(box.input_value(), 'Alpha.Show.S01E01.mkv')
+        button = modal.get_by_role('button', name='改名')
+        self.assertTrue(button.is_disabled())
+        box.fill('Alpha 第1集.mkv')
+        button.click()
+        page.wait_for_function("!document.querySelector('.modal.show .sdl-rename button').disabled")
+        page.wait_for_timeout(300)
+        self.assertEqual(sent, [('a1', 'Alpha 第1集.mkv')])
+
+    def test_rename_hidden_for_finished_tasks(self):
+        page = self.open()
+        page.locator('.sdl-list-btn').nth(2).click()
+        page.wait_for_function("document.querySelectorAll('.sdl-item').length === 2")
+        self.items(page).first.locator('.sdl-name').click()
+        page.locator('.modal.show').wait_for()
+        self.assertEqual(page.locator('.modal.show .sdl-rename').count(), 0)
+
     def test_download_settings_apply_and_persist(self):
         page = self.open()
         page.locator('.sdl-toolbar [title="更多"]').click()

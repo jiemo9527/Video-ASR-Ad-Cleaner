@@ -1,7 +1,6 @@
 """账号超限自动切换 remote：错误识别、候选轮换与上传线程端到端。"""
 import json
 import os
-import stat
 import sys
 import tempfile
 import threading
@@ -96,19 +95,20 @@ class UploadWorkerLimitSwitchTests(unittest.TestCase):
         db.create_all()
 
         cls.tmp = tempfile.TemporaryDirectory()
-        bin_dir = os.path.join(cls.tmp.name, 'bin')
-        os.makedirs(bin_dir)
-        rclone = os.path.join(bin_dir, 'rclone')
-        with open(rclone, 'w') as f:
+        fake_rclone = os.path.join(cls.tmp.name, 'fake_rclone.py')
+        with open(fake_rclone, 'w') as f:
             f.write(FAKE_RCLONE)
-        os.chmod(rclone, os.stat(rclone).st_mode | stat.S_IEXEC)
-        cls.old_path = os.environ['PATH']
-        os.environ['PATH'] = bin_dir + os.pathsep + cls.old_path
+        # Run the fake through the current interpreter instead of putting an `rclone`
+        # script on PATH: on Windows PATH lookup only finds rclone.exe, which would
+        # run the real rclone against the machine's real remotes.
+        cls.old_cmd = ScannerCore.get_upload_rclone_cmd
+        ScannerCore.get_upload_rclone_cmd = lambda self, local, remote: [
+            sys.executable, fake_rclone, 'moveto', local, remote]
         threading.Thread(target=scanner.upload_worker, daemon=True).start()
 
     @classmethod
     def tearDownClass(cls):
-        os.environ['PATH'] = cls.old_path
+        ScannerCore.get_upload_rclone_cmd = cls.old_cmd
         cls.tmp.cleanup()
         db.session.remove()
         cls.ctx.pop()
@@ -167,7 +167,7 @@ class UploadWorkerLimitSwitchTests(unittest.TestCase):
 
     def test_settings_defaults_and_round_trip(self):
         conf = scanner.get_final_config(None)
-        self.assertFalse(conf['upload_remote_auto_switch'])
+        self.assertTrue(conf['upload_remote_auto_switch'])
         self.assertTrue(conf['upload_slow_restart'])
 
         if not User.query.get('tester'):
@@ -176,10 +176,10 @@ class UploadWorkerLimitSwitchTests(unittest.TestCase):
         client = scanner.app.test_client()
         with client.session_transaction() as sess:
             sess['_user_id'] = 'tester'
-        res = client.post('/api/settings', json={'upload_remote_auto_switch': True, 'upload_slow_restart': False})
+        res = client.post('/api/settings', json={'upload_remote_auto_switch': False, 'upload_slow_restart': False})
         self.assertEqual(res.status_code, 200)
         data = client.get('/api/settings').get_json()
-        self.assertIs(data['upload_remote_auto_switch'], True)
+        self.assertIs(data['upload_remote_auto_switch'], False)
         self.assertIs(data['upload_slow_restart'], False)
         Config.query.filter_by(key='upload_slow_restart').delete()
         db.session.commit()

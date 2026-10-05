@@ -269,6 +269,14 @@
           <span class="small fw-bold me-auto">队列位置</span>
           <button type="button" class="btn btn-sm btn-light border" @click="move(detail)" title="置顶"><i class="bi bi-chevron-bar-up"></i> 置顶</button>
         </div>
+        <div class="sdl-rename mt-3" v-if="detailRenamable">
+          <label class="small fw-bold mb-1 d-block">保存文件名</label>
+          <div class="input-group input-group-sm">
+            <input class="form-control font-monospace" v-model.trim="renameName" :placeholder="taskName(detail)" @keyup.enter="renameTask" aria-label="新文件名">
+            <button type="button" class="btn btn-primary" :disabled="renaming || !renameName || renameName === baseName((detail.files[0] || {}).path)" @click="renameTask"><span v-if="renaming" class="spinner-border spinner-border-sm me-1"></span>改名</button>
+          </div>
+          <div class="form-text">只改文件名，保存目录不变；已下载的部分保留。下载中的任务会短暂暂停后自动继续。</div>
+        </div>
         <details class="mt-3 sdl-adv sdl-taskopt" v-if="detailEditable" @toggle="$event.target.open && loadTaskOptions()">
           <summary class="small fw-bold">任务设置</summary>
           <div class="row g-2 mt-1">
@@ -357,6 +365,7 @@
                 detail: null, globalDir: '', globalUserAgent: '', globalConcurrent: 5, limits: {down: 0, up: 0},
                 form: {mode: 'uri', uris: '', files: [], dir: '', split: 0, connections: 0, out: '', userAgent: '', referer: '', cookie: '', headers: ''}, submitting: false,
                 taskOpt: {}, taskOptOrig: {}, taskOptLoaded: false, savingTaskOpt: false, aria2Version: '', retryingAll: false,
+                renameName: '', renaming: false,
                 isMobile: !!(window.matchMedia && window.matchMedia(MOBILE_QUERY).matches),
                 settingsForm: {concurrent: 5, down: 0, up: 0, userAgent: ''}, savingSettings: false,
                 prefsForm: Object.assign({}, prefs), prefsImport: '',
@@ -397,6 +406,13 @@
             detailUris: function () { return this.allDetailUris.slice(0, 20); },
             detailEditable: function () { return !!this.detail && ['active', 'waiting', 'paused'].indexOf(this.detail.status) >= 0; },
             detailInQueue: function () { return !!this.detail && (this.detail.status === 'waiting' || this.detail.status === 'paused'); },
+            // 仅单文件、非 BT 的未完成任务可改名（BT 文件名来自种子）
+            detailRenamable: function () {
+                if (!this.detailEditable || this.detail.bittorrent) return false;
+                // 列表行只带首个文件的摘要，fileCount 才是真实文件数
+                var count = this.detail.fileCount != null ? this.detail.fileCount : (this.detail.files || []).length;
+                return count === 1 && (this.detail.files || []).length === 1;
+            },
             // 队列顺序只在等待列表、默认排序且未搜索时有意义
             effectiveDensity: function () {
                 if (this.prefs.density !== 'auto') return this.prefs.density;
@@ -723,10 +739,27 @@
                 var self = this;
                 this.taskOptLoaded = false; this.taskOpt = {}; this.taskOptOrig = {};
                 this.detail = t;
+                this.renameName = this.taskName(t);
                 this.modals.detailModal.show();
                 this.rpc('aria2.tellStatus', [t.gid]).then(function (full) {
-                    if (self.detail && full && full.gid === self.detail.gid) self.detail = full;
+                    if (self.detail && full && full.gid === self.detail.gid) {
+                        var prev = self.taskName(self.detail);
+                        self.detail = full;
+                        if (self.renameName === prev) self.renameName = self.taskName(full);
+                    }
                 }).catch(function () {});
+            },
+            renameTask: function () {
+                var self = this, gid = this.detail && this.detail.gid, name = this.renameName;
+                if (!gid || !name || this.renaming) return;
+                if (/[\/\\]/.test(name)) { this.notify('文件名不能包含 / 或 \\', 'error'); return; }
+                this.renaming = true;
+                axios.post('/api/aria2/rename', {gid: gid, name: name}).then(function (r) {
+                    self.notify((r.data && r.data.msg) || '文件名已修改');
+                    return self.refresh();
+                }).catch(function (e) {
+                    self.notify('改名失败：' + ((e.response && e.response.data && e.response.data.msg) || e.message), 'error');
+                }).finally(function () { self.renaming = false; });
             },
             openNew: function () {
                 this.form = {mode: 'uri', uris: '', files: [], dir: this.defaultDir, split: this.prefs.newTaskSplit,
