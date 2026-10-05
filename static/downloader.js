@@ -588,8 +588,7 @@
                         self.refresh();
                     }).catch(function (e) { self.notify('操作失败：' + e.message, 'error'); });
                 };
-                if (action === 'remove') this.confirm('确定删除任务「' + this.taskName(t) + '」吗？\n只删除下载记录，已下载的文件保留。', go);
-                else go();
+                go();
             },
             batch: function (action) {
                 var self = this;
@@ -610,8 +609,7 @@
                         self.refresh();
                     });
                 };
-                if (action === 'remove') this.confirm('确定删除选中的 ' + targets.length + ' 个任务吗？\n只删除下载记录，已下载的文件保留。', go);
-                else go();
+                go();
             },
             globalAction: function (method, msg) {
                 var self = this;

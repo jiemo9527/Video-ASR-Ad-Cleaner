@@ -255,8 +255,8 @@ class DownloaderBrowserTests(unittest.TestCase):
         page.wait_for_function("document.querySelectorAll('.sdl-item').length === 1")
         self.assertIn(('aria2.unpause', ['a1']), self.fake.calls)
         page.locator('.sdl-item').first.locator('[title="删除"]').click()
-        page.locator('#confirmModal .btn-danger').click()
         page.wait_for_function("document.querySelectorAll('.sdl-item').length === 0")
+        self.assertFalse(page.locator('#confirmModal').is_visible())
         self.assertIn('aria2.forceRemove', self.fake.methods())
         self.assertIn('aria2.removeDownloadResult', self.fake.methods())
 
