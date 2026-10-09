@@ -344,6 +344,7 @@ def get_final_config(overrides_json=None):
         "cleanup_aria2_completed": True,
         "discard_images": True, "discard_nfo": True,
         "discard_extra_extensions": "",
+        "download_stall_pause": True, "download_stall_seconds": DOWNLOAD_STALL_DEFAULT_SECONDS,
         "concurrency_detect": 2, "concurrency_upload": 9, "detect_retry_limit": 3,
         "local_model_concurrency": 2
     }
@@ -351,14 +352,14 @@ def get_final_config(overrides_json=None):
     for k, v in db_configs.items():
         if k in ["download_proxy", "cleanup_upload_dirty"]:
             continue
-        if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "cloud_asr_proxy_enabled", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample", "upload_remote_hijack_enabled", "upload_remote_auto_switch", "upload_slow_restart",
+        if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "cloud_asr_proxy_enabled", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample", "upload_remote_hijack_enabled", "upload_remote_auto_switch", "upload_slow_restart", "download_stall_pause",
                    "notify_upload_success", "notify_errors", "cleanup_scanner_history", "cleanup_scanner_uploaded", "cleanup_scanner_dirty", "cleanup_scanner_error", "cleanup_scanner_cancelled",
                    "cleanup_detect_dirty", "cleanup_detect_error", "cleanup_detect_cancelled", "cleanup_upload_uploaded", "cleanup_upload_error", "cleanup_upload_cancelled", "cleanup_aria2_completed",
                    "discard_images", "discard_nfo"]:
             final_conf[k] = (str(v).lower() == 'true')
         elif k in ["audio_threshold_multi", "audio_threshold_long", "audio_len_head", "audio_len_mid", "audio_len_tail",
                    "audio_len_tail_long", "audio_segment_len", "audio_max_segments", "cloud_asr_max_duration", "cloud_asr_concurrency", "cloud_asr_per_key_concurrency", "cloud_asr_upload_timeout", "cloud_asr_read_timeout", "cloud_asr_long_read_timeout", "concurrency_detect", "concurrency_upload", "detect_retry_limit",
-                   "local_model_concurrency"]:
+                   "local_model_concurrency", "download_stall_seconds"]:
             try:
                 final_conf[k] = int(v)
             except:
@@ -1033,6 +1034,117 @@ def discard_download_worker():
         except Exception as e:
             print(f"⚠️ 丢弃下载兜底扫描失败: {e}")
         time.sleep(5)
+
+
+# 下载无进度自动暂停：下载中任务的已下载字节数连续 N 秒没有增加就 forcePause，
+# 把下载位让给后面的任务。状态只在进程内保存，重启后重新计时。
+DOWNLOAD_STALL_POLL_SECONDS = 5
+DOWNLOAD_STALL_DEFAULT_SECONDS = 70
+DOWNLOAD_STALL_MIN_SECONDS = 10
+DOWNLOAD_STALL_MAX_SECONDS = 3600
+DOWNLOAD_STALL_PAUSED_MAX = 5000
+download_stall_progress = {}  # gid -> (completedLength, 最近一次进度变化的 monotonic 时间)
+download_stall_paused = {}  # gid -> 自动暂停的时间戳，供下载器显示「无进度已暂停」
+download_stall_lock = threading.Lock()
+
+
+def get_download_stall_seconds(config):
+    try:
+        seconds = int(config.get('download_stall_seconds', DOWNLOAD_STALL_DEFAULT_SECONDS))
+    except (TypeError, ValueError):
+        seconds = DOWNLOAD_STALL_DEFAULT_SECONDS
+    return min(DOWNLOAD_STALL_MAX_SECONDS, max(DOWNLOAD_STALL_MIN_SECONDS, seconds))
+
+
+def aria2_task_display_name(gid, entry):
+    info = ((entry or {}).get('bittorrent') or {}).get('info') or {}
+    if info.get('name'):
+        return str(info['name'])
+    with downloader_file_cache_lock:
+        files = (downloader_file_cache.get(gid) or {}).get('files') or []
+    if not files:
+        try:
+            files = call_aria2_rpc('aria2.getFiles', [gid]) or []
+        except RuntimeError:
+            files = []
+    first = files[0] if files and isinstance(files[0], dict) else {}
+    if first.get('path'):
+        return os.path.basename(str(first['path']).replace('\\', '/'))
+    uris = first.get('uris') or []
+    if uris and isinstance(uris[0], dict) and uris[0].get('uri'):
+        return str(uris[0]['uri']).split('?', 1)[0].rstrip('/').rsplit('/', 1)[-1] or gid
+    return gid
+
+
+def pause_stalled_aria2_downloads(now=None):
+    """暂停已下载字节数连续 download_stall_seconds 秒没有变化的下载中任务，返回被暂停的 GID。"""
+    now = time.monotonic() if now is None else now
+    config = get_final_config(None)
+    enabled = bool(config.get('download_stall_pause', True))
+    limit = get_download_stall_seconds(config)
+    try:
+        entries = call_aria2_rpc('aria2.tellActive', [['gid', 'status', 'totalLength', 'completedLength', 'bittorrent']]) or []
+    except RuntimeError:
+        # Aria2 不可用期间无法观察进度，恢复后重新计时，避免一恢复就把任务全部暂停
+        with download_stall_lock:
+            download_stall_progress.clear()
+        raise
+    active = {str(e.get('gid')): e for e in entries
+              if isinstance(e, dict) and e.get('gid') and e.get('status', 'active') == 'active'}
+
+    stalled = []
+    with download_stall_lock:
+        for gid in list(download_stall_progress):
+            if gid not in active:
+                del download_stall_progress[gid]
+        for gid in active:
+            download_stall_paused.pop(gid, None)
+        if not enabled:
+            download_stall_progress.clear()
+            return []
+        for gid, entry in active.items():
+            try:
+                completed = int(entry.get('completedLength') or 0)
+                total = int(entry.get('totalLength') or 0)
+            except (TypeError, ValueError):
+                continue
+            if total > 0 and completed >= total:
+                # 已下完（BT 做种 / 收尾校验）不算卡住
+                download_stall_progress.pop(gid, None)
+                continue
+            last = download_stall_progress.get(gid)
+            if last is None or completed != last[0]:
+                download_stall_progress[gid] = (completed, now)
+            elif now - last[1] >= limit:
+                stalled.append(gid)
+
+    paused = []
+    for gid in stalled:
+        try:
+            call_aria2_rpc('aria2.forcePause', [gid])
+        except RuntimeError as e:
+            print(f"⚠️ 无进度自动暂停失败 {gid}: {e}")
+            continue
+        with download_stall_lock:
+            download_stall_progress.pop(gid, None)
+            download_stall_paused[gid] = time.time()
+            while len(download_stall_paused) > DOWNLOAD_STALL_PAUSED_MAX:
+                download_stall_paused.pop(next(iter(download_stall_paused)))
+        paused.append(gid)
+        print(f"⏸️ 下载 {limit}s 无进度，已自动暂停: {aria2_task_display_name(gid, active[gid])} ({gid})")
+    return paused
+
+
+def download_stall_worker():
+    while True:
+        try:
+            with app.app_context():
+                pause_stalled_aria2_downloads()
+        except RuntimeError:
+            pass
+        except Exception as e:
+            print(f"⚠️ 下载无进度检查失败: {e}")
+        time.sleep(DOWNLOAD_STALL_POLL_SECONDS)
 
 
 def get_next_persistent_id():
@@ -2423,6 +2535,11 @@ def aria2_task_list():
         if list_id == 'waiting':
             tasks = [task for task in tasks if task.get('status') != 'active']
         tasks = attach_aria2_file_summaries([slim_aria2_task(task) for task in tasks])
+        if list_id == 'waiting':
+            with download_stall_lock:
+                for task in tasks:
+                    if task.get('status') == 'paused' and task.get('gid') in download_stall_paused:
+                        task['stallPaused'] = True
     except (requests.RequestException, ValueError, RuntimeError) as e:
         return jsonify({'code': 502, 'msg': f'无法读取 Aria2 任务: {e}'}), 502
     return jsonify({'code': 200, 'stat': stat, 'tasks': tasks})
@@ -2894,8 +3011,16 @@ def settings():
             if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "cloud_asr_proxy_enabled", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample",
                       "notify_upload_success", "notify_errors", "cleanup_scanner_history", "cleanup_scanner_uploaded", "cleanup_scanner_dirty", "cleanup_scanner_error", "cleanup_scanner_cancelled",
                       "cleanup_detect_dirty", "cleanup_detect_error", "cleanup_detect_cancelled", "cleanup_upload_uploaded", "cleanup_upload_error", "cleanup_upload_cancelled", "cleanup_aria2_completed",
-                   "discard_images", "discard_nfo", "upload_remote_auto_switch", "upload_slow_restart"]:
+                   "discard_images", "discard_nfo", "upload_remote_auto_switch", "upload_slow_restart", "download_stall_pause"]:
                 val = "true" if (v is True or str(v).lower() == 'true') else "false"
+            elif k == 'download_stall_seconds':
+                try:
+                    seconds = int(v)
+                except (TypeError, ValueError):
+                    seconds = 0
+                if not DOWNLOAD_STALL_MIN_SECONDS <= seconds <= DOWNLOAD_STALL_MAX_SECONDS:
+                    return jsonify({'code': 400, 'msg': f'无进度暂停时长需在 {DOWNLOAD_STALL_MIN_SECONDS}-{DOWNLOAD_STALL_MAX_SECONDS} 秒之间'}), 400
+                val = str(seconds)
             elif k == 'discard_extra_extensions':
                 extensions = configured_discard_extensions({'discard_extra_extensions': v})
                 if not valid_discard_extensions(v):
@@ -3253,4 +3378,5 @@ if __name__ == '__main__':
     for _ in range(n_u): threading.Thread(target=upload_worker, daemon=True).start()
     threading.Thread(target=orphan_reconcile_worker, daemon=True).start()
     threading.Thread(target=discard_download_worker, daemon=True).start()
+    threading.Thread(target=download_stall_worker, daemon=True).start()
     app.run(host='0.0.0.0', port=int(os.environ.get('SCANNER_PORT', '5000')))

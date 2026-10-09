@@ -293,6 +293,20 @@
                     </div>
 
                     <div class="panel">
+                        <div class="panel-head"><h6>下载策略</h6><div class="desc">保存后立即生效。</div></div>
+                        <div class="panel-body">
+                            <label class="set-row" for="sw_download_stall_pause">
+                                <div class="set-text"><div class="set-label">无进度自动暂停</div><div class="set-desc">下载中的任务已下载大小连续一段时间没有增加时自动暂停，把下载位让给后面的任务；暂停的任务需手动开始。已下完正在做种的 BT 任务不受影响。</div></div>
+                                <div class="set-control form-check form-switch"><input class="form-check-input" type="checkbox" v-model="settings.download_stall_pause" id="sw_download_stall_pause"></div>
+                            </label>
+                            <div class="set-row wrap-sm" v-show="settings.download_stall_pause">
+                                <div class="set-text"><div class="set-label">无进度判定时长</div><div class="set-desc">默认 70 秒，范围 10–3600 秒；每 5 秒检查一次。</div></div>
+                                <div class="set-control input-group input-group-sm unit-input"><input type="number" class="form-control" v-model.number="settings.download_stall_seconds" min="10" max="3600"><span class="input-group-text">秒</span></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="panel">
                         <div class="panel-head"><h6>上传策略</h6><div class="desc">保存后对新开始的上传立即生效。</div></div>
                         <div class="panel-body">
                             <label class="set-row" for="sw_upload_slow_restart">
@@ -461,8 +475,8 @@
 
 <script>
 let modalAdd, modalConfirm, toastInstance, modalDownload;
-const BOOL_KEYS = ['check_audio','check_subtitles','sanitize_metadata', 'enable_cloud_asr', 'cloud_asr_proxy_enabled', 'enable_local_model', 'detailed_mode', 'asr_use_flac', 'audio_double_sample', 'notify_upload_success', 'notify_errors', 'cleanup_detect_dirty', 'cleanup_detect_error', 'cleanup_detect_cancelled', 'cleanup_upload_uploaded', 'cleanup_upload_error', 'cleanup_upload_cancelled', 'cleanup_aria2_completed', 'discard_images', 'discard_nfo', 'upload_slow_restart', 'upload_remote_auto_switch'];
-const NUM_KEYS = ['audio_segment_len', 'audio_max_segments', 'cloud_asr_max_duration', 'cloud_asr_concurrency', 'cloud_asr_per_key_concurrency', 'cloud_asr_upload_timeout', 'cloud_asr_read_timeout', 'cloud_asr_long_read_timeout', 'concurrency_detect', 'concurrency_upload', 'detect_retry_limit', 'local_model_concurrency'];
+const BOOL_KEYS = ['check_audio','check_subtitles','sanitize_metadata', 'enable_cloud_asr', 'cloud_asr_proxy_enabled', 'enable_local_model', 'detailed_mode', 'asr_use_flac', 'audio_double_sample', 'notify_upload_success', 'notify_errors', 'cleanup_detect_dirty', 'cleanup_detect_error', 'cleanup_detect_cancelled', 'cleanup_upload_uploaded', 'cleanup_upload_error', 'cleanup_upload_cancelled', 'cleanup_aria2_completed', 'discard_images', 'discard_nfo', 'upload_slow_restart', 'upload_remote_auto_switch', 'download_stall_pause'];
+const NUM_KEYS = ['audio_segment_len', 'audio_max_segments', 'cloud_asr_max_duration', 'cloud_asr_concurrency', 'cloud_asr_per_key_concurrency', 'cloud_asr_upload_timeout', 'cloud_asr_read_timeout', 'cloud_asr_long_read_timeout', 'concurrency_detect', 'concurrency_upload', 'detect_retry_limit', 'local_model_concurrency', 'download_stall_seconds'];
 const RESTART_KEYS = ['concurrency_detect', 'concurrency_upload'];
 const SECTIONS = [
     {id: 'detect', label: '检测', icon: 'bi-shield-check'},
@@ -491,6 +505,7 @@ Vue.createApp({
                 cleanup_aria2_completed: true,
                 discard_images: true, discard_nfo: true, discard_extra_extensions: '',
                 upload_slow_restart: true, upload_remote_auto_switch: true,
+                download_stall_pause: true, download_stall_seconds: 70,
                 tg_bot_token: '', tg_chat_id: '',
                 audio_segment_len: 360, audio_max_segments: 8,
                 cloud_asr_max_duration: 60, cloud_asr_concurrency: 3, cloud_asr_per_key_concurrency: 3,
@@ -621,6 +636,11 @@ Vue.createApp({
             if(!/^[A-Za-z0-9_-]+$/.test(String(this.settings.api_token || '').trim())) {
                 this.go('account');
                 return this.showToast('Trigger API Token 只能包含字母、数字、下划线和连字符', 'error');
+            }
+            const stall = Number(this.settings.download_stall_seconds);
+            if(!Number.isInteger(stall) || stall < 10 || stall > 3600) {
+                this.go('transfer');
+                return this.showToast('无进度判定时长需为 10–3600 秒', 'error');
             }
             this.saving = true;
             return axios.post('/api/settings', this.buildSettingsPayload()).then(()=>{

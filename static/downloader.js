@@ -541,6 +541,7 @@
             remain: function (t) { return formatDuration(this.remainSeconds(t)); },
             statusText: function (t) {
                 if (t.status === 'complete' && t.followedBy && t.followedBy.length) return '元数据已获取';
+                if (t.status === 'paused' && t.stallPaused) return '无进度已暂停';
                 return STATUS_TEXT[t.status] || t.status;
             },
             barClass: function (t) {
@@ -744,6 +745,7 @@
                 this.rpc('aria2.tellStatus', [t.gid]).then(function (full) {
                     if (self.detail && full && full.gid === self.detail.gid) {
                         var prev = self.taskName(self.detail);
+                        if (full.status === 'paused' && self.detail.stallPaused) full.stallPaused = true;
                         self.detail = full;
                         if (self.renameName === prev) self.renameName = self.taskName(full);
                     }
