@@ -130,6 +130,13 @@ Scanner 默认只监听 `127.0.0.1:5000`，不对公网开放；对外访问请�
 ### 更新
 再次运行安装命令后选择 `2. 更新`。更新模式会下载最新项目代码、更新依赖并重启 Scanner；保留数据库、`scanner.env`、Aria2 配置与 `rpc-secret`、Nginx 和模型（旧版遗留的 AriaNg 资源会被清理），不重新进入网络或 Nginx 配置。
 
+### 无 systemd 环境（容器 / Grok Bot 云电脑）
+`install.sh` 依赖 systemd。容器或沙箱 VM 使用非交互的 `install-nosystemd.sh`，所有文件装在一个目录内（默认 `/workspace/scanner_web`，下载到 `/workspace/downloads`），由 `install/supervise.sh` 守护 Scanner 与 Aria2：
+```Shell
+sudo bash -c 'bash <(curl -fsSL https://raw.githubusercontent.com/jiemo9527/Video-ASR-Ad-Cleaner/main/install/install-nosystemd.sh)'
+```
+可选环境变量：`TUNNEL_TOKEN`（Cloudflare 隧道令牌，自动保持隧道在线）、`SSH_AUTHORIZED_KEY`（为 root 开启仅本机、仅密钥的 sshd，配合隧道 SSH 路由）、`SCANNER_DIR`、`SCANNER_DOWNLOAD_DIR`、`SCANNER_PORT`，放在 `sudo` 之后传入，例如 `sudo TUNNEL_TOKEN=<令牌> bash -c '...'`。再次运行即为更新，保留数据与配置。查看状态：`bash /workspace/scanner_web/install/supervise.sh status`。没有 init 系统，机器重启或休眠唤醒后由任意一次 shell 调用重新拉起守护进程。
+
 ### 基本配置
 登录后进入 `设置`：
 

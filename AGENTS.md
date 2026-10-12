@@ -29,6 +29,7 @@ The current app version is defined in `app.py` as `APP_VERSION` and displayed on
 - `trigger.sh`: Aria2 completion hook.
 - `reset_password.py`: Root-local Dashboard password reset tool. It replaces a selected account password with a newly generated one and prints it once.
 - `install/install.sh`: One-command-capable interactive install/uninstall helper. It downloads the GitHub `main` archive itself, then configures Aria2/service integration and optional Nginx HTTPS/WSS.
+- `install/install-nosystemd.sh` / `install/supervise.sh`: Non-interactive installer/updater and process supervisor for hosts without systemd (see "Hosts without systemd").
 - `install/aria2-config/default.tar`: Scanner-managed Aria2 configuration template, extracted to `/root/.aria2c` only during a new Scanner installation.
 - `requirements.txt`: Python dependencies.
 
@@ -96,6 +97,15 @@ Image/NFO download rejection:
 - Nginx HTTPS is opt-in. The installer prompts for a domain or IP and accepts either existing fullchain/key file paths or pasted PEM content terminated by a line containing `EOF`. Pasted key files use mode `0600`; certificate and key syntax are checked before use.
 - The generated Nginx site proxies Scanner to HTTPS port `5001`; if `5001` is occupied, the installer chooses an unused random port in `10000-42767`. HTTP redirects and the printed Scanner address use the selected Scanner port. When Aria2 RPC is enabled with a secret, a separate HTTPS/WSS virtual host on `443` exposes `/jsonrpc` and retains `/aria2/jsonrpc` for compatibility; both forward to the configured local `rpc-listen-port` (default `6802`). The installer stops if `443` is held by a non-Nginx service. It validates with `nginx -t` and restores the preceding Scanner site configuration if validation fails. Do not overwrite a non-symlink `/etc/nginx/sites-enabled/scanner` file.
 - During uninstall, Scanner reads its project directory from `scanner.service` and its Aria2 configuration directory from `scanner.env`; do not prompt for installation paths again. It removes the recorded Aria2 configuration directory only when it contains the `.scanner-managed` marker, and also removes a Scanner-registered Aria2 service. It leaves a non-Scanner Aria2 configuration and all other Aria2 runtime files untouched. Removal of the Scanner Nginx site and pasted certificate files is optional. Purging the Nginx package is offered only when Scanner installed it and no other enabled Nginx sites are detected; retain Nginx in every other case.
+
+Hosts without systemd (containers, sandbox VMs such as Grok Bot computers):
+
+- `install/install-nosystemd.sh` is the non-interactive installer/updater for these hosts; `install/install.sh` assumes systemd. Everything lives under one directory (`SCANNER_DIR`, default `/workspace/scanner_web`, because on Grok Bot only `/workspace` survives a rebuild): code, `venv/`, `bin/aria2c` + `bin/rclone` (+ `bin/cloudflared`), `aria2/` (Scanner-managed config, RPC on `127.0.0.1` only, `on-download-complete` pointing at `trigger.sh`), `rclone.conf` (via `RCLONE_CONFIG`), `scanner.env` (`SCANNER_HOST` defaults to `0.0.0.0` here so a tunnel or port mapping can reach it) and `.supervisor/`. Downloads and `scan_path` default to `SCANNER_DOWNLOAD_DIR=/workspace/downloads`.
+- Re-running it is the update path: it redeploys code, updates pip packages, `rclone selfupdate`s, keeps `scanner.env`, `aria2/` (and its `rpc-secret`), the database and `.supervisor/`, then restarts Scanner onto the new code.
+- `install/supervise.sh` replaces systemd: a single `flock`-guarded loop (lock in `/run`, keyed by project path) that restarts Scanner and Aria2 every 20s if they are gone, plus cloudflared when `.supervisor/tunnel.token` exists (`TUNNEL_TOKEN` env at install) and sshd (`127.0.0.1:22`, key-only, host keys persisted in `.supervisor/ssh/`) when `.supervisor/authorized_keys` exists (`SSH_AUTHORIZED_KEY`). `supervise.sh status` prints one line per process. It detaches with `setsid`, closes inherited fds, and every child gets `9>&-` (services are `exec`ed from their subshell) so nothing but the loop holds the lock; otherwise a killed supervisor cannot be restarted.
+- No init system means nothing starts the supervisor on boot or after a hibernate/resume that drops processes. The installer appends a hook to `/etc/bash.bashrc` and `/root/.bashrc` so any shell restarts it; on Grok Bot that is a Routine that runs a shell command. `/etc` is not persistent there, so after a box rebuild the hook is gone until something runs `install/install-nosystemd.sh` or `install/supervise.sh` once.
+- Some sandboxes resolve every name to a fake-ip proxy range (`198.18.0.0/15`). `supervise.sh` pins the Cloudflare tunnel edge names (`region1/2.v2.argotunnel.com`) to their real addresses via DoH in `/etc/hosts` when that happens.
+- Logs: system logs fall back to `system.log` automatically (see "Where Scanner Logs Go"); supervisor events go to `supervisor.log`, tunnel output to `cloudflared.log`, Aria2 to `aria2.log`.
 
 Important statuses:
 
@@ -473,7 +483,8 @@ Do not commit:
 - generated `scanner.env`
 - secrets such as `.token_secret`, `.flask_secret`, or `.initial_admin_credentials`
 - runtime DB files
-- runtime logs `scanner.log`, `scanner_error.log` and `system.log*`
+- runtime logs `scanner.log`, `scanner_error.log`, `system.log*`, `supervisor.log`, `cloudflared.log` and `aria2.log`
+- `.supervisor/` (tunnel token, SSH host keys)
 - downloaded media
 - model files
 
