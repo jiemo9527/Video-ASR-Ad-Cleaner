@@ -19,7 +19,8 @@ from flask_login import LoginManager, login_user, login_required, logout_user, c
 from werkzeug.security import check_password_hash, generate_password_hash
 from database import db, Task, Config, Keyword, User
 from core_logic import (ScannerCore, sensevoice_gguf_ready, VIDEO_EXTENSIONS, deduplicate_keyword_values,
-                        normalize_keyword_identity, DISCARD_DOWNLOAD_EXTENSIONS, is_discarded_download_name)
+                        normalize_keyword_identity, DISCARD_DOWNLOAD_EXTENSIONS, is_discarded_download_name,
+                        system_log_backend, read_system_log_tail, clear_system_log_file)
 from sqlalchemy import text
 
 app = Flask(__name__)
@@ -3142,6 +3143,7 @@ def update_account():
 SYSTEM_LOG_PREFIX_RE = re.compile(
     r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:[\.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?\s+\S+\s+\S+(?:\[\d+\])?:\s+(.*)$'
 )
+SYSTEM_LOG_MAX_LINES = 9999
 
 SYSTEM_LOG_HIDE_MARKERS = (
     '🎚️ 动态抽样开启',
@@ -3177,15 +3179,29 @@ def format_system_logs(raw_text):
     return "\n".join(lines)
 
 
+def requested_system_log_lines():
+    try:
+        lines = int(request.args.get('lines', SYSTEM_LOG_MAX_LINES))
+    except (TypeError, ValueError):
+        lines = SYSTEM_LOG_MAX_LINES
+    return max(1, min(lines, SYSTEM_LOG_MAX_LINES))
+
+
 @app.route('/api/system_logs', methods=['GET'])
 @login_required
 def get_system_logs():
     try:
-        r = subprocess.run(
-            ['journalctl', '-t', 'arup', '-n', str(request.args.get('lines', 9999)), '--no-pager', '--output',
-             'short-iso'], capture_output=True, text=True)
+        lines = requested_system_log_lines()
         raw = str(request.args.get('raw', '')).lower() in ['1', 'true', 'yes']
-        return jsonify({"code": 200, "data": r.stdout if raw else format_system_logs(r.stdout)})
+        if system_log_backend() == 'file':
+            text_out = "\n".join(read_system_log_tail(lines))
+        else:
+            r = subprocess.run(
+                ['journalctl', '-t', 'arup', '-n', str(lines), '--no-pager', '--output', 'short-iso'],
+                capture_output=True, text=True)
+            text_out = r.stdout
+        return jsonify({"code": 200, "data": text_out if raw else format_system_logs(text_out),
+                        "backend": system_log_backend()})
     except Exception as e:
         return jsonify({"code": 500, "msg": str(e)})
 
@@ -3194,6 +3210,9 @@ def get_system_logs():
 @login_required
 def clear_system_logs():
     try:
+        if system_log_backend() == 'file':
+            clear_system_log_file()
+            return jsonify({"code": 200, "msg": "已清理"})
         subprocess.run(['journalctl', '--rotate'], check=True);
         subprocess.run(['journalctl', '--vacuum-time=1s'], check=True)
         return jsonify({"code": 200, "msg": "已清理"})

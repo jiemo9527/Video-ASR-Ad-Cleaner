@@ -33,6 +33,100 @@ except ImportError:
 
     syslog = _SyslogFallback()
 
+import logging
+from logging.handlers import RotatingFileHandler
+
+# ================= 📜 系统日志 =================
+# 有 systemd 的主机：任务日志经 syslog 进入 journald（journalctl -t arup）。
+# 无 systemd 的环境（容器、沙箱 VM、Windows）没有 journald，syslog 会被静默丢弃，
+# 这时改写到项目目录下的 system.log（滚动，单文件上限 SYSTEM_LOG_MAX_BYTES，保留 1 个备份）。
+# SCANNER_LOG_BACKEND=journald|file 可强制指定；SCANNER_SYSTEM_LOG_PATH 可改文件位置。
+SYSTEM_LOG_PATH = os.environ.get('SCANNER_SYSTEM_LOG_PATH') or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'system.log')
+SYSTEM_LOG_MAX_BYTES = 20 * 1024 * 1024
+SYSTEM_LOG_BACKUP_COUNT = 1
+_system_log_lock = threading.Lock()
+_system_log_handler = None
+_system_log_backend_cache = None
+
+
+def system_log_backend():
+    global _system_log_backend_cache
+    forced = (os.environ.get('SCANNER_LOG_BACKEND') or '').strip().lower()
+    if forced in ('journald', 'file'):
+        return forced
+    if _system_log_backend_cache is None:
+        has_journald = os.name != 'nt' and bool(shutil.which('journalctl')) and os.path.isdir('/run/systemd/system')
+        _system_log_backend_cache = 'journald' if has_journald else 'file'
+    return _system_log_backend_cache
+
+
+def _get_system_log_handler():
+    global _system_log_handler
+    if _system_log_handler is None:
+        log_dir = os.path.dirname(SYSTEM_LOG_PATH)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        handler = RotatingFileHandler(SYSTEM_LOG_PATH, maxBytes=SYSTEM_LOG_MAX_BYTES,
+                                      backupCount=SYSTEM_LOG_BACKUP_COUNT, encoding='utf-8', delay=True)
+        # 与 journalctl --output short-iso 同格式，/api/system_logs 用同一套解析去掉前缀
+        handler.setFormatter(logging.Formatter('%(asctime)s scanner arup[%(process)d]: %(message)s',
+                                               datefmt='%Y-%m-%dT%H:%M:%S'))
+        _system_log_handler = handler
+    return _system_log_handler
+
+
+def write_system_log(msg):
+    """Append one line to the file-backed system log (used when journald is unavailable)."""
+    record = logging.LogRecord('scanner.system', logging.INFO, __file__, 0,
+                               str(msg).replace('\r', ' ').replace('\n', ' ⏎ '), None, None)
+    with _system_log_lock:
+        _get_system_log_handler().handle(record)
+
+
+def _tail_file_lines(path, limit):
+    if limit <= 0 or not os.path.isfile(path):
+        return []
+    block = 64 * 1024
+    with open(path, 'rb') as fh:
+        fh.seek(0, os.SEEK_END)
+        pos = fh.tell()
+        data = b''
+        while pos > 0 and data.count(b'\n') <= limit:
+            step = min(block, pos)
+            pos -= step
+            fh.seek(pos)
+            data = fh.read(step) + data
+    lines = data.decode('utf-8', errors='replace').splitlines()
+    return lines[-limit:]
+
+
+def read_system_log_tail(limit=9999):
+    """Return the last `limit` lines across the rotated backup and the current file, oldest first."""
+    limit = max(0, int(limit))
+    with _system_log_lock:
+        if _system_log_handler is not None and _system_log_handler.stream:
+            _system_log_handler.flush()
+        current = _tail_file_lines(SYSTEM_LOG_PATH, limit)
+        backups = []
+        for idx in range(SYSTEM_LOG_BACKUP_COUNT, 0, -1):
+            backups.extend(_tail_file_lines(f'{SYSTEM_LOG_PATH}.{idx}', limit))
+    return (backups + current)[-limit:] if limit else []
+
+
+def clear_system_log_file():
+    global _system_log_handler
+    with _system_log_lock:
+        if _system_log_handler is not None:
+            _system_log_handler.close()
+            _system_log_handler = None
+        for idx in range(1, SYSTEM_LOG_BACKUP_COUNT + 1):
+            backup = f'{SYSTEM_LOG_PATH}.{idx}'
+            if os.path.exists(backup):
+                os.remove(backup)
+        if os.path.exists(SYSTEM_LOG_PATH):
+            open(SYSTEM_LOG_PATH, 'w', encoding='utf-8').close()
+
 # ================= ⚙️ 核心配置区域 =================
 local_inference_condition = threading.Condition()
 local_inference_active = 0
@@ -164,8 +258,15 @@ class ScannerCore:
     def log(self, msg):
         timestamp = datetime.now().strftime('%H:%M:%S')
         self.log_cb(f"[{timestamp}] {msg}")
+        line = msg if not self.task_id else f"[Task-{self.task_id}] {msg}"
+        if system_log_backend() == 'file':
+            try:
+                write_system_log(line)
+            except Exception:
+                pass
+            return
         try:
-            syslog.syslog(syslog.LOG_INFO, msg if not self.task_id else f"[Task-{self.task_id}] {msg}")
+            syslog.syslog(syslog.LOG_INFO, line)
         except:
             pass
 

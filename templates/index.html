@@ -309,7 +309,7 @@
                     <div class="input-group input-group-sm flex-grow-1" style="max-width: 320px;"><span class="input-group-text bg-light"><i class="bi bi-funnel"></i></span><input type="text" class="form-control" v-model="sysLogFilter" placeholder="关键词过滤..."><button class="btn btn-outline-secondary" v-if="sysLogFilter" @click="sysLogFilter=''">×</button></div>
                     <div class="d-flex align-items-center gap-2">
                         <div class="form-check form-switch mb-0"><input class="form-check-input" type="checkbox" v-model="autoRefreshLogs" id="autoRef"><label class="form-check-label small text-muted" for="autoRef">自动刷新</label></div>
-                        <div class="btn-group btn-group-sm"><button class="btn btn-outline-secondary" @click="loadSysLogs" title="刷新"><i class="bi bi-arrow-clockwise"></i></button><button class="btn btn-outline-danger" @click="confirmAction('确定清空系统日志(journalctl)吗？', () => clearSysLogs())" title="清空"><i class="bi bi-eraser-fill"></i></button></div>
+                        <div class="btn-group btn-group-sm"><button class="btn btn-outline-secondary" @click="loadSysLogs" title="刷新"><i class="bi bi-arrow-clockwise"></i></button><button class="btn btn-outline-danger" @click="confirmAction('确定清空系统日志吗？', () => clearSysLogs())" title="清空"><i class="bi bi-eraser-fill"></i></button></div>
                     </div>
                 </div>
                 <div class="sys-log-box" id="sysLogBox">

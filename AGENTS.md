@@ -407,7 +407,7 @@ Run the unit tests (install `requirements.txt` first; the subtitle remux test is
 python -m unittest discover -s tests
 ```
 
-Each test file also runs standalone, for example `python tests/test_subtitle_line_cleaning.py`. Importing `app` generates `.flask_secret`; delete it if a test run created it and never commit it.
+Each test file also runs standalone, for example `python tests/test_subtitle_line_cleaning.py`. Importing `app` generates `.flask_secret`; delete it if a test run created it and never commit it. On hosts without journald (Windows included) tests that call `ScannerCore.log()` also leave `system.log` in the project root; delete it too.
 
 For targeted behavior tests, prefer small synthetic media files created in the system temp directory, not in the repository.
 
@@ -436,10 +436,19 @@ systemctl is-active scanner
 
 Scanner writes to two separate sinks. Pick by message source, not by habit.
 
-- `ScannerCore.log()` sends every task-level message to syslog under the tag `arup`
-  (`core_logic.py`), so it reaches journald. Both `journalctl -t arup` and
-  `journalctl -u scanner` show these; `-t arup` is the precise filter and is what the
-  dashboard's 系统日志 tab uses through `/api/system_logs`.
+- `ScannerCore.log()` sends every task-level message to the system log. `system_log_backend()`
+  (`core_logic.py`) picks the sink once per process: `journald` when `journalctl` exists and
+  `/run/systemd/system` is present, otherwise `file`. `SCANNER_LOG_BACKEND=journald|file`
+  forces it.
+  - `journald`: syslog under the tag `arup`. Both `journalctl -t arup` and
+    `journalctl -u scanner` show these; `-t arup` is the precise filter.
+  - `file` (containers / sandbox VMs without systemd, Windows): `<project>/system.log`
+    (`SCANNER_SYSTEM_LOG_PATH` overrides), rotated at 20MB with one `.1` backup. Lines use the
+    same `ISO-time host arup[pid]: msg` shape as `journalctl --output short-iso`, so one parser
+    serves both.
+  - The dashboard's 系统日志 tab reads through `/api/system_logs` (tail of `lines`, capped at
+    9999, reported `backend`) and clears through `/api/system_logs/clear`; both follow the same
+    backend. Tests live in `tests/test_system_log.py`.
 - Plain `print()` from `app.py` — worker startup banners, queue recovery, the image/NFO
   discard notices — goes to stdout, which the installer's unit redirects to
   `<project>/scanner.log` (`StandardError` to `scanner_error.log`). **These never reach
@@ -464,7 +473,7 @@ Do not commit:
 - generated `scanner.env`
 - secrets such as `.token_secret`, `.flask_secret`, or `.initial_admin_credentials`
 - runtime DB files
-- runtime logs `scanner.log` and `scanner_error.log`
+- runtime logs `scanner.log`, `scanner_error.log` and `system.log*`
 - downloaded media
 - model files
 
