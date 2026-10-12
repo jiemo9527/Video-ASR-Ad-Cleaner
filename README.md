@@ -120,6 +120,10 @@ sudo bash -c 'bash <(curl -fsSL https://raw.githubusercontent.com/jiemo9527/Vide
 ```
 安装器会下载项目、安装依赖，初始化 Scanner 管理的 Aria2 配置，并进行网络与可选 Nginx HTTPS/WSS 配置。
 
+Scanner 默认只监听 `127.0.0.1:5000`，不对公网开放；对外访问请使用安装器配置的 Nginx HTTPS（默认端口 `5001`），或用 SSH 隧道 `ssh -L 5000:127.0.0.1:5000 <server>`。监听地址保存在项目目录的 `scanner.env`（`SCANNER_HOST` / `SCANNER_PORT`），更新时保留。确需明文 HTTP 外网直连时，安装时选择开放外网，或在 `scanner.env` 中设置 `SCANNER_HOST=0.0.0.0` 后执行 `systemctl restart scanner`。
+
+> 从旧版本更新：旧版 `scanner.env` 没有 `SCANNER_HOST`，更新后会改为仅本机访问。若原来依赖 `http://<VPS_IP>:5000` 直连，请改用 Nginx HTTPS 入口，或按上面方法设置 `SCANNER_HOST=0.0.0.0`。
+
 ### 首次登录
 安装完成后，终端会一次性显示随机 Dashboard 用户名与密码。忘记密码时，在项目目录运行 `install/install.sh`，选择 `4. 重置 Dashboard 密码`；工具会生成并打印新的随机密码。
 

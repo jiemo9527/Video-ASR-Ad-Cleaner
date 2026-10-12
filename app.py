@@ -3379,4 +3379,4 @@ if __name__ == '__main__':
     threading.Thread(target=orphan_reconcile_worker, daemon=True).start()
     threading.Thread(target=discard_download_worker, daemon=True).start()
     threading.Thread(target=download_stall_worker, daemon=True).start()
-    app.run(host='0.0.0.0', port=int(os.environ.get('SCANNER_PORT', '5000')))
+    app.run(host=os.environ.get('SCANNER_HOST', '127.0.0.1'), port=int(os.environ.get('SCANNER_PORT', '5000')))

@@ -683,17 +683,13 @@ function install_app() {
 
     remove_legacy_ariang_assets "$PROJECT_ROOT"
 
-    # 5. 配置监听地址
+    # 5. 配置监听地址（写入 scanner.env，更新时保留；默认仅本机）
     echo -e "${GREEN}>>> [Extra] 配置网络监听...${NC}"
-    read -p "是否仅允许本机访问 (127.0.0.1)? 输入 y 确认，回车默认开放外网 (0.0.0.0): " NET_CHOICE
-    APP_PY_PATH="$PROJECT_ROOT/app.py"
+    read -p "是否开放外网直连 (0.0.0.0)? 输入 y 开放，回车默认仅本机访问 (127.0.0.1): " NET_CHOICE
     SCANNER_PORT="$DEFAULT_SCANNER_PORT"
 
     if [[ "$NET_CHOICE" =~ ^[Yy]$ ]]; then
-        sed -i "s/0.0.0.0/127.0.0.1/g" "$APP_PY_PATH"
-        echo -e "${YELLOW}🔒 已设置为仅本机访问。${NC}"
-    else
-        sed -i "s/127.0.0.1/0.0.0.0/g" "$APP_PY_PATH"
+        SCANNER_HOST="0.0.0.0"
         if tcp_port_in_use "$SCANNER_PORT"; then
             SCANNER_PORT=$(find_available_tcp_port) || {
                 echo -e "${RED}❌ 无法找到空闲公网 TCP 端口。${NC}"
@@ -701,9 +697,12 @@ function install_app() {
             }
             echo -e "${YELLOW}⚠️ 端口 $DEFAULT_SCANNER_PORT 已被占用，自动改用端口 $SCANNER_PORT。${NC}"
         fi
-        echo -e "${YELLOW}🌍 已设置为开放外网访问，端口: $SCANNER_PORT。${NC}"
+        echo -e "${YELLOW}🌍 已设置为开放外网访问，端口: $SCANNER_PORT。登录密码将以明文 HTTP 传输，建议改用下方 Nginx HTTPS。${NC}"
+    else
+        SCANNER_HOST="127.0.0.1"
+        echo -e "${YELLOW}🔒 已设置为仅本机访问。${NC}"
     fi
-    printf 'SCANNER_PORT=%s\nSCANNER_ARIA2_CONFIG_DIR=%s\n' "$SCANNER_PORT" "$ARIA2_CONFIG_DIR" > "$PROJECT_ROOT/scanner.env"
+    printf 'SCANNER_HOST=%s\nSCANNER_PORT=%s\nSCANNER_ARIA2_CONFIG_DIR=%s\n' "$SCANNER_HOST" "$SCANNER_PORT" "$ARIA2_CONFIG_DIR" > "$PROJECT_ROOT/scanner.env"
 
     # 6. Python 依赖 (当前版本使用 GGUF/llama.cpp，本地 ASR 不再依赖 Torch/FunASR)
     echo -e "${GREEN}>>> [3/5] 安装 Python 依赖...${NC}"
@@ -852,9 +851,9 @@ EOF
             echo -e "🔑 Aria2 rpc-secret: $ARIA2_RPC_SECRET"
         fi
     elif [[ "$NET_CHOICE" =~ ^[Yy]$ ]]; then
-        echo -e "📡 访问地址: http://127.0.0.1:$SCANNER_PORT (仅限本机)"
-    else
         echo -e "📡 访问地址: http://<VPS_IP>:$SCANNER_PORT"
+    else
+        echo -e "📡 访问地址: http://127.0.0.1:$SCANNER_PORT (仅限本机，远程可用 ssh -L $SCANNER_PORT:127.0.0.1:$SCANNER_PORT <server>)"
     fi
     echo -e "📡 服务状态: systemctl status $SERVICE_NAME"
     echo -e "------------------------------------------------"
