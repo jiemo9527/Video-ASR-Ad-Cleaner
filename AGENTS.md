@@ -459,6 +459,10 @@ Scanner writes to two separate sinks. Pick by message source, not by habit.
   - The dashboard's 系统日志 tab reads through `/api/system_logs` (tail of `lines`, capped at
     9999, reported `backend`) and clears through `/api/system_logs/clear`; both follow the same
     backend. Tests live in `tests/test_system_log.py`.
+  - Task logs and the 系统日志 tab share `fmtLines()` in `index.html`: after a
+    `💥 [音频违规] 命中: <kw>` line, the sentence(s) of the next `[违规] ... 内容:` line that contain
+    a hit keyword are wrapped in `.log-hit` (red). The system log interleaves tasks, so the tab keys
+    the remembered keywords by `[Task-N]`. Lines are HTML-escaped before rendering with `v-html`.
 - Plain `print()` from `app.py` — worker startup banners, queue recovery, the image/NFO
   discard notices — goes to stdout, which the installer's unit redirects to
   `<project>/scanner.log` (`StandardError` to `scanner_error.log`). **These never reach

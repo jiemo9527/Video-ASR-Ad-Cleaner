@@ -313,7 +313,7 @@
                     </div>
                 </div>
                 <div class="sys-log-box" id="sysLogBox">
-                    <div v-for="(line, idx) in filteredSystemLogs" :key="idx" :class="getLogClass(line)" style="padding-left:5px">[[ line ]]</div>
+                    <div v-for="(row, idx) in filteredSystemLogs" :key="idx" :class="getLogClass(row.line)" style="padding-left:5px" v-html="row.html"></div>
                     <div v-if="!sysLogs" class="text-muted p-3">正在读取系统日志...</div>
                 </div>
             </div>
@@ -334,7 +334,7 @@ Vue.createApp({
     delimiters: ['[[', ']]'],
     data(){ return { tasks:[], serverIp:{{ server_ip|tojson }}, serverDisk:{path:'', total:null, used:null, free:null}, view:'detect', curTask:{}, sysLogs:'', sysLogFilter:'', autoRefreshLogs:true, currentLogTitle:'', currentLogContent:'', uploadHijackRemote:'', uploadHijackCandidates:[], newHijackRemote:'', addingHijackRemote:false, uploadHijackEnabled:false, hijackLoadedAt:0, showHijackPanel:false, lastSpaceAt:0, filterText:'', filterStatus:{detect:'all', upload:'all'}, statusFilters:{detect:[{id:'all',label:'全部'},{id:'active',label:'进行中',statuses:['pending','processing']},{id:'dirty',label:'已拦截',statuses:['dirty']},{id:'failed',label:'出错/停止',statuses:['error','cancelled']}], upload:[{id:'all',label:'全部'},{id:'active',label:'进行中',statuses:['pending_upload','uploading']},{id:'done',label:'已完成',statuses:['uploaded']},{id:'failed',label:'出错/停止',statuses:['error','cancelled','dirty']}]},  selectedTaskIds:[], aria2Stats:{active:0, waiting:0, stopped:0, downloadSpeed:0}, statusText:{'pending':'⏳ 等待中','processing':'🔄 检测中','pending_upload':'✅ 待上传','uploading':'☁️ 上传中','uploaded':'🎉 已完成','dirty':'🚫 已拦截','error':'❌ 出错了','cancelled':'⏹ 已停止'}, toastMsg:'', toastClass:'bg-primary', toastIcon:'bi-info-circle', confirmMsg:'', confirmCallback:null, pollTimer: null }},
     computed: {
-        filteredSystemLogs() { if(!this.sysLogs)return[]; const l=this.sysLogs.split('\n'); if(!this.sysLogFilter.trim())return l; const k=this.sysLogFilter.toLowerCase(); return l.filter(x=>x.toLowerCase().includes(k)) },
+        filteredSystemLogs() { if(!this.sysLogs)return[]; const lines=this.sysLogs.split('\n'); const html=this.fmtLines(lines, l=>{ const m=l.match(/\[Task-(\d+)\]/); return m?m[1]:'' }); const rows=lines.map((line,i)=>({line, html:html[i]})); if(!this.sysLogFilter.trim())return rows; const k=this.sysLogFilter.toLowerCase(); return rows.filter(r=>r.line.toLowerCase().includes(k)) },
         detectTasks() { return this.tasks.filter(t => !this.isUploadTask(t)) },
         uploadTasks() { return this.tasks.filter(t => this.isUploadTask(t)) },
         activeDetectCount() { return this.tasks.filter(t => t.status === 'processing').length },
@@ -512,16 +512,22 @@ Vue.createApp({
             const parts=text.match(/[^。！？!?；;…]+[。！？!?；;…]*|[。！？!?；;…]+/g)||[text];
             return parts.map(p=>{ const n=this.normScan(p); return nkws.some(k=>n.includes(k))?'<span class="log-hit">'+this.escHtml(p)+'</span>':this.escHtml(p) }).join('');
         },
-        fmt(l){
-            if(!l) return '';
-            let kws=[];
-            return String(l).split('\n').map(line=>{
+        // 违规识别文本中含命中关键词的句子标红；keyOf 把交错的多任务日志按任务分开记关键词
+        fmtLines(lines, keyOf){
+            const kwsBy={};
+            return lines.map(line=>{
+                const key=keyOf?keyOf(line):'';
                 const m=line.match(/\[音频违规\] 命中: (.+)$/);
-                if(m){ kws=m[1].split(', ').map(s=>s.trim()).filter(Boolean); return this.escHtml(line) }
+                if(m){ kwsBy[key]=m[1].split(', ').map(s=>s.trim()).filter(Boolean); return this.escHtml(line) }
+                const kws=kwsBy[key]||[];
                 const i=line.indexOf(' 内容: ');
                 if(kws.length && i>=0 && line.includes('[违规]')) return this.escHtml(line.slice(0,i+5))+this.markHitSentences(line.slice(i+5), kws);
                 return this.escHtml(line);
-            }).join('<br>');
+            });
+        },
+        fmt(l){
+            if(!l) return '';
+            return this.fmtLines(String(l).split('\n')).join('<br>');
         },
         audioDotCount(t) {
             const states = t.config && t.config._audio_segments;
