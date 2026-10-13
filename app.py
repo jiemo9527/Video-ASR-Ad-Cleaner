@@ -1148,6 +1148,215 @@ def download_stall_worker():
         time.sleep(DOWNLOAD_STALL_POLL_SECONDS)
 
 
+# 磁盘空间强制保护（始终开启，没有开关）：下载中任务还要写入的体积之和 >= 下载盘剩余空间时，
+# 强制暂停全部下载（下载中 + 排队），直到条件不再满足才恢复由它暂停的任务。
+# 保护期间被手动开始或新加入的任务会在下一轮再次被暂停。
+# 由它暂停的 GID 写入 Config(sys_disk_guard)，Scanner 重启后仍能按原样恢复。
+DISK_GUARD_POLL_SECONDS = 5
+DISK_GUARD_CONFIG_KEY = 'sys_disk_guard'
+DISK_GUARD_FIELDS = ['gid', 'status', 'totalLength', 'completedLength']
+DISK_GUARD_BLOCKED_METHODS = ('aria2.unpause', 'aria2.unpauseAll')
+disk_guard_lock = threading.Lock()
+
+
+def new_disk_guard_state() -> dict:
+    # paused: 由保护暂停、待恢复的 GID（按恢复顺序）；downloading: 其中暂停时正在下载的 GID
+    return {'loaded': False, 'engaged': False, 'paused': [], 'downloading': [],
+            'need': 0, 'free': None, 'since': None}
+
+
+disk_guard_state = new_disk_guard_state()
+
+
+def aria2_remaining_bytes(entry):
+    """任务还需写入磁盘的字节数；大小未知（如未取到元数据的磁力）按 0 计。"""
+    try:
+        total = int((entry or {}).get('totalLength') or 0)
+        completed = int((entry or {}).get('completedLength') or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, total - completed) if total > 0 else 0
+
+
+def load_disk_guard_state():
+    with disk_guard_lock:
+        if disk_guard_state['loaded']:
+            return
+    data = {}
+    try:
+        row = db.session.get(Config, DISK_GUARD_CONFIG_KEY)
+        data = json.loads(row.value) if row and row.value else {}
+    except Exception:
+        safe_db_rollback('disk_guard_load')
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    with disk_guard_lock:
+        disk_guard_state['engaged'] = bool(data.get('engaged'))
+        disk_guard_state['paused'] = [str(g) for g in data.get('paused') or [] if g]
+        disk_guard_state['downloading'] = [str(g) for g in data.get('downloading') or [] if g]
+        disk_guard_state['since'] = data.get('since')
+        disk_guard_state['loaded'] = True
+
+
+def save_disk_guard_state():
+    with disk_guard_lock:
+        value = json.dumps({key: disk_guard_state[key] for key in ('engaged', 'paused', 'downloading', 'since')})
+    try:
+        row = db.session.get(Config, DISK_GUARD_CONFIG_KEY) or Config(key=DISK_GUARD_CONFIG_KEY)
+        row.value = value
+        db.session.add(row)
+    except Exception as e:
+        safe_db_rollback('disk_guard_save')
+        print(f"⚠️ 保存磁盘保护状态失败: {e}")
+        return
+    safe_db_commit('disk_guard_save')
+
+
+def disk_guard_status():
+    with disk_guard_lock:
+        return {'engaged': disk_guard_state['engaged'], 'need': disk_guard_state['need'],
+                'free': disk_guard_state['free'], 'since': disk_guard_state['since'],
+                'paused_count': len(disk_guard_state['paused'])}
+
+
+def disk_guard_paused_gids():
+    with disk_guard_lock:
+        return set(disk_guard_state['paused']) if disk_guard_state['engaged'] else set()
+
+
+def list_aria2_waiting(fields):
+    entries = []
+    offset = 0
+    while True:
+        batch = call_aria2_rpc('aria2.tellWaiting', [offset, 1000, fields]) or []
+        entries.extend(e for e in batch if isinstance(e, dict) and e.get('gid'))
+        if len(batch) < 1000:
+            return entries
+        offset += 1000
+
+
+def force_pause_aria2(entries):
+    """逐个 forcePause，返回成功暂停的 GID（保持传入顺序）。"""
+    paused = []
+    for entry in entries:
+        gid = str(entry.get('gid'))
+        try:
+            call_aria2_rpc('aria2.forcePause', [gid])
+        except RuntimeError as e:
+            print(f"⚠️ 磁盘保护暂停失败 {gid}: {e}")
+            continue
+        paused.append(gid)
+    return paused
+
+
+def enforce_disk_guard():
+    """执行一轮磁盘空间保护检查，返回当前状态。
+
+    下载中任务剩余待写入体积之和（需要 > 0）>= 剩余磁盘空间时暂停全部下载；
+    保护期间以「暂停时正在下载 + 当前仍在下载」的任务计算，空间够用后恢复它暂停的任务。
+    磁盘或 Aria2 读取失败时保持现状，下一轮再判断。
+    """
+    load_disk_guard_state()
+    disk = get_disk_usage_info(str(get_final_config(None).get('scan_path') or ''))
+    free = disk.get('free')
+    active = [e for e in call_aria2_rpc('aria2.tellActive', [DISK_GUARD_FIELDS]) or []
+              if isinstance(e, dict) and e.get('gid') and e.get('status', 'active') == 'active']
+    if free is None:
+        return disk_guard_status()
+
+    with disk_guard_lock:
+        engaged = disk_guard_state['engaged']
+        paused = list(disk_guard_state['paused'])
+        downloading = list(disk_guard_state['downloading'])
+
+    if not engaged:
+        need = sum(aria2_remaining_bytes(e) for e in active)
+        with disk_guard_lock:
+            disk_guard_state['need'], disk_guard_state['free'] = need, free
+        if need <= 0 or need < free:
+            return disk_guard_status()
+        waiting = [e for e in list_aria2_waiting(DISK_GUARD_FIELDS) if e.get('status') == 'waiting']
+        paused_now = force_pause_aria2(active + waiting)
+        active_gids = {str(e['gid']) for e in active}
+        with disk_guard_lock:
+            disk_guard_state['engaged'] = True
+            disk_guard_state['paused'] = paused_now
+            disk_guard_state['downloading'] = [g for g in paused_now if g in active_gids]
+            disk_guard_state['since'] = time.time()
+        save_disk_guard_state()
+        print(f"🛑 磁盘空间不足：下载中任务还需 {need / 1073741824:.2f}GB，剩余 {free / 1073741824:.2f}GB，"
+              f"已强制暂停 {len(paused_now)} 个下载任务")
+        return disk_guard_status()
+
+    waiting = list_aria2_waiting(DISK_GUARD_FIELDS)
+    by_gid = {str(e['gid']): e for e in waiting + active}
+    counted = [g for g in downloading if g in by_gid]
+    counted += [str(e['gid']) for e in active if str(e['gid']) not in counted]
+    need = sum(aria2_remaining_bytes(by_gid[g]) for g in counted)
+    with disk_guard_lock:
+        disk_guard_state['need'], disk_guard_state['free'] = need, free
+
+    if need > 0 and need >= free:
+        # 仍然不足：把保护期间被开始或新加入的任务也暂停
+        escaped = active + [e for e in waiting if e.get('status') == 'waiting']
+        if escaped:
+            again = force_pause_aria2(escaped)
+            active_gids = {str(e['gid']) for e in active}
+            changed = False
+            with disk_guard_lock:
+                for gid in again:
+                    if gid not in disk_guard_state['paused']:
+                        disk_guard_state['paused'].append(gid)
+                        changed = True
+                    if gid in active_gids and gid not in disk_guard_state['downloading']:
+                        disk_guard_state['downloading'].append(gid)
+                        changed = True
+            if changed:
+                save_disk_guard_state()
+        return disk_guard_status()
+
+    resumed = 0
+    for gid in paused:
+        entry = by_gid.get(gid)
+        if not entry or entry.get('status') != 'paused':
+            continue
+        try:
+            call_aria2_rpc('aria2.unpause', [gid])
+            resumed += 1
+        except RuntimeError as e:
+            print(f"⚠️ 磁盘保护恢复失败 {gid}: {e}")
+    with disk_guard_lock:
+        disk_guard_state.update({'engaged': False, 'paused': [], 'downloading': [], 'since': None})
+    save_disk_guard_state()
+    print(f"▶️ 磁盘空间已足够（还需 {need / 1073741824:.2f}GB，剩余 {free / 1073741824:.2f}GB），"
+          f"已恢复 {resumed} 个下载任务")
+    return disk_guard_status()
+
+
+def disk_guard_blocked_response(command):
+    """保护期间拒绝 Dashboard 发出的开始请求，避免任务刚开始就被再次暂停。"""
+    if not isinstance(command, dict) or command.get('method') not in DISK_GUARD_BLOCKED_METHODS:
+        return None
+    status = disk_guard_status()
+    if not status['engaged']:
+        return None
+    return {'jsonrpc': '2.0', 'id': command.get('id'),
+            'error': {'code': 1, 'message': '磁盘空间不足，下载已被强制暂停，空间足够后会自动恢复'}}
+
+
+def disk_guard_worker():
+    while True:
+        try:
+            with app.app_context():
+                enforce_disk_guard()
+        except RuntimeError:
+            pass
+        except Exception as e:
+            print(f"⚠️ 磁盘空间保护检查失败: {e}")
+        time.sleep(DISK_GUARD_POLL_SECONDS)
+
+
 def get_next_persistent_id():
     c = Config.query.filter_by(key='sys_task_counter').first()
     if not c:
@@ -2120,6 +2329,12 @@ def plan_aria2_rpc_command(command):
     if not isinstance(command, dict):
         return plan
 
+    blocked = disk_guard_blocked_response(command)
+    if blocked:
+        plan['forward'] = None
+        plan['response'] = blocked
+        return plan
+
     method = command.get('method')
     if method == 'system.multicall':
         args = strip_aria2_rpc_token(command.get('params'))
@@ -2162,6 +2377,8 @@ def plan_aria2_rpc_command(command):
 
 
 def build_local_rpc_response(command, plan):
+    if plan.get('response'):
+        return plan['response']
     command_id = command.get('id') if isinstance(command, dict) else None
     multicall = plan.get('multicall')
     if multicall and plan.get('forward') is None:
@@ -2537,13 +2754,16 @@ def aria2_task_list():
             tasks = [task for task in tasks if task.get('status') != 'active']
         tasks = attach_aria2_file_summaries([slim_aria2_task(task) for task in tasks])
         if list_id == 'waiting':
+            guard_gids = disk_guard_paused_gids()
             with download_stall_lock:
                 for task in tasks:
                     if task.get('status') == 'paused' and task.get('gid') in download_stall_paused:
                         task['stallPaused'] = True
+                    if task.get('status') == 'paused' and task.get('gid') in guard_gids:
+                        task['diskGuardPaused'] = True
     except (requests.RequestException, ValueError, RuntimeError) as e:
         return jsonify({'code': 502, 'msg': f'无法读取 Aria2 任务: {e}'}), 502
-    return jsonify({'code': 200, 'stat': stat, 'tasks': tasks})
+    return jsonify({'code': 200, 'stat': stat, 'tasks': tasks, 'disk_guard': disk_guard_status()})
 
 
 @app.route('/api/trigger', methods=['POST'])
@@ -2678,7 +2898,7 @@ def get_tasks():
 @login_required
 def server_info():
     disk = get_disk_usage_info(str(get_final_config(None).get('scan_path') or ''))
-    return jsonify({"ip": get_masked_server_ip(), "disk": disk})
+    return jsonify({"ip": get_masked_server_ip(), "disk": disk, "disk_guard": disk_guard_status()})
 
 
 @app.route('/api/tasks/batch', methods=['POST'])
@@ -3006,7 +3226,7 @@ def cancel(tid):
 @login_required
 def settings():
     if request.method == 'POST':
-        data = dict(request.json or {})
+        data = {k: v for k, v in dict(request.json or {}).items() if not str(k).startswith('sys_')}  # 系统内部状态不能经设置接口修改
         normalize_cloud_api_key_config(data)
         for k, v in data.items():
             if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "cloud_asr_proxy_enabled", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample",
@@ -3398,4 +3618,5 @@ if __name__ == '__main__':
     threading.Thread(target=orphan_reconcile_worker, daemon=True).start()
     threading.Thread(target=discard_download_worker, daemon=True).start()
     threading.Thread(target=download_stall_worker, daemon=True).start()
+    threading.Thread(target=disk_guard_worker, daemon=True).start()
     app.run(host=os.environ.get('SCANNER_HOST', '127.0.0.1'), port=int(os.environ.get('SCANNER_PORT', '5000')))
