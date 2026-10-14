@@ -96,6 +96,15 @@ try:
   assert all(set(g)=={'origin','token','expiresAt'} for g in grants.values())
   assert page.evaluate('sessionStorage.length')==0
   print('PASS: refresh restores four scoped grants, no login popup or stored credentials')
+  # Desktop: all four online nodes plus page chrome fit in one screen without scrolling.
+  for w,h in ((1920,940),(1440,800),(1366,680)):
+   page.set_viewport_size({'width':w,'height':h})
+   page.wait_for_timeout(50)
+   dims=page.evaluate('({sh:document.documentElement.scrollHeight,ih:innerHeight,sw:document.documentElement.scrollWidth,iw:innerWidth})')
+   assert dims['sh']<=dims['ih'] and dims['sw']<=dims['iw'], (w,h,dims)
+  page.set_viewport_size({'width':1440,'height':800})
+  assert_open_node_size()
+  print('PASS: four nodes fit one desktop screen at 1920x940, 1440x800, 1366x680')
   page.screenshot(path=str(Path(tempfile.gettempdir())/'panel-desktop.png'),full_page=True)
   page.set_viewport_size({'width':390,'height':844})
   assert_open_node_size()
