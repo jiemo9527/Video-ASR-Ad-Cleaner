@@ -340,8 +340,8 @@ def get_final_config(overrides_json=None):
         "cleanup_scanner_history": True,
         "cleanup_scanner_uploaded": True, "cleanup_scanner_dirty": True,
         "cleanup_scanner_error": True, "cleanup_scanner_cancelled": True,
-        "cleanup_detect_dirty": True, "cleanup_detect_error": True, "cleanup_detect_cancelled": True,
-        "cleanup_upload_uploaded": True, "cleanup_upload_error": True, "cleanup_upload_cancelled": True,
+        "cleanup_detect_dirty": False, "cleanup_detect_error": False, "cleanup_detect_cancelled": False,
+        "cleanup_upload_uploaded": True, "cleanup_upload_error": False, "cleanup_upload_cancelled": False,
         "cleanup_aria2_completed": True,
         "discard_images": True, "discard_nfo": True,
         "discard_extra_extensions": "",
@@ -3492,12 +3492,12 @@ def update_keyword(kid):
 def clear_tasks():
     cleanup_config = get_final_config(None)
     scanner_cleanup_rules = {
-        ('detect', 'dirty'): cleanup_config.get('cleanup_detect_dirty', True),
-        ('detect', 'error'): cleanup_config.get('cleanup_detect_error', True),
-        ('detect', 'cancelled'): cleanup_config.get('cleanup_detect_cancelled', True),
+        ('detect', 'dirty'): cleanup_config.get('cleanup_detect_dirty', False),
+        ('detect', 'error'): cleanup_config.get('cleanup_detect_error', False),
+        ('detect', 'cancelled'): cleanup_config.get('cleanup_detect_cancelled', False),
         ('upload', 'uploaded'): cleanup_config.get('cleanup_upload_uploaded', True),
-        ('upload', 'error'): cleanup_config.get('cleanup_upload_error', True),
-        ('upload', 'cancelled'): cleanup_config.get('cleanup_upload_cancelled', True),
+        ('upload', 'error'): cleanup_config.get('cleanup_upload_error', False),
+        ('upload', 'cancelled'): cleanup_config.get('cleanup_upload_cancelled', False),
     }
     clean_aria2 = cleanup_config.get('cleanup_aria2_completed', True)
     if not any(scanner_cleanup_rules.values()) and not clean_aria2:

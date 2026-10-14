@@ -169,8 +169,8 @@ Common settings:
 - `cloud_asr_proxy`: optional proxy URL used only for cloud ASR audio upload requests when `cloud_asr_proxy_enabled` is true. Supports `http://user:pass@host:port` and `socks5h://user:pass@host:port` formats when SOCKS support is installed.
 - Cloud ASR proxy changes do not require a service restart. New tasks use the saved setting immediately, and running audio tasks refresh only the proxy fields before each cloud upload request. A request that is already in flight keeps the proxy it started with.
 - `scan_path`, `rclone_remote`: local download root and default remote.
-- `cleanup_detect_dirty`, `cleanup_detect_error`, `cleanup_detect_cancelled`: independently control removal of intercepted, errored, and cancelled records from the detection queue. All default to `true`.
-- `cleanup_upload_uploaded`, `cleanup_upload_error`, `cleanup_upload_cancelled`: independently control removal of completed, errored, and cancelled records from the upload queue. All default to `true`.
+- `cleanup_detect_dirty`, `cleanup_detect_error`, `cleanup_detect_cancelled`: independently control removal of intercepted, errored, and cancelled records from the detection queue. All default to `false`.
+- `cleanup_upload_uploaded`, `cleanup_upload_error`, `cleanup_upload_cancelled`: independently control removal of completed, errored, and cancelled records from the upload queue. Only `cleanup_upload_uploaded` defaults to `true`; together with `cleanup_aria2_completed` the two "已完成" items are the only cleanup defaults.
 - `cleanup_scanner_uploaded`, `cleanup_scanner_dirty`, `cleanup_scanner_error`, `cleanup_scanner_cancelled`: legacy global cleanup keys retained only to migrate existing saved settings into the queue-specific choices.
 - `cleanup_aria2_completed`: controls whether Dashboard `清空历史` removes Aria2 `complete` result records. Default is `true`; failed and removed Aria2 records are always retained.
 - `cleanup_scanner_history`: legacy compatibility key. When present without any legacy per-status or queue-specific key, it supplies the initial value for all Scanner cleanup statuses.
