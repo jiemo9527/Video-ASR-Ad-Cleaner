@@ -44,6 +44,7 @@ try:
   page=ctx.new_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
   page.goto(origin+'/spd')
   assert page.locator('.node').count()==4,'Missing four-node overview'
+  assert page.locator('.links a[target="_blank"]').count()==0, 'Open-node links must stay in the current tab'
   assert page.locator('.node.online').count()==0
   page.evaluate("window.postMessage({type:'scanner-monitor-grant',state:'fake',token:'fake',expiresAt:Date.now()+100000},location.origin)")
   page.wait_for_timeout(150)
