@@ -159,9 +159,11 @@ Cross-site multi-node monitoring:
   grants/signatures remain compatible; their former expiry timestamps are ignored.
   A 401 response removes the saved grant; network failures retain it. Disabled storage falls
   back to in-memory authorization with a warning. Grants never appear in URL parameters.
-- The static overview displays only ten per-node metrics: active downloads, waiting/paused downloads,
-  failed downloads, running detection, detection exceptions (`dirty`/`error`/`cancelled`), running uploads,
-  upload exceptions (`error`/`cancelled`), download/upload speed, and free/total disk space. It does not render
+- The static overview displays only twelve per-node metrics, grouped into 下载/检测/上传 stages
+  (running, waiting, exception each): active downloads, waiting/paused downloads, failed downloads,
+  running/pending (`pending`)/exception (`dirty`/`error`/`cancelled`) detection, running/pending
+  (`pending_upload`)/exception (`error`/`cancelled`) uploads, plus download/upload speed and free/total
+  disk space with a usage bar. It does not render
   task details. Download errors count only `error` results from all pages of Aria2 `tellStopped`; completed
   and removed results are excluded. Incomplete/invalid RPC reads are unknown, never zero; offline node
   metrics show dashes instead of stale values.

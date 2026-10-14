@@ -30,6 +30,9 @@ with scanner.app.app_context():
  db.session.add(User(id='browser-test',password_hash=generate_password_hash('test-only-password')))
  db.session.add(Task(filename='<img src=x onerror=alert(1)>.mkv',filepath='/missing/movie.mkv',status='processing',progress=61,overrides=json.dumps({'_audio_segments':{'01片头':{'status':'passed'},'02片尾':{'status':'failed'}}})))
  db.session.add(Task(filename='upload.mkv',filepath='/missing/upload.mkv',status='uploading',progress=45,upload_speed='5 MiB/s',upload_eta='10s'))
+ db.session.add(Task(filename='queued-detect.mkv',filepath='/missing/queued.mkv',status='pending'))
+ for i in range(2):
+  db.session.add(Task(filename=f'queued-upload-{i}.mkv',filepath='/missing/queued-upload.mkv',status='pending_upload'))
  for status in ('dirty','error','cancelled'):
   db.session.add(Task(filename='detect-'+status,filepath='/missing/detect',status=status))
  for status in ('error','cancelled'):
@@ -50,6 +53,12 @@ try:
   page.goto(origin+'/spd')
   assert page.locator('.node').count()==4,'Missing four-node overview'
   assert page.locator('.links a[target="_blank"]').count()==0, 'Open-node links must stay in the current tab'
+  def assert_open_node_size():
+   for link in page.locator('.links a').all():
+    box=link.bounding_box()
+    assert box['height']>=44 and box['width']>=100, 'Open-node buttons need a larger click target'
+    assert float(link.evaluate('e=>parseFloat(getComputedStyle(e).fontSize)'))>=14
+  assert_open_node_size()
   assert page.locator('.node.online').count()==0
   page.evaluate("window.postMessage({type:'scanner-monitor-grant',state:'fake',token:'fake',expiresAt:Date.now()+100000},location.origin)")
   page.wait_for_timeout(150)
@@ -64,15 +73,18 @@ try:
   page.locator('[data-node="nc"].online').wait_for(timeout=15000)
   card=page.locator('[data-node="nc"]')
   assert card.locator('.task, .dot, .queue').count()==0
-  assert card.locator('.metric-label').all_text_contents()==['下载中','下载等待/暂停中','下载异常','检测中','检测异常','上传中','上传异常','下载速度','上传速度','磁盘空间']
-  assert card.locator('.metric-value').all_text_contents()[:7]==['1 个','2 个','1 个','1 个','3 个','1 个','2 个']
+  assert card.locator('.stage-title').all_text_contents()==['下载','检测','上传']
+  assert card.locator('.metric-label').all_text_contents()==['下载中','等待/暂停','异常','检测中','等待','异常','上传中','等待','异常','下载速度','上传速度','磁盘空间']
+  values=card.locator('.metric-value').all_text_contents()
+  assert values[:9]==['1','2','1','1','1','3','1','2','2'], values
+  assert card.locator('.stage .bad').count()==3
   assert 'upload.mkv' not in card.inner_text()
   assert 'ETA' not in card.inner_text()
   for node in ('hd','gb1','gb2'):
    with page.expect_popup():page.locator(f'[data-node="{node}"] button').first.click()
    page.locator(f'[data-node="{node}"].online').wait_for(timeout=15000)
   assert page.locator('.node.online').count()==4
-  print('PASS: login popup, reuse first-party login, four independent grants, real CORS fetch, only ten summary metrics')
+  print('PASS: login popup, reuse first-party login, four independent grants, real CORS fetch, grouped twelve summary metrics')
   # Refresh must restore all grants without opening any login windows.
   popup_events=[]
   page.on('popup', lambda popup: popup_events.append(popup))
@@ -86,6 +98,7 @@ try:
   print('PASS: refresh restores four scoped grants, no login popup or stored credentials')
   page.screenshot(path=str(Path(tempfile.gettempdir())/'panel-desktop.png'),full_page=True)
   page.set_viewport_size({'width':390,'height':844})
+  assert_open_node_size()
   assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
   page.screenshot(path=str(Path(tempfile.gettempdir())/'panel-mobile.png'),full_page=True)
   # Invalidate one grant only; other nodes keep showing data.
@@ -97,7 +110,7 @@ try:
   page.route(urls[2]+'/api/monitor/snapshot',lambda route:route.abort())
   page.locator('#refresh').click();page.locator('[data-node="gb1"].offline').wait_for(timeout=15000)
   assert page.locator('[data-node="gb1"].stale').count()==1
-  assert page.locator('[data-node="gb1"] .metric-value').all_text_contents()==['—']*10
+  assert page.locator('[data-node="gb1"] .metric-value').all_text_contents()==['—']*12
   page.locator('[data-node="gb2"] button',has_text='断开').click()
   assert page.locator('[data-node="gb2"].login').count()==1
   assert 'hd' not in page.evaluate("JSON.parse(localStorage.getItem('scanner.monitorGrants.v1'))")
