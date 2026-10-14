@@ -152,8 +152,12 @@ Cross-site multi-node monitoring:
   and a random state. This works without third-party cookies and never copies login cookies
   or passwords into the overview. Existing first-party sessions can be reused.
 - Grants expire after 8 hours and become invalid when the account is deleted or its password
-  changes. Ordinary logout does not revoke an issued grant; disconnecting the overview forgets
-  its in-memory grant. No grants are stored in localStorage/sessionStorage or URL parameters.
+  changes. Ordinary logout does not revoke an issued grant; disconnecting the overview removes
+  that node's grant from both memory and browser localStorage. The static overview remembers only
+  origin-bound grants and expiry (not passwords/Cookies/data) in `scanner.monitorGrants.v1`,
+  validates origin/expiry on load and automatically reconnects after refresh or reopening.
+  A 401 response removes the saved grant; network failures retain it. Disabled storage falls
+  back to in-memory authorization with a warning. Grants never appear in URL parameters.
 - Snapshots allowlist filenames, status, progress, upload speed/ETA, audio segment name/status,
   queue counts and disk/Aria2 stats. No settings, ASR transcripts, task logs, local paths, download
   URIs, Cookies or secrets. Each queue returns at most 12 rows, running jobs first, while counts

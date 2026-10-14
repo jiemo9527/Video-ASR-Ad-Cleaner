@@ -66,8 +66,17 @@ try:
    page.locator(f'[data-node="{node}"].online').wait_for(timeout=15000)
   assert page.locator('.node.online').count()==4
   print('PASS: login popup, reuse first-party login, four independent grants, real CORS fetch, progress/segments, escaped filenames')
-  assert page.evaluate('localStorage.length')==0
+  # Refresh must restore all grants without opening any login windows.
+  popup_events=[]
+  page.on('popup', lambda popup: popup_events.append(popup))
+  page.reload()
+  page.wait_for_function("document.querySelectorAll('.node.online').length === 4", timeout=10000)
+  assert not popup_events, 'Refresh must not prompt for login again'
+  grants=page.evaluate("JSON.parse(localStorage.getItem('scanner.monitorGrants.v1'))")
+  assert len(grants)==4
+  assert all(set(g)=={'origin','token','expiresAt'} for g in grants.values())
   assert page.evaluate('sessionStorage.length')==0
+  print('PASS: refresh restores four scoped grants, no login popup or stored credentials')
   page.screenshot(path=str(Path(tempfile.gettempdir())/'panel-desktop.png'),full_page=True)
   page.set_viewport_size({'width':390,'height':844})
   assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
@@ -83,8 +92,40 @@ try:
   assert page.locator('[data-node="gb1"].stale').count()==1
   page.locator('[data-node="gb2"] button',has_text='断开').click()
   assert page.locator('[data-node="gb2"].login').count()==1
+  assert 'hd' not in page.evaluate("JSON.parse(localStorage.getItem('scanner.monitorGrants.v1'))")
+  assert 'gb2' not in page.evaluate("JSON.parse(localStorage.getItem('scanner.monitorGrants.v1'))")
+  # A newly opened page uses the same grants, no authentication popup needed.
+  reopened=ctx.new_page()
+  reopened.goto(origin+'/spd')
+  reopened.locator('[data-node="nc"].online').wait_for(timeout=10000)
+  assert reopened.locator('[data-node="hd"].login').count()==1
+  assert reopened.locator('[data-node="gb2"].login').count()==1
+  reopened.close()
+  # Expired and wrong-origin stored grants are rejected on reload.
+  page.evaluate("""() => {
+    const key='scanner.monitorGrants.v1', grants=JSON.parse(localStorage.getItem(key));
+    grants.nc.expiresAt=Date.now()-1;
+    grants.gb1.origin='https://wrong.example';
+    localStorage.setItem(key,JSON.stringify(grants));
+  }""")
+  page.reload()
+  assert page.locator('.node.login').count()==4
+  assert page.evaluate("localStorage.getItem('scanner.monitorGrants.v1')") is None
+  page.evaluate("localStorage.setItem('scanner.monitorGrants.v1','{broken-json')")
+  page.reload()
+  assert page.locator('.node.login').count()==4
+  # Disabled browser storage must still allow login in this page, with an honest warning.
+  blocked=ctx.new_page()
+  blocked.add_init_script("""for(const method of ['getItem','setItem','removeItem']) {
+    Storage.prototype[method]=()=>{throw new DOMException('Blocked','SecurityError')};
+  }""")
+  blocked.goto(origin+'/spd')
+  with blocked.expect_popup():blocked.locator('[data-node="nc"] button').first.click()
+  blocked.locator('[data-node="nc"].online').wait_for(timeout=10000)
+  assert '禁止存储' in blocked.locator('#summary').inner_text()
+  blocked.close()
   assert not errors,errors
-  print('PASS: no stored tokens, mobile width, expiry isolation, offline stale data, disconnect, no JS errors')
+  print('PASS: mobile width, 401 clears saved grant, disconnect stays disconnected, reopening restores, expired/mismatched/corrupt grants removed, blocked storage fallback, no JS errors')
   print('screenshots:',str(Path(tempfile.gettempdir())/'panel-desktop.png'),str(Path(tempfile.gettempdir())/'panel-mobile.png'))
   browser.close()
 finally:

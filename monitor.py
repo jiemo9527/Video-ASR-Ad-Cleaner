@@ -1,7 +1,8 @@
 """Login-authorized, read-only monitoring for cross-site static dashboards.
 
 Credentials/cookies stay on each Scanner origin. A popup grants a short-lived,
-origin-bound capability to a trusted overview page, held only in that page's memory.
+origin-bound capability to a trusted overview page. The page can retain the grant
+in browser storage until expiry without receiving credentials or login cookies.
 """
 import os
 import hashlib
