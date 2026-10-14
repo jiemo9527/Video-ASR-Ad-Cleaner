@@ -330,9 +330,11 @@
 
 <script>
 let modalConfig, modalLog, modalConfirm, toastInstance;
+const VIEW_STORAGE_KEY = 'scanner.dashboardView';
+function loadSavedView(){ try { const v = localStorage.getItem(VIEW_STORAGE_KEY); if(['aria2','detect','upload','syslog'].includes(v)) return v } catch(e) {} return 'detect' }
 Vue.createApp({
     delimiters: ['[[', ']]'],
-    data(){ return { tasks:[], serverIp:{{ server_ip|tojson }}, serverDisk:{path:'', total:null, used:null, free:null}, diskGuard:{engaged:false, need:0, free:0, paused_count:0}, view:'detect', curTask:{}, sysLogs:'', sysLogFilter:'', autoRefreshLogs:true, currentLogTitle:'', currentLogContent:'', uploadHijackRemote:'', uploadHijackCandidates:[], newHijackRemote:'', addingHijackRemote:false, uploadHijackEnabled:false, hijackLoadedAt:0, showHijackPanel:false, lastSpaceAt:0, filterText:'', filterStatus:{detect:'all', upload:'all'}, statusFilters:{detect:[{id:'all',label:'全部'},{id:'active',label:'进行中',statuses:['pending','processing']},{id:'dirty',label:'已拦截',statuses:['dirty']},{id:'failed',label:'出错/停止',statuses:['error','cancelled']}], upload:[{id:'all',label:'全部'},{id:'active',label:'进行中',statuses:['pending_upload','uploading']},{id:'done',label:'已完成',statuses:['uploaded']},{id:'failed',label:'出错/停止',statuses:['error','cancelled','dirty']}]},  selectedTaskIds:[], aria2Stats:{active:0, waiting:0, stopped:0, downloadSpeed:0}, statusText:{'pending':'⏳ 等待中','processing':'🔄 检测中','pending_upload':'✅ 待上传','uploading':'☁️ 上传中','uploaded':'🎉 已完成','dirty':'🚫 已拦截','error':'❌ 出错了','cancelled':'⏹ 已停止'}, toastMsg:'', toastClass:'bg-primary', toastIcon:'bi-info-circle', confirmMsg:'', confirmCallback:null, pollTimer: null }},
+    data(){ return { tasks:[], serverIp:{{ server_ip|tojson }}, serverDisk:{path:'', total:null, used:null, free:null}, diskGuard:{engaged:false, need:0, free:0, paused_count:0}, view:loadSavedView(), curTask:{}, sysLogs:'', sysLogFilter:'', autoRefreshLogs:true, currentLogTitle:'', currentLogContent:'', uploadHijackRemote:'', uploadHijackCandidates:[], newHijackRemote:'', addingHijackRemote:false, uploadHijackEnabled:false, hijackLoadedAt:0, showHijackPanel:false, lastSpaceAt:0, filterText:'', filterStatus:{detect:'all', upload:'all'}, statusFilters:{detect:[{id:'all',label:'全部'},{id:'active',label:'进行中',statuses:['pending','processing']},{id:'dirty',label:'已拦截',statuses:['dirty']},{id:'failed',label:'出错/停止',statuses:['error','cancelled']}], upload:[{id:'all',label:'全部'},{id:'active',label:'进行中',statuses:['pending_upload','uploading']},{id:'done',label:'已完成',statuses:['uploaded']},{id:'failed',label:'出错/停止',statuses:['error','cancelled','dirty']}]},  selectedTaskIds:[], aria2Stats:{active:0, waiting:0, stopped:0, downloadSpeed:0}, statusText:{'pending':'⏳ 等待中','processing':'🔄 检测中','pending_upload':'✅ 待上传','uploading':'☁️ 上传中','uploaded':'🎉 已完成','dirty':'🚫 已拦截','error':'❌ 出错了','cancelled':'⏹ 已停止'}, toastMsg:'', toastClass:'bg-primary', toastIcon:'bi-info-circle', confirmMsg:'', confirmCallback:null, pollTimer: null }},
     computed: {
         filteredSystemLogs() { if(!this.sysLogs)return[]; const lines=this.sysLogs.split('\n'); const html=this.fmtLines(lines, l=>{ const m=l.match(/\[Task-(\d+)\]/); return m?m[1]:'' }); const rows=lines.map((line,i)=>({line, html:html[i]})); if(!this.sysLogFilter.trim())return rows; const k=this.sysLogFilter.toLowerCase(); return rows.filter(r=>r.line.toLowerCase().includes(k)) },
         detectTasks() { return this.tasks.filter(t => !this.isUploadTask(t)) },
@@ -350,6 +352,7 @@ Vue.createApp({
         this.loadAria2Stats();
         this.loadUploadRemoteHijack();
         this.startPolling();
+        if(this.view==='syslog')this.loadSysLogs();
         setInterval(()=>{if(this.view==='syslog'&&this.autoRefreshLogs)this.loadSysLogs(true)}, 5000);
         setInterval(()=>this.loadAria2Stats(), 3000);
         this.loadServerInfo();
@@ -360,7 +363,7 @@ Vue.createApp({
         toastInstance=new bootstrap.Toast(document.getElementById('liveToast'));
         window.addEventListener('keydown', this.onQueueHotkey);
     },
-    watch: { filterText() { this.pruneSelection() }, view(n) { if(n==='syslog') { if(!this.sysLogs)this.loadSysLogs(); this.$nextTick(()=>{ const b=document.getElementById('sysLogBox'); if(b)b.scrollTop=b.scrollHeight }) } if(n==='aria2')this.loadAria2Stats() } },
+    watch: { filterText() { this.pruneSelection() }, view(n) { try { localStorage.setItem(VIEW_STORAGE_KEY, n) } catch(e) {} if(n==='syslog') { if(!this.sysLogs)this.loadSysLogs(); this.$nextTick(()=>{ const b=document.getElementById('sysLogBox'); if(b)b.scrollTop=b.scrollHeight }) } if(n==='aria2')this.loadAria2Stats() } },
     methods:{
         isUploadTask(t) {
             if(['pending_upload', 'uploading', 'uploaded'].includes(t.status)) return true;

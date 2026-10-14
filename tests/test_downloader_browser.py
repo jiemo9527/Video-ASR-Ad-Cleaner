@@ -663,6 +663,24 @@ class DownloaderBrowserTests(unittest.TestCase):
         standalone.wait_for_function("document.querySelector('.toast.show') !== null")
         self.assertIn('aria2.forcePause', self.fake.methods())
 
+    def test_reload_restores_last_tab(self):
+        page = self.open()
+        active = lambda: page.locator('.dashboard-tabs .nav-link.active').inner_text()
+        self.assertIn('下载', active())
+        page.reload()
+        page.locator('.sdl-item').first.wait_for()
+        self.assertIn('下载', active(), 'reload keeps the downloader tab')
+        page.locator('.dashboard-tabs .nav-link', has_text='上传').click()
+        page.reload()
+        page.wait_for_function("document.querySelector('.dashboard-tabs .nav-link.active')?.textContent.includes('上传')")
+        page.locator('.dashboard-tabs .nav-link', has_text='日志').click()
+        page.reload()
+        page.locator('#sysLogBox').wait_for()
+        self.assertIn('日志', active())
+        page.evaluate("localStorage.setItem('scanner.dashboardView', 'bogus')")
+        page.reload()
+        page.wait_for_function("document.querySelector('.dashboard-tabs .nav-link.active')?.textContent.includes('检测')")
+
     def test_mobile_layout_fits_and_is_usable(self):
         for width in (320, 375, 430):
             with self.subTest(width=width):
