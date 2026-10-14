@@ -30,10 +30,15 @@ with scanner.app.app_context():
  db.session.add(User(id='browser-test',password_hash=generate_password_hash('test-only-password')))
  db.session.add(Task(filename='<img src=x onerror=alert(1)>.mkv',filepath='/missing/movie.mkv',status='processing',progress=61,overrides=json.dumps({'_audio_segments':{'01片头':{'status':'passed'},'02片尾':{'status':'failed'}}})))
  db.session.add(Task(filename='upload.mkv',filepath='/missing/upload.mkv',status='uploading',progress=45,upload_speed='5 MiB/s',upload_eta='10s'))
+ for status in ('dirty','error','cancelled'):
+  db.session.add(Task(filename='detect-'+status,filepath='/missing/detect',status=status))
+ for status in ('error','cancelled'):
+  db.session.add(Task(filename='upload-'+status,filepath='/missing/upload',status=status,log='=== 直传 ==='))
  db.session.commit()
 def rpc(calls):
+ if calls[0][0]=='aria2.tellStopped':return [[{'status':'error'},{'status':'removed'},{'status':'complete'}]]
  if calls[0][0]=='aria2.getFiles':return [[{'path':'/downloads/movie.mkv','uris':[{'uri':'SECRET_DOWNLOAD'}]}]]
- return [{'downloadSpeed':'1048576','uploadSpeed':'0','numActive':'1','numWaiting':'2','numStopped':'0'},[{'gid':'a'*16,'status':'active','totalLength':'100','completedLength':'25','downloadSpeed':'1048576'}]]
+ return [{'downloadSpeed':'1048576','uploadSpeed':'0','numActive':'1','numWaiting':'2','numStopped':'3'},[{'gid':'a'*16,'status':'active','totalLength':'100','completedLength':'25','downloadSpeed':'1048576'}]]
 scanner.aria2_multicall=rpc
 for s in servers:threading.Thread(target=s.serve_forever,daemon=True).start()
 threading.Thread(target=panel.serve_forever,daemon=True).start()
@@ -57,15 +62,17 @@ try:
   popup.locator('[name=username]').fill('browser-test');popup.locator('[name=password]').fill('test-only-password')
   popup.locator('button[type=submit]').click()
   page.locator('[data-node="nc"].online').wait_for(timeout=15000)
-  assert page.locator('[data-node="nc"] .task').count()==3
-  assert page.locator('[data-node="nc"] .dot.passed').count()==1
-  assert page.locator('[data-node="nc"] .dot.failed').count()==1
-  assert page.locator('[data-node="nc"] .name img').count()==0
+  card=page.locator('[data-node="nc"]')
+  assert card.locator('.task, .dot, .queue').count()==0
+  assert card.locator('.metric-label').all_text_contents()==['下载中','下载等待/暂停中','下载异常','检测中','检测异常','上传中','上传异常','下载速度','上传速度','磁盘空间']
+  assert card.locator('.metric-value').all_text_contents()[:7]==['1 个','2 个','1 个','1 个','3 个','1 个','2 个']
+  assert 'upload.mkv' not in card.inner_text()
+  assert 'ETA' not in card.inner_text()
   for node in ('hd','gb1','gb2'):
    with page.expect_popup():page.locator(f'[data-node="{node}"] button').first.click()
    page.locator(f'[data-node="{node}"].online').wait_for(timeout=15000)
   assert page.locator('.node.online').count()==4
-  print('PASS: login popup, reuse first-party login, four independent grants, real CORS fetch, progress/segments, escaped filenames')
+  print('PASS: login popup, reuse first-party login, four independent grants, real CORS fetch, only ten summary metrics')
   # Refresh must restore all grants without opening any login windows.
   popup_events=[]
   page.on('popup', lambda popup: popup_events.append(popup))
@@ -90,6 +97,7 @@ try:
   page.route(urls[2]+'/api/monitor/snapshot',lambda route:route.abort())
   page.locator('#refresh').click();page.locator('[data-node="gb1"].offline').wait_for(timeout=15000)
   assert page.locator('[data-node="gb1"].stale').count()==1
+  assert page.locator('[data-node="gb1"] .metric-value').all_text_contents()==['—']*10
   page.locator('[data-node="gb2"] button',has_text='断开').click()
   assert page.locator('[data-node="gb2"].login').count()==1
   assert 'hd' not in page.evaluate("JSON.parse(localStorage.getItem('scanner.monitorGrants.v1'))")

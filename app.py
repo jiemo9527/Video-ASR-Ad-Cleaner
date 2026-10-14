@@ -3629,16 +3629,26 @@ def build_monitor_snapshot():
                          for key, value in segments.items() if isinstance(value, dict)],
         })
     downloads: dict = {'ok': False, 'active': None, 'waiting': None, 'stopped': None,
-                       'speed': None, 'peer_upload_speed': None, 'tasks': []}
+                       'errors': None, 'speed': None, 'peer_upload_speed': None, 'tasks': []}
     try:
         stat, active = aria2_multicall([
             ('aria2.getGlobalStat', []), ('aria2.tellActive', [DOWNLOADER_TASK_FIELDS])])
         if not isinstance(stat, dict) or not isinstance(active, list):
             raise ValueError('Aria2 monitor response is invalid')
+        stopped_count = int(stat['numStopped'])
+        error_count = 0
+        for offset in range(0, stopped_count, 1000):
+            page_size = min(1000, stopped_count - offset)
+            stopped, = aria2_multicall([('aria2.tellStopped', [offset, page_size, ['status']])])
+            if (not isinstance(stopped, list) or len(stopped) != page_size
+                    or any(not isinstance(task, dict) or task.get('status') not in
+                           ('complete', 'error', 'removed') for task in stopped)):
+                raise ValueError('Aria2 stopped results are incomplete or invalid')
+            error_count += sum(task['status'] == 'error' for task in stopped)
         active = active[:12]
         attach_aria2_file_summaries(active)
         downloads.update(ok=True, active=int(stat['numActive']), waiting=int(stat['numWaiting']),
-                         stopped=int(stat['numStopped']), speed=int(stat['downloadSpeed']),
+                         stopped=stopped_count, errors=error_count, speed=int(stat['downloadSpeed']),
                          peer_upload_speed=int(stat['uploadSpeed']))
         for task in active:
             total = int(task.get('totalLength') or 0)

@@ -103,6 +103,49 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(payload['queues']['detect']['tasks'][0]['segments'], [{'name': '01片头', 'status': 'passed'}])
         self.assertEqual(payload['downloads']['tasks'][0]['progress'], 25)
 
+    def test_download_errors_count_failed_results_not_completed_or_removed(self):
+        token = self.grant()
+        stopped = [{'status': 'complete'}, {'status': 'removed'}, {'status': 'error'}, {'status': 'error'}]
+        def rpc(calls):
+            if calls[0][0] == 'aria2.tellStopped':
+                self.assertEqual(calls[0][1], [0, 4, ['status']])
+                return [stopped]
+            return [{'downloadSpeed': '123', 'uploadSpeed': '0', 'numActive': '0',
+                     'numWaiting': '3', 'numStopped': '4'}, []]
+        with mock.patch.object(scanner, 'aria2_multicall', side_effect=rpc):
+            r = self.client.get('/api/monitor/snapshot', headers={'Origin': ORIGIN, 'Authorization': 'Bearer ' + token})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.get_json()['downloads']['ok'])
+        self.assertEqual(r.get_json()['downloads']['errors'], 2)
+        self.assertEqual(r.get_json()['downloads']['waiting'], 3)
+
+    def test_download_errors_pages_through_all_stopped_results(self):
+        token = self.grant()
+        offsets = []
+        def rpc(calls):
+            if calls[0][0] == 'aria2.tellStopped':
+                offset, size, fields = calls[0][1]
+                offsets.append(offset)
+                return [[{'status': 'error' if offset else 'complete'} for _ in range(size)]]
+            return [{'downloadSpeed': '0', 'uploadSpeed': '0', 'numActive': '0',
+                     'numWaiting': '0', 'numStopped': '1001'}, []]
+        with mock.patch.object(scanner, 'aria2_multicall', side_effect=rpc):
+            r = self.client.get('/api/monitor/snapshot', headers={'Origin': ORIGIN, 'Authorization': 'Bearer ' + token})
+        self.assertEqual(offsets, [0, 1000])
+        self.assertEqual(r.get_json()['downloads']['errors'], 1)
+
+    def test_download_errors_incomplete_results_are_unknown(self):
+        token = self.grant()
+        def rpc(calls):
+            if calls[0][0] == 'aria2.tellStopped':
+                return [[{'status': 'error'}]]
+            return [{'downloadSpeed': '0', 'uploadSpeed': '0', 'numActive': '0',
+                     'numWaiting': '0', 'numStopped': '4'}, []]
+        with mock.patch.object(scanner, 'aria2_multicall', side_effect=rpc):
+            r = self.client.get('/api/monitor/snapshot', headers={'Origin': ORIGIN, 'Authorization': 'Bearer ' + token})
+        self.assertFalse(r.get_json()['downloads']['ok'])
+        self.assertIsNone(r.get_json()['downloads']['errors'])
+
     def test_running_tasks_rank_before_history_and_speeds_cover_hidden_rows(self):
         token = self.grant()
         for i in range(15):
