@@ -137,6 +137,12 @@ sudo bash -c 'bash <(curl -fsSL https://raw.githubusercontent.com/jiemo9527/Vide
 ```
 可选环境变量：`TUNNEL_TOKEN`（Cloudflare 隧道令牌，自动保持隧道在线）、`SSH_AUTHORIZED_KEY`（为 root 开启仅本机、仅密钥的 sshd，配合隧道 SSH 路由）、`SCANNER_DIR`、`SCANNER_DOWNLOAD_DIR`、`SCANNER_PORT`，放在 `sudo` 之后传入，例如 `sudo TUNNEL_TOKEN=<令牌> bash -c '...'`。再次运行即为更新，保留数据与配置。查看状态：`bash /workspace/scanner_web/install/supervise.sh status`。没有 init 系统，机器重启或休眠唤醒后由任意一次 shell 调用重新拉起守护进程。
 
+### 多节点只读总览
+静态总览页可以分别登录多个 Scanner，在同一页展示下载、检测、上传进度。
+各节点在 `scanner.env` 中设置 `SCANNER_MONITOR_ORIGINS=https://你的总览域名` 后重启；多个来源用逗号分隔，只填 origin，不带路径。未设置时默认不开放跨站监控。
+
+总览通过 `/monitor/connect` 打开节点自己的登录窗口，复用已有登录态，取得有效期 8 小时的只读授权；Cookie 和密码不传给总览。`/api/monitor/snapshot` 只返回状态与进度，不返回 API key、下载链接或识别文本。修改账户密码会使已有监控授权失效。
+
 ### 基本配置
 登录后进入 `设置`：
 

@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Scanner · 总览授权</title></head>
+<body style="font-family:system-ui;padding:32px;line-height:1.8"><h2>正在连接总览</h2><p id="status">登录成功，正在向总览页面发送只读授权。</p><button onclick="window.close()">关闭窗口</button>
+<script>
+const origin={{ origin|tojson }}, state={{ state|tojson }};
+const grant={type:'scanner-monitor-grant',state,token:{{ token|tojson }},expiresAt:Date.now()+{{ ttl }}*1000};
+if(!window.opener){ document.getElementById('status').textContent='请从多机总览页面点击登录节点打开此窗口。'; }
+else {
+    window.addEventListener('message',event=>{
+        if(event.source===window.opener && event.origin===origin && event.data?.type==='scanner-monitor-ack' && event.data.state===state){
+            clearInterval(timer); document.getElementById('status').textContent='已连接总览，可以关闭此窗口。'; window.close();
+        }
+    });
+    const send=()=>window.opener.postMessage(grant,origin);
+    const timer=setInterval(send,600); send(); setTimeout(()=>clearInterval(timer),30000);
+}
+</script></body></html>

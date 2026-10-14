@@ -22,6 +22,7 @@ from core_logic import (ScannerCore, sensevoice_gguf_ready, VIDEO_EXTENSIONS, de
                         normalize_keyword_identity, DISCARD_DOWNLOAD_EXTENSIONS, is_discarded_download_name,
                         system_log_backend, read_system_log_tail, clear_system_log_file)
 from sqlalchemy import text
+from monitor import monitor_login_return, register_monitor
 
 app = Flask(__name__)
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -2252,7 +2253,7 @@ def get_download_log(): return jsonify(
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    if current_user.is_authenticated: return redirect(url_for('index'))
+    if current_user.is_authenticated: return redirect(monitor_login_return() or url_for('index'))
     if request.method == 'POST':
         u = request.form.get('username');
         p = request.form.get('password');
@@ -2262,7 +2263,7 @@ def login():
         user = User.query.get(u)
         if user and check_password_hash(user.password_hash, p): reset_login_fail(ip); login_user(user,
                                                                                                  remember=True); return redirect(
-            url_for('index'))
+            monitor_login_return() or url_for('index'))
         record_login_fail(ip);
         time.sleep(1);
         return render_template('login.html', error="❌ 用户名或密码错误")
@@ -3591,6 +3592,74 @@ def restart_service():
 
     threading.Thread(target=_restart).start();
     return jsonify({"code": 200, "msg": "重启中..."})
+
+
+def build_monitor_snapshot():
+    """Explicit allowlist: never export settings, paths, logs, speech, cookies or URIs."""
+    config = get_final_config(None)
+    queues: dict[str, dict] = {
+        name: {'counts': {}, 'tasks': [], 'total': 0, 'speed': 0}
+        for name in ('detect', 'upload')
+    }
+    tasks = Task.query.order_by(Task.id.desc()).all()
+    rank = {'processing': 0, 'uploading': 0, 'pending': 1, 'pending_upload': 1}
+    for task in sorted(tasks, key=lambda t: (rank.get(t.status, 2), -t.id)):
+        name = 'upload' if is_upload_task(task) else 'detect'
+        queue_info = queues[name]
+        if task.status == 'uploading':
+            match = re.search(r'([\d.]+)\s*([KMGT]?)i?B/s', task.upload_speed or '', re.I)
+            if match:
+                unit = match.group(2).upper()
+                queue_info['speed'] += float(match.group(1)) * (1024 ** ('', 'K', 'M', 'G', 'T').index(unit))
+        queue_info['total'] += 1
+        counts = queue_info['counts']
+        counts[task.status] = counts.get(task.status, 0) + 1
+        if len(queue_info['tasks']) >= 12:
+            continue
+        overrides = get_task_overrides(task)
+        segments = overrides.get('_audio_segments') or {}
+        if not isinstance(segments, dict):
+            segments = {}
+        queue_info['tasks'].append({
+            'id': task.id, 'filename': task.filename, 'status': task.status,
+            'progress': task.progress or 0, 'size': get_task_file_size(task),
+            'speed': task.upload_speed or '', 'eta': task.upload_eta or '',
+            'remote': (overrides.get('upload_remote') or config.get('rclone_remote') or '') if name == 'upload' else '',
+            'segments': [{'name': str(key), 'status': str(value.get('status', 'pending'))}
+                         for key, value in segments.items() if isinstance(value, dict)],
+        })
+    downloads: dict = {'ok': False, 'active': None, 'waiting': None, 'stopped': None,
+                       'speed': None, 'peer_upload_speed': None, 'tasks': []}
+    try:
+        stat, active = aria2_multicall([
+            ('aria2.getGlobalStat', []), ('aria2.tellActive', [DOWNLOADER_TASK_FIELDS])])
+        if not isinstance(stat, dict) or not isinstance(active, list):
+            raise ValueError('Aria2 monitor response is invalid')
+        active = active[:12]
+        attach_aria2_file_summaries(active)
+        downloads.update(ok=True, active=int(stat['numActive']), waiting=int(stat['numWaiting']),
+                         stopped=int(stat['numStopped']), speed=int(stat['downloadSpeed']),
+                         peer_upload_speed=int(stat['uploadSpeed']))
+        for task in active:
+            total = int(task.get('totalLength') or 0)
+            done = int(task.get('completedLength') or 0)
+            files = task.get('files') or []
+            bt = (task.get('bittorrent') or {}).get('info') or {}
+            filename = bt.get('name') or (os.path.basename(files[0].get('path', '')) if files else '')
+            downloads['tasks'].append({
+                'gid': task.get('gid'), 'filename': filename or '名称解析中', 'status': task.get('status'),
+                'size': total, 'completed': done, 'progress': min(100, round(done * 100 / total, 1)) if total else None,
+                'speed': int(task.get('downloadSpeed') or 0),
+            })
+    except Exception:
+        downloads['ok'] = False
+    disk = get_disk_usage_info(str(config.get('scan_path') or ''))
+    return {'code': 200, 'version': APP_VERSION, 'timestamp': int(time.time()), 'queues': queues,
+            'downloads': downloads, 'disk': {key: disk.get(key) for key in ('total', 'used', 'free')},
+            'disk_guard': disk_guard_status()}
+
+
+register_monitor(app, lambda uid: db.session.get(User, uid), lambda: build_monitor_snapshot())
 
 
 if __name__ == '__main__':

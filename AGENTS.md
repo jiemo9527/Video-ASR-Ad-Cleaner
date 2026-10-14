@@ -140,6 +140,28 @@ Status probe endpoint:
   waiting jobs cannot all be classified, it reports `busy`. A caller must never
   treat an unknown state as idle.
 
+Cross-site multi-node monitoring:
+
+- `monitor.py` registers `/monitor/connect` (normal Scanner login required) and
+  `GET /api/monitor/snapshot` (an origin-bound, read-only Bearer grant, not the Trigger API token).
+- Set `SCANNER_MONITOR_ORIGINS` to a comma-separated list of exact overview origins
+  (`https://host[:port]`, no path) in `scanner.env` on each node and restart. The default is
+  empty/disabled; CORS is enabled only on monitoring routes, never globally.
+- The static overview opens a first-party login popup per node. The popup sends its grant
+  to the exact approved origin with `postMessage`; the page checks sender window, origin,
+  and a random state. This works without third-party cookies and never copies login cookies
+  or passwords into the overview. Existing first-party sessions can be reused.
+- Grants expire after 8 hours and become invalid when the account is deleted or its password
+  changes. Ordinary logout does not revoke an issued grant; disconnecting the overview forgets
+  its in-memory grant. No grants are stored in localStorage/sessionStorage or URL parameters.
+- Snapshots allowlist filenames, status, progress, upload speed/ETA, audio segment name/status,
+  queue counts and disk/Aria2 stats. No settings, ASR transcripts, task logs, local paths, download
+  URIs, Cookies or secrets. Each queue returns at most 12 rows, running jobs first, while counts
+  and upload speed cover all tasks. Aria2 failure is unknown, not an idle verdict.
+- Tests: `tests/test_monitor.py`; optional real-browser cross-site integration
+  `tests/test_monitor_browser.py` uses a temporary four-node fixture and the external overview
+  HTML selected by `SCANNER_TEST_OVERVIEW_HTML`. Do not confuse fixtures with live server data.
+
 ## Settings And Defaults
 
 Global settings are stored in the `Config` table and merged by `get_final_config()` in `app.py`.
