@@ -1,8 +1,8 @@
 """Login-authorized, read-only monitoring for cross-site static dashboards.
 
-Credentials/cookies stay on each Scanner origin. A popup grants a short-lived,
-origin-bound capability to a trusted overview page. The page can retain the grant
-in browser storage until expiry without receiving credentials or login cookies.
+Credentials/cookies stay on each Scanner origin. A popup grants an origin-bound,
+read-only capability to a trusted overview page. The grant has no time-based expiry;
+account deletion/password changes or removal of the approved origin revoke access.
 """
 import os
 import hashlib
@@ -14,7 +14,6 @@ from flask import Blueprint, jsonify, make_response, render_template, request
 from flask_login import current_user, login_required
 from itsdangerous import URLSafeTimedSerializer
 
-MONITOR_TTL = 8 * 60 * 60
 
 
 def allowed_monitor_origins():
@@ -68,7 +67,7 @@ def register_monitor(app, user_lookup, snapshot):
         token = signer().dumps({'user': current_user.get_id(), 'origin': origin, 'scope': 'monitor:read',
                                 'auth_version': fingerprint})
         response = make_response(render_template('monitor_connect.html', origin=origin, state=state,
-                                                 token=token, ttl=MONITOR_TTL))
+                                                 token=token))
         response.headers['X-Frame-Options'] = 'DENY'
         return response
 
@@ -83,14 +82,15 @@ def register_monitor(app, user_lookup, snapshot):
         if not auth.startswith('Bearer '):
             return jsonify({'code': 401, 'msg': '请登录节点'}), 401
         try:
-            grant = signer().loads(auth[7:], max_age=MONITOR_TTL)
+            # Keep the original serializer/salt so previously issued grants stay valid.
+            grant = signer().loads(auth[7:])
             user = user_lookup(grant.get('user'))
             if (grant.get('scope') != 'monitor:read' or grant.get('origin') != origin or not user
                     or not hmac.compare_digest(grant.get('auth_version', ''),
                                                hashlib.sha256(user.password_hash.encode()).hexdigest())):
                 raise ValueError('Invalid monitor grant')
         except Exception:
-            return jsonify({'code': 401, 'msg': '节点授权已过期，请重新登录'}), 401
+            return jsonify({'code': 401, 'msg': '节点授权已失效，请重新登录'}), 401
         try:
             return jsonify(snapshot())
         except Exception:

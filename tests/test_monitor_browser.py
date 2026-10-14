@@ -101,10 +101,19 @@ try:
   assert reopened.locator('[data-node="hd"].login').count()==1
   assert reopened.locator('[data-node="gb2"].login').count()==1
   reopened.close()
-  # Expired and wrong-origin stored grants are rejected on reload.
+  # Legacy saved grants with an elapsed expiry must keep working after removing the TTL.
   page.evaluate("""() => {
     const key='scanner.monitorGrants.v1', grants=JSON.parse(localStorage.getItem(key));
-    grants.nc.expiresAt=Date.now()-1;
+    grants.nc.expiresAt=Date.now()-365*24*3600*1000;
+    localStorage.setItem(key,JSON.stringify(grants));
+  }""")
+  page.reload()
+  page.locator('[data-node="nc"].online').wait_for(timeout=10000)
+  assert 'nc' in page.evaluate("JSON.parse(localStorage.getItem('scanner.monitorGrants.v1'))")
+  # Wrong-origin stored grants remain rejected.
+  page.evaluate("""() => {
+    const key='scanner.monitorGrants.v1', grants=JSON.parse(localStorage.getItem(key));
+    grants.nc.origin='https://wrong.example';
     grants.gb1.origin='https://wrong.example';
     localStorage.setItem(key,JSON.stringify(grants));
   }""")
@@ -125,7 +134,7 @@ try:
   assert '禁止存储' in blocked.locator('#summary').inner_text()
   blocked.close()
   assert not errors,errors
-  print('PASS: mobile width, 401 clears saved grant, disconnect stays disconnected, reopening restores, expired/mismatched/corrupt grants removed, blocked storage fallback, no JS errors')
+  print('PASS: mobile width, 401 clears saved grant, disconnect stays disconnected, reopening restores, old grants remain valid, mismatched/corrupt grants removed, blocked storage fallback, no JS errors')
   print('screenshots:',str(Path(tempfile.gettempdir())/'panel-desktop.png'),str(Path(tempfile.gettempdir())/'panel-mobile.png'))
   browser.close()
 finally:

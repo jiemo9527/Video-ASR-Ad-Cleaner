@@ -161,12 +161,14 @@ class MonitorTests(unittest.TestCase):
         r = self.client.get('/login?next=https://evil.example')
         self.assertEqual(r.location, '/')
 
-    def test_deleted_user_or_expired_grant_is_rejected(self):
-        token = self.grant()
+    def test_old_grant_remains_valid_but_deleted_user_is_rejected(self):
+        # Keep the existing timed signature format so already-saved grants remain usable.
+        import time
+        with mock.patch('time.time', return_value=time.time() - 366 * 24 * 3600):
+            token = self.grant()
         headers = {'Origin': ORIGIN, 'Authorization': 'Bearer ' + token}
-        import monitor
-        with mock.patch.object(monitor, 'MONITOR_TTL', -1):
-            self.assertEqual(self.client.get('/api/monitor/snapshot', headers=headers).status_code, 401)
+        with mock.patch.object(scanner, 'build_monitor_snapshot', return_value={'code': 200}):
+            self.assertEqual(self.client.get('/api/monitor/snapshot', headers=headers).status_code, 200)
         db.session.query(User).delete()
         db.session.commit()
         self.assertEqual(self.client.get('/api/monitor/snapshot', headers=headers).status_code, 401)

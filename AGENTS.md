@@ -151,11 +151,12 @@ Cross-site multi-node monitoring:
   to the exact approved origin with `postMessage`; the page checks sender window, origin,
   and a random state. This works without third-party cookies and never copies login cookies
   or passwords into the overview. Existing first-party sessions can be reused.
-- Grants expire after 8 hours and become invalid when the account is deleted or its password
-  changes. Ordinary logout does not revoke an issued grant; disconnecting the overview removes
+- Grants have no time-based expiry, but become invalid when the account is deleted or its password
+  changes, the signing secret is changed, or the origin is removed from the allowlist. Ordinary logout does not revoke an issued grant; disconnecting the overview removes
   that node's grant from both memory and browser localStorage. The static overview remembers only
-  origin-bound grants and expiry (not passwords/Cookies/data) in `scanner.monitorGrants.v1`,
-  validates origin/expiry on load and automatically reconnects after refresh or reopening.
+  origin-bound grants (not passwords/Cookies/data) in `scanner.monitorGrants.v1`,
+  validates origin on load and automatically reconnects after refresh or reopening. Legacy saved
+  grants/signatures remain compatible; their former expiry timestamps are ignored.
   A 401 response removes the saved grant; network failures retain it. Disabled storage falls
   back to in-memory authorization with a warning. Grants never appear in URL parameters.
 - Snapshots allowlist filenames, status, progress, upload speed/ETA, audio segment name/status,
