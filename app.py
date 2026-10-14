@@ -155,6 +155,32 @@ def clear_running_task(task_id, core):
             del running_tasks[task_id]
 
 
+def stage_resubmitted_after_stop(task):
+    """手动停止后工作线程收尾前调用：读取库中最新状态。
+
+    停止后到线程真正退出之间（例如等在途的云端识别返回），用户可能已经点了直传/重试，
+    请求把任务改回 pending / pending_upload 并入队；但任务还被本线程占着，
+    另一个线程取到后 claim 失败就丢弃了。返回需要重新入队的阶段，没有则返回 None。
+    刷新也避免用本线程的旧对象把请求写入的状态和日志覆盖掉。
+    """
+    try:
+        db.session.refresh(task)
+    except Exception:
+        return None
+    if task.status == 'pending':
+        return 'detect'
+    if task.status == 'pending_upload':
+        return 'upload'
+    return None
+
+
+def requeue_resubmitted_task(task_id, stage):
+    if stage == 'detect':
+        enqueue_detect_task(task_id, priority=True)
+    elif stage == 'upload':
+        upload_queue.put(task_id)
+
+
 def get_active_task_ids():
     with task_state_lock:
         return set(running_tasks.keys()) | set(active_detect_tasks) | set(active_upload_tasks)
@@ -1700,6 +1726,7 @@ def detection_worker():
                 with task_state_lock:
                     running_tasks[task_id] = core
 
+                resubmitted = None
                 try:
                     res = core.process_file(
                         current_process_path, final_settings, keywords_config,
@@ -1708,10 +1735,14 @@ def detection_worker():
                         rename_cb=update_filepath
                     )
 
-                    if res['status'] == 'cancelled':
-                        task.status = 'cancelled'
-                        task.finished_at = datetime.now()
-                        db_logger("⏹ 任务已手动停止")
+                    if res['status'] == 'cancelled' or core._stopped:
+                        resubmitted = stage_resubmitted_after_stop(task)
+                        if resubmitted:
+                            db_logger("⏹ 检测已停止，按停止后提交的操作重新入队")
+                        else:
+                            task.status = 'cancelled'
+                            task.finished_at = datetime.now()
+                            db_logger("⏹ 任务已手动停止")
                     elif res['status'] == 'dirty':
                         task.status = 'dirty';
                         task.finished_at = datetime.now()
@@ -1781,7 +1812,8 @@ def detection_worker():
                     clear_running_task(task_id, core)
                     release_task_stage(task_id, 'detect')
                     safe_db_commit(f"detect finally {task_id}");
-                    finish_pending_delete(task_id)
+                    if not finish_pending_delete(task_id):
+                        requeue_resubmitted_task(task_id, resubmitted)
                     detect_queue.task_done()
             except Exception as e:
                 safe_db_rollback("detect worker")
@@ -1888,6 +1920,7 @@ def upload_worker():
                 core.upload_slow_restart_enabled = bool(final_settings.get('upload_slow_restart', True))
                 with task_state_lock:
                     running_tasks[task_id] = core
+                resubmitted = None
                 try:
                     if core.upload_with_progress(current_upload_path, remote_path=remote_path):
                         if dir_task:
@@ -1969,7 +2002,8 @@ def upload_worker():
                         # 🔥🔥🔥 修复逻辑：检查是“失败”还是“手动停止”
                         elif core._stopped:
                             # 仅仅记录停止日志，不要报错，不要发通知
-                            db_logger("⏹ 上传已停止/删除")
+                            resubmitted = stage_resubmitted_after_stop(task)
+                            db_logger("⏹ 上传已停止，按停止后提交的操作重新入队" if resubmitted else "⏹ 上传已停止/删除")
                         elif task.status != 'cancelled':
                             task.status = 'error';
                             task.finished_at = datetime.now();
@@ -1984,6 +2018,7 @@ def upload_worker():
                     if not task:
                         continue
                     if core._stopped:
+                        resubmitted = stage_resubmitted_after_stop(task)
                         db_logger(f"⏹ 上传中断: {e}")
                     else:
                         task.status = 'error';
@@ -1995,7 +2030,8 @@ def upload_worker():
                     clear_running_task(task_id, core)
                     release_task_stage(task_id, 'upload')
                     safe_db_commit(f"upload finally {task_id}")
-                    finish_pending_delete(task_id)
+                    if not finish_pending_delete(task_id):
+                        requeue_resubmitted_task(task_id, resubmitted)
                     upload_queue.task_done()
             except Exception as e:
                 safe_db_rollback("upload worker")
