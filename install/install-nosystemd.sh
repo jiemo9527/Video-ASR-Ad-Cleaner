@@ -1,6 +1,6 @@
 #!/bin/bash
-# Scanner installer/updater for Linux hosts WITHOUT systemd (containers, sandbox VMs such as
-# Grok Bot computers, where only one directory survives rebuilds). Non-interactive, so an
+# Scanner installer/updater for Linux hosts WITHOUT systemd (containers, sandbox VMs where
+# only one directory survives rebuilds). Non-interactive, so an
 # agent can run it. Safe to re-run: a second run updates code and dependencies and keeps
 # data, settings, scanner.env, Aria2 config/rpc-secret and the tunnel/SSH files.
 #

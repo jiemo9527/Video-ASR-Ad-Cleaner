@@ -1,6 +1,6 @@
 #!/bin/bash
-# Scanner supervisor for Linux hosts without systemd (containers, sandbox VMs such as
-# Grok Bot computers). Keeps Scanner and Aria2 running, plus an optional Cloudflare
+# Scanner supervisor for Linux hosts without systemd (containers, sandbox VMs). Keeps
+# Scanner and Aria2 running, plus an optional Cloudflare
 # tunnel (cloudflared) and sshd. Installed and started by install/install-nosystemd.sh.
 #
 #   bash install/supervise.sh          start the supervisor (idempotent, detaches)
@@ -63,25 +63,19 @@ load_env() {
     set +a
 }
 
-# Some sandboxes resolve every name to a fake-ip proxy range (198.18.0.0/15). cloudflared
-# must reach the real tunnel edge, so pin the edge names to their real addresses via DoH.
+# Some sandboxes resolve every name to a fake-ip proxy range (198.18.0.0/15), so cloudflared
+# cannot reach the real tunnel edge. Pin the edge names in /etc/hosts (idempotent; /etc may
+# be reset, so this also runs before every cloudflared start).
+TUNNEL_EDGE_HOSTS='198.41.192.27 region1.v2.argotunnel.com
+198.41.200.53 region2.v2.argotunnel.com'
 fix_tunnel_edge_dns() {
-    local host ip real
-    for host in region1.v2.argotunnel.com region2.v2.argotunnel.com; do
-        ip=$(getent ahostsv4 "$host" 2>/dev/null | awk 'NR==1 { print $1 }')
-        case "$ip" in
-            198.18.*|198.19.*)
-                real=$(curl -fsS -m 10 -H 'accept: application/dns-json' \
-                    "https://cloudflare-dns.com/dns-query?name=$host&type=A" 2>/dev/null \
-                    | grep -o '"data":"[0-9.]*"' | head -n 1 | cut -d'"' -f4)
-                if [ -n "$real" ]; then
-                    sed -i "/[[:space:]]$host\$/d" /etc/hosts
-                    echo "$real $host" >> /etc/hosts
-                    log "pinned $host -> $real (resolver returned fake-ip $ip)"
-                fi
-                ;;
-        esac
-    done
+    local ip host
+    while read -r ip host; do
+        grep -qxF "$ip $host" /etc/hosts 2>/dev/null && continue
+        sed -i "/[[:space:]]$host\$/d" /etc/hosts
+        echo "$ip $host" >> /etc/hosts
+        log "pinned $host -> $ip in /etc/hosts"
+    done <<< "$TUNNEL_EDGE_HOSTS"
 }
 
 prepare_sshd() {
@@ -124,6 +118,7 @@ while true; do
     fi
     if tunnel_enabled && [ -x "$DIR/bin/cloudflared" ] && ! pgrep -f "$TUNNEL_PATTERN" >/dev/null; then
         log "starting cloudflared"
+        fix_tunnel_edge_dns
         setsid "$DIR/bin/cloudflared" --no-autoupdate tunnel run --token-file "$STATE/tunnel.token" \
             9>&- </dev/null >>"$DIR/cloudflared.log" 2>&1 &
     fi
