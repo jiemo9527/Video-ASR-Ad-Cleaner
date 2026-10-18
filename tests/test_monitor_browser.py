@@ -104,11 +104,27 @@ try:
    assert dims['sh']<=dims['ih'] and dims['sw']<=dims['iw'], (w,h,dims)
   page.set_viewport_size({'width':1440,'height':800})
   assert_open_node_size()
+  assert page.locator('.foot > div').is_visible(), 'Desktop authorization notice must remain visible'
   print('PASS: four nodes fit one desktop screen at 1920x940, 1440x800, 1366x680')
   page.screenshot(path=str(Path(tempfile.gettempdir())/'panel-desktop.png'),full_page=True)
+  # Mobile: all twelve metrics per node remain readable within a single screen.
+  for w,h in ((320,640),(360,640),(375,667),(390,844),(412,915)):
+   page.set_viewport_size({'width':w,'height':h})
+   dims=page.evaluate('({sh:document.documentElement.scrollHeight,ih:innerHeight,sw:document.documentElement.scrollWidth,iw:innerWidth})')
+   assert dims['sh']<=dims['ih'] and dims['sw']<=dims['iw'], ('mobile',w,h,dims)
+   assert_open_node_size()
+   for card in page.locator('.node').all():
+    assert card.locator('.metric-value:visible').count()==12
+    for value in card.locator('.metric-value').all():
+     box=value.bounding_box()
+     assert box['y']>=0 and box['y']+box['height']<=h, ('offscreen metric',w,h,box)
+   print(f'PASS: all four nodes and 48 metrics fit {w}x{h} without scrolling')
+  page.emulate_media(color_scheme='dark')
+  page.set_viewport_size({'width':360,'height':640})
+  assert page.evaluate('document.documentElement.scrollHeight <= innerHeight')
+  page.screenshot(path=str(Path(tempfile.gettempdir())/'panel-mobile-dark.png'),full_page=True)
+  page.emulate_media(color_scheme='light')
   page.set_viewport_size({'width':390,'height':844})
-  assert_open_node_size()
-  assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
   page.screenshot(path=str(Path(tempfile.gettempdir())/'panel-mobile.png'),full_page=True)
   # Invalidate one grant only; other nodes keep showing data.
   page.route(urls[1]+'/api/monitor/snapshot',lambda route:route.fulfill(status=401,headers={'Access-Control-Allow-Origin':origin},json={'code':401}))
