@@ -131,11 +131,20 @@ Scanner 默认只监听 `127.0.0.1:5000`，不对公网开放；对外访问请�
 再次运行安装命令后选择 `2. 更新`。更新模式会下载最新项目代码、更新依赖并重启 Scanner；保留数据库、`scanner.env`、Aria2 配置与 `rpc-secret`、Nginx 和模型（旧版遗留的 AriaNg 资源会被清理），不重新进入网络或 Nginx 配置。
 
 ### 无 systemd 环境（容器 / Grok Bot 云电脑）
-`install.sh` 依赖 systemd。容器或沙箱 VM 使用非交互的 `install-nosystemd.sh`，所有文件装在一个目录内（默认 `/workspace/scanner_web`，下载到 `/workspace/downloads`），由 `install/supervise.sh` 守护 Scanner 与 Aria2：
+`install.sh` 在有可用 systemd（存在 `systemctl` 且 PID 1 为 systemd）时行为不变；否则自动转交非交互的 `install-nosystemd.sh`（也可直接运行它）。容器或沙箱 VM 中，所有文件装在一个目录内（默认 `/workspace/scanner_web`，下载到 `/workspace/downloads`），由 `install/supervise.sh` 守护 Scanner 与 Aria2：
 ```Shell
 sudo bash -c 'bash <(curl -fsSL https://raw.githubusercontent.com/jiemo9527/Video-ASR-Ad-Cleaner/main/install/install-nosystemd.sh)'
 ```
-可选环境变量：`TUNNEL_TOKEN`（Cloudflare 隧道令牌，自动保持隧道在线）、`SSH_AUTHORIZED_KEY`（为 root 开启仅本机、仅密钥的 sshd，配合隧道 SSH 路由）、`SCANNER_DIR`、`SCANNER_DOWNLOAD_DIR`、`SCANNER_PORT`，放在 `sudo` 之后传入，例如 `sudo TUNNEL_TOKEN=<令牌> bash -c '...'`。再次运行即为更新，保留数据与配置。查看状态：`bash /workspace/scanner_web/install/supervise.sh status`。没有 init 系统，机器重启或休眠唤醒后由任意一次 shell 调用重新拉起守护进程。
+可选环境变量：`TUNNEL_TOKEN`（Cloudflare 隧道令牌，自动保持隧道在线）、`SSH_AUTHORIZED_KEY`（为 root 开启仅本机、仅密钥的 sshd，配合隧道 SSH 路由）、`SCANNER_DIR`、`SCANNER_DOWNLOAD_DIR`、`SCANNER_PORT`，放在 `sudo` 之后传入，例如 `sudo TUNNEL_TOKEN=<令牌> bash -c '...'`。再次运行即为更新，保留数据与配置。没有 init 系统，机器重启或休眠唤醒后由任意一次 shell 调用（`/etc/bash.bashrc` 钩子，有 cron 时另加 `@reboot` 与每 5 分钟检查）重新拉起守护进程。Python 环境实际位于 `pyenv/`，`venv` 是指向它的软链接（部分主机重建时会清掉名为 `venv` 的目录）；守护进程发现环境丢失会自动重建，并恢复 `bin/ffmpeg` 的 `/usr/local/bin` 软链接、sshd 配置与隧道 hosts 固定。
+
+```Shell
+S=/workspace/scanner_web/install/supervise.sh
+sudo bash $S status            # 各进程状态
+sudo bash $S repair            # 主机重建后一键修复：系统依赖、Python 环境、ffmpeg 软链接、sshd、hosts、保活钩子，然后拉起服务
+sudo bash $S stop [--all]      # 停止守护 + Scanner + Aria2（--all 连同隧道与 sshd）
+sudo bash $S restart           # 重启守护 + Scanner + Aria2
+sudo bash $S install-keepalive # 重新写入 bashrc / cron 保活
+```
 
 ### 多节点只读总览
 静态总览页可以分别登录多个 Scanner，在同一页展示下载、检测、上传进度。

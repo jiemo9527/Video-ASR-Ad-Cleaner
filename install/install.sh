@@ -20,6 +20,28 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
+# Hosts without a usable systemd (no systemctl, or PID 1 is not systemd: containers, sandbox
+# VMs) are handed to the non-interactive installer; everything below is the systemd path and
+# runs unchanged when systemd is usable. Extra arguments (e.g. status, repair) are passed on.
+if ! { command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; }; then
+    echo -e "${YELLOW}>>> 未检测到可用的 systemd，改用无 systemd 安装/守护方式 (install-nosystemd.sh)${NC}"
+    nosystemd_script="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/install-nosystemd.sh"
+    if [ -f "$nosystemd_script" ]; then
+        exec bash "$nosystemd_script" "$@"
+    fi
+    nosystemd_script=$(mktemp) || exit 1
+    if ! curl -fsSL --retry 3 -o "$nosystemd_script" \
+        "${SCANNER_NOSYSTEMD_INSTALLER_URL:-https://raw.githubusercontent.com/jiemo9527/Video-ASR-Ad-Cleaner/main/install/install-nosystemd.sh}"; then
+        rm -f "$nosystemd_script"
+        echo -e "${RED}❌ 无法下载 install-nosystemd.sh${NC}"
+        exit 1
+    fi
+    bash "$nosystemd_script" "$@"
+    nosystemd_status=$?
+    rm -f "$nosystemd_script"
+    exit "$nosystemd_status"
+fi
+
 # Run a temporary copy so an update can safely replace the installed script itself.
 if [ -z "${SCANNER_INSTALLER_REEXEC:-}" ] && [ -f "$0" ]; then
     installer_copy=$(mktemp) || exit 1

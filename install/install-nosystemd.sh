@@ -6,6 +6,10 @@
 #
 #   sudo bash -c 'bash <(curl -fsSL https://raw.githubusercontent.com/jiemo9527/Video-ASR-Ad-Cleaner/main/install/install-nosystemd.sh)'
 #
+# install/install.sh dispatches here automatically when systemd is not usable (no systemctl,
+# or PID 1 is not systemd). Service commands are forwarded to the supervisor:
+#   bash install-nosystemd.sh status|repair|start|stop|restart|install-keepalive
+#
 # Environment (all optional):
 #   SCANNER_DIR            install dir                    (default /workspace/scanner_web)
 #   SCANNER_DOWNLOAD_DIR   Aria2 dir and Scanner scan_path (default /workspace/downloads)
@@ -18,8 +22,9 @@
 #   SCANNER_PROJECT_ARCHIVE_URL  project zip to deploy (default: GitHub main)
 #
 # The supervisor (install/supervise.sh) is started immediately and re-started from
-# /etc/bash.bashrc whenever a shell opens, because there is no init system to do it.
-# A box that hibernates only resumes the processes when something runs a shell on it.
+# /etc/bash.bashrc whenever a shell opens (and from cron when the host has it), because
+# there is no init system to do it. A box that hibernates only resumes the processes when
+# something runs a shell on it; `supervise.sh repair` fixes what a host rebuild wiped.
 set -u
 
 PROJECT_ARCHIVE_URL="${SCANNER_PROJECT_ARCHIVE_URL:-https://github.com/jiemo9527/Video-ASR-Ad-Cleaner/archive/refs/heads/main.zip}"
@@ -31,7 +36,6 @@ HOST="${SCANNER_HOST:-0.0.0.0}"
 PORT="${SCANNER_PORT:-5000}"
 RPC_PORT="${ARIA2_RPC_PORT:-6802}"
 STATE="$DIR/.supervisor"
-HOOK_MARK="# scanner-supervise:$DIR"
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[0;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 step() { echo -e "${GREEN}>>> $*${NC}"; }
@@ -39,13 +43,20 @@ warn() { echo -e "${YELLOW}⚠️  $*${NC}"; }
 die() { echo -e "${RED}❌ $*${NC}" >&2; exit 1; }
 
 [ "$(id -u)" = 0 ] || die "请使用 root 运行（sudo bash ...）。"
+case "${1:-}" in
+    status|repair|start|stop|restart|install-keepalive)
+        [ -f "$DIR/install/supervise.sh" ] || die "未在 $DIR 找到已安装的项目，请先不带参数运行安装。"
+        exec bash "$DIR/install/supervise.sh" "$@" ;;
+    "") ;;
+    *) die "未知参数: $1（可用: status|repair|start|stop|restart|install-keepalive）" ;;
+esac
 case "$(uname -m)" in
     x86_64) ARCH=amd64 ;;
     aarch64) ARCH=arm64 ;;
     *) die "不支持的 CPU 架构: $(uname -m)" ;;
 esac
 [[ "$PORT" =~ ^[0-9]+$ ]] && [[ "$RPC_PORT" =~ ^[0-9]+$ ]] || die "SCANNER_PORT / ARIA2_RPC_PORT 必须是数字。"
-if [ -d /run/systemd/system ]; then
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
     warn "检测到 systemd：常规主机请改用 install/install.sh（systemd 服务）。继续按无 systemd 方式安装。"
 fi
 
@@ -55,15 +66,19 @@ fetch() { curl -fL --retry 3 -sS -o "$1" "$2"; }
 
 step "[1/7] 检查系统依赖"
 missing=()
-for cmd in curl unzip tar openssl ffmpeg ffprobe python3 flock setsid pgrep; do
+for cmd in curl unzip tar openssl python3 flock setsid pgrep; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
 done
 python3 -c 'import ensurepip, venv' >/dev/null 2>&1 || missing+=(python3-venv)
+# A project-local ffmpeg in $DIR/bin (survives rebuilds) counts; otherwise use the apt one.
+apt_pkgs=(curl unzip tar openssl python3 python3-venv util-linux procps ca-certificates)
+if [ ! -x "$DIR/bin/ffmpeg" ] && ! { command -v ffmpeg && command -v ffprobe; } >/dev/null 2>&1; then
+    missing+=(ffmpeg); apt_pkgs+=(ffmpeg)
+fi
 if [ "${#missing[@]}" -gt 0 ]; then
     echo "缺少: ${missing[*]}，通过 apt 安装..."
     DEBIAN_FRONTEND=noninteractive apt-get update -qq \
-        && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            curl unzip tar openssl ffmpeg python3 python3-venv util-linux procps ca-certificates >/dev/null \
+        && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${apt_pkgs[@]}" >/dev/null \
         || die "系统依赖安装失败。"
 fi
 
@@ -78,9 +93,8 @@ cp -a "$(dirname "$APP_PY")"/. "$DIR/" || die "无法部署项目文件。"
 chmod +x "$DIR/trigger.sh" "$DIR/install/supervise.sh"
 
 step "[3/7] 安装 Python 依赖"
-[ -x "$DIR/venv/bin/python" ] || python3 -m venv "$DIR/venv" || die "venv 创建失败。"
-"$DIR/venv/bin/pip" install -q --upgrade pip >/dev/null 2>&1
-"$DIR/venv/bin/pip" install -q -r "$DIR/requirements.txt" || die "Python 依赖安装失败。"
+# Real env in $DIR/pyenv, $DIR/venv is a symlink (some hosts wipe dirs named venv on rebuild).
+bash "$DIR/install/supervise.sh" ensure-env --force || die "Python 环境/依赖安装失败。"
 
 step "[4/7] 安装 aria2 / rclone / cloudflared 到 $DIR/bin"
 if [ ! -x "$DIR/bin/aria2c" ]; then
@@ -167,11 +181,7 @@ with app.app.app_context():
 PY
 
 step "[7/7] 启动守护进程"
-for rc in /etc/bash.bashrc /root/.bashrc; do
-    [ -f "$rc" ] || continue
-    grep -qF "$HOOK_MARK" "$rc" || \
-        echo "[ -x $DIR/install/supervise.sh ] && ( sudo -n bash $DIR/install/supervise.sh >/dev/null 2>&1 & ) $HOOK_MARK" >> "$rc"
-done
+bash "$DIR/install/supervise.sh" install-keepalive
 was_running=0
 pgrep -f "$DIR/venv/bin/python app.py" >/dev/null && was_running=1
 bash "$DIR/install/supervise.sh"
@@ -197,5 +207,6 @@ echo -e "📂 安装路径: $DIR    📥 下载目录: $DOWNLOAD_DIR"
 echo -e "📡 Scanner: http://$HOST:$PORT （隧道路由: HTTP -> localhost:$PORT）"
 [ -s "$STATE/tunnel.token" ] || echo -e "${CYAN}未提供 TUNNEL_TOKEN：如需外网访问，设置后重跑本脚本。${NC}"
 [ -s "$DIR/rclone.conf" ] || echo -e "${CYAN}rclone.conf 为空：请写入 $DIR/rclone.conf 后在设置页填写 Remote。${NC}"
-echo -e "🔁 状态: bash $DIR/install/supervise.sh status    日志: $DIR/supervisor.log"
+echo -e "🔁 状态: bash $DIR/install/supervise.sh status    修复: bash $DIR/install/supervise.sh repair"
+echo -e "   日志: $DIR/supervisor.log"
 echo -e "------------------------------------------------"
