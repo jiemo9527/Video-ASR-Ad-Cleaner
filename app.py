@@ -70,7 +70,7 @@ app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('SCANNER_DATABASE_URI', '
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
 
-APP_VERSION = os.environ.get('APP_VERSION', 'v20260930')
+APP_VERSION = os.environ.get('APP_VERSION', 'v20261023')
 
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'

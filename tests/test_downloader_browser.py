@@ -420,6 +420,36 @@ class DownloaderBrowserTests(unittest.TestCase):
         page.wait_for_function(order + " === 'W2,W4,中文,W3'")
         self.assertEqual(page.locator('.sdl-item.selected').count(), 0, 'selection is cleared after 置顶')
 
+    def test_waiting_queue_top_works_on_search_results(self):
+        for gid, name in (('w2', 'Show.A.E01.mkv'), ('w3', 'Movie.X.mkv'), ('w4', 'Show.A.E02.mkv'), ('w5', 'Show.A.E03.mkv')):
+            self.fake.tasks.append(make_task(gid, name, 'waiting', GB, 0))
+        page = self.open()
+        page.locator('.sdl-list-btn').nth(1).click()
+        page.wait_for_function("document.querySelectorAll('.sdl-item').length === 5")
+        order = "[...document.querySelectorAll('.sdl-item .sdl-name')].map(e => e.textContent.trim()).join(',')"
+        # 先在未搜索时选中 Movie.X，再搜索把它过滤掉：批量置顶不能动被隐藏的选择
+        page.locator('.sdl-item', has_text='Movie.X').locator('.sdl-item-check').check()
+        page.locator('.sdl-search input').fill('show.a')
+        page.wait_for_function("document.querySelectorAll('.sdl-item').length === 3")
+        # 搜索结果单项置顶
+        page.locator('.sdl-item', has_text='Show.A.E03').locator('[title="置顶"]').click()
+        page.wait_for_function(order + " === 'Show.A.E03.mkv,Show.A.E01.mkv,Show.A.E02.mkv'")
+        self.assertIn(['w5', 0, 'POS_SET'], [p for m, p in self.fake.calls if m == 'aria2.changePosition'])
+        # 搜索结果批量置顶：只移动可见的选中项并保持相对顺序
+        for name in ('Show.A.E01', 'Show.A.E02'):
+            page.locator('.sdl-item', has_text=name).locator('.sdl-item-check').check()
+        before = len([1 for m, _ in self.fake.calls if m == 'aria2.changePosition'])
+        page.locator('.sdl-batch [title="批量置顶"]').click()
+        page.wait_for_function(order + " === 'Show.A.E01.mkv,Show.A.E02.mkv,Show.A.E03.mkv'")
+        moved = [p[0] for m, p in self.fake.calls if m == 'aria2.changePosition'][before:]
+        self.assertEqual(moved, ['w4', 'w2'])
+        self.assertEqual([t['gid'] for t in self.fake.tasks if t['status'] in ('waiting', 'paused')],
+                         ['w2', 'w4', 'w5', 'w1', 'w3'])
+        # 非默认排序下搜索结果仍不显示置顶
+        page.locator('.sdl-sort').select_option('name')
+        page.wait_for_timeout(200)
+        self.assertEqual(page.locator('.sdl-item [title="置顶"]').count(), 0)
+
     def test_stopped_list_retry_all_failed_then_removes_records(self):
         self.fake.tasks.append(make_task('e2', 'Broken.Two.mkv', 'error', GB, 0, errorCode='1'))
         bt = make_task('e3', 'Broken.Torrent', 'error', GB, 0, errorCode='1')

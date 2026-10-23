@@ -413,12 +413,12 @@
                 var count = this.detail.fileCount != null ? this.detail.fileCount : (this.detail.files || []).length;
                 return count === 1 && (this.detail.files || []).length === 1;
             },
-            // 队列顺序只在等待列表、默认排序且未搜索时有意义
             effectiveDensity: function () {
                 if (this.prefs.density !== 'auto') return this.prefs.density;
                 return this.isMobile ? 'compact' : 'comfortable';
             },
-            canReorder: function () { return this.list === 'waiting' && this.prefs.sort === 'default' && !this.search; },
+            // 置顶只在等待列表、默认排序时可用；搜索只过滤不改变队列顺序，筛选结果同样可置顶
+            canReorder: function () { return this.list === 'waiting' && this.prefs.sort === 'default'; },
             headerLines: function () {
                 var lines = this.form.headers.split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean);
                 var cookie = this.form.cookie.replace(/^cookie\s*:\s*/i, '').trim();
@@ -653,7 +653,8 @@
                     }).catch(function (e) { self.notify('清理失败：' + e.message, 'error'); });
                 });
             },
-            // 批量置顶：从队列靠后的开始逐个移到最前，选中任务之间的相对顺序保持不变
+            // 批量置顶：从队列靠后的开始逐个移到最前，选中任务之间的相对顺序保持不变；
+            // 只处理当前可见（含搜索筛选后）的选中任务，搜索隐藏的旧选择不会被移动
             batchTop: function () {
                 var self = this;
                 var sel = this.visible.map(function (t) { return t.gid; }).filter(function (g) { return self.selected[g]; });
