@@ -1,0 +1,4 @@
+# local build wrapper (contains .flask_secret / instance data)
+windows-exe/
+__pycache__/
+.venv-test-tmp/
