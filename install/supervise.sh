@@ -179,7 +179,12 @@ prepare_sshd() {
     local key
     if [ ! -x /usr/sbin/sshd ]; then
         log "installing openssh-server"
-        apt_install openssh-server || { log "openssh-server install failed"; return 1; }
+        # Prefer the .deb cache under the project dir (apt mirrors can be unreachable here).
+        if ls "$DIR"/debs/openssh/*.deb >/dev/null 2>&1; then
+            DEBIAN_FRONTEND=noninteractive dpkg -i "$DIR"/debs/openssh/*.deb >/dev/null 2>&1 \
+                || log "cached openssh .deb install failed"
+        fi
+        [ -x /usr/sbin/sshd ] || apt_install openssh-server || { log "openssh-server install failed"; return 1; }
     fi
     install -d -m 700 "$STATE/ssh"
     # Keep host keys in the project dir so a rebuilt box presents the same fingerprint.
