@@ -335,7 +335,7 @@ while true; do
     if tunnel_enabled && [ -x "$DIR/bin/cloudflared" ] && ! pgrep -f "$TUNNEL_PATTERN" >/dev/null; then
         log "starting cloudflared"
         fix_tunnel_edge_dns
-        setsid "$DIR/bin/cloudflared" --no-autoupdate tunnel run --token-file "$STATE/tunnel.token" \
+        setsid "$DIR/bin/cloudflared" --no-autoupdate tunnel --protocol http2 run --token-file "$STATE/tunnel.token" \
             9>&- </dev/null >>"$DIR/cloudflared.log" 2>&1 &
     fi
     if [ -f "$DIR/app.py" ] && [ -x "$DIR/venv/bin/python" ]; then
