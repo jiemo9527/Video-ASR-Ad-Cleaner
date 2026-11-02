@@ -12,6 +12,7 @@ import re
 import socket
 import ipaddress
 import concurrent.futures
+import contextlib
 import requests
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, render_template, redirect, url_for
@@ -70,7 +71,7 @@ app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('SCANNER_DATABASE_URI', '
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
 
-APP_VERSION = os.environ.get('APP_VERSION', 'v20261023')
+APP_VERSION = os.environ.get('APP_VERSION', 'v20261102')
 
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
@@ -373,6 +374,7 @@ def get_final_config(overrides_json=None):
         "discard_images": True, "discard_nfo": True,
         "discard_extra_extensions": "",
         "download_stall_pause": True, "download_stall_seconds": DOWNLOAD_STALL_DEFAULT_SECONDS,
+        "download_idle_resume": True,
         "concurrency_detect": 2, "concurrency_upload": 9, "detect_retry_limit": 3,
         "local_model_concurrency": 2
     }
@@ -380,7 +382,7 @@ def get_final_config(overrides_json=None):
     for k, v in db_configs.items():
         if k in ["download_proxy", "cleanup_upload_dirty"]:
             continue
-        if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "cloud_asr_proxy_enabled", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample", "upload_remote_hijack_enabled", "upload_remote_auto_switch", "upload_slow_restart", "download_stall_pause",
+        if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "cloud_asr_proxy_enabled", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample", "upload_remote_hijack_enabled", "upload_remote_auto_switch", "upload_slow_restart", "download_stall_pause", "download_idle_resume",
                    "notify_upload_success", "notify_errors", "cleanup_scanner_history", "cleanup_scanner_uploaded", "cleanup_scanner_dirty", "cleanup_scanner_error", "cleanup_scanner_cancelled",
                    "cleanup_detect_dirty", "cleanup_detect_error", "cleanup_detect_cancelled", "cleanup_upload_uploaded", "cleanup_upload_error", "cleanup_upload_cancelled", "cleanup_aria2_completed",
                    "discard_images", "discard_nfo"]:
@@ -1382,6 +1384,210 @@ def disk_guard_worker():
         except Exception as e:
             print(f"⚠️ 磁盘空间保护检查失败: {e}")
         time.sleep(DISK_GUARD_POLL_SECONDS)
+
+
+# 空闲自动开始（download_idle_resume，默认开）：没有下载中、也没有排队任务时，按队列顺序开始全部已暂停任务。
+# 优先级低于其他控制：磁盘保护生效期间、修改文件名进行中不动作；经 /api/aria2/jsonrpc 手动暂停
+# （pause/forcePause/pauseAll/forcePauseAll）后 10 分钟内的任务不动，记录写入 Config(sys_download_manual_pause)，
+# 重启后仍然有效。无进度暂停的任务同样会被开始，再次卡住时由无进度检查重新暂停。
+DOWNLOAD_IDLE_RESUME_POLL_SECONDS = 5
+DOWNLOAD_MANUAL_PAUSE_COOLDOWN = 600
+MANUAL_PAUSE_CONFIG_KEY = 'sys_download_manual_pause'
+MANUAL_PAUSE_METHODS = ('aria2.pause', 'aria2.forcePause')
+MANUAL_PAUSE_ALL_METHODS = ('aria2.pauseAll', 'aria2.forcePauseAll')
+manual_pause_lock = threading.Lock()
+manual_pause_save_lock = threading.Lock()  # 代理请求线程和 worker 可能同时首次写入同一行
+manual_pause_state: dict = {'loaded': False, 'gids': {}, 'all': 0.0}  # gids: gid -> 手动暂停时间；all: 最近一次全部暂停时间
+aria2_control_lock = threading.Lock()
+aria2_control_busy = {'count': 0}  # 修改文件名等需要暂停/恢复任务的操作进行中
+
+
+@contextlib.contextmanager
+def aria2_control_hold():
+    with aria2_control_lock:
+        aria2_control_busy['count'] += 1
+    try:
+        yield
+    finally:
+        with aria2_control_lock:
+            aria2_control_busy['count'] -= 1
+
+
+def aria2_control_in_progress():
+    with aria2_control_lock:
+        return aria2_control_busy['count'] > 0
+
+
+def load_manual_pause_state():
+    with manual_pause_lock:
+        if manual_pause_state['loaded']:
+            return
+    data = {}
+    try:
+        row = db.session.get(Config, MANUAL_PAUSE_CONFIG_KEY)
+        data = json.loads(row.value) if row and row.value else {}
+    except Exception:
+        safe_db_rollback('manual_pause_load')
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    gids = {}
+    raw_gids = data.get('gids')
+    for gid, ts in (raw_gids.items() if isinstance(raw_gids, dict) else []):
+        try:
+            gids[str(gid)] = float(ts)
+        except (TypeError, ValueError):
+            continue
+    try:
+        pause_all = float(data.get('all') or 0)
+    except (TypeError, ValueError):
+        pause_all = 0.0
+    with manual_pause_lock:
+        manual_pause_state.update({'loaded': True, 'gids': gids, 'all': pause_all})
+
+
+def save_manual_pause_state():
+    with manual_pause_save_lock:
+        with manual_pause_lock:
+            value = json.dumps({'gids': manual_pause_state['gids'], 'all': manual_pause_state['all']})
+        try:
+            row = db.session.get(Config, MANUAL_PAUSE_CONFIG_KEY) or Config(key=MANUAL_PAUSE_CONFIG_KEY)
+            row.value = value
+            db.session.add(row)
+        except Exception as e:
+            safe_db_rollback('manual_pause_save')
+            print(f"⚠️ 保存手动暂停记录失败: {e}")
+            return
+        safe_db_commit('manual_pause_save')
+
+
+def prune_manual_pause_state(now):
+    """去掉已过冷却时间的记录，返回是否有变化（需持有 manual_pause_lock）。"""
+    expired = [gid for gid, ts in manual_pause_state['gids'].items() if now - ts >= DOWNLOAD_MANUAL_PAUSE_COOLDOWN]
+    for gid in expired:
+        del manual_pause_state['gids'][gid]
+    changed = bool(expired)
+    if manual_pause_state['all'] and now - manual_pause_state['all'] >= DOWNLOAD_MANUAL_PAUSE_COOLDOWN:
+        manual_pause_state['all'] = 0.0
+        changed = True
+    return changed
+
+
+def iter_aria2_rpc_calls(commands):
+    """展开 RPC 命令（含 system.multicall），逐个给出 (method, params)。"""
+    for command in commands:
+        if not isinstance(command, dict):
+            continue
+        if command.get('method') == 'system.multicall':
+            args = strip_aria2_rpc_token(command.get('params'))
+            for call in (args[0] if args and isinstance(args[0], list) else []):
+                if isinstance(call, dict):
+                    yield call.get('methodName'), call.get('params')
+        else:
+            yield command.get('method'), command.get('params')
+
+
+def record_manual_aria2_controls(commands, now=None):
+    """记录面板发出的手动暂停；手动开始则清掉对应记录。"""
+    now = time.time() if now is None else now
+    load_manual_pause_state()
+    changed = False
+    with manual_pause_lock:
+        gids = manual_pause_state['gids']
+        for method, params in iter_aria2_rpc_calls(commands):
+            args = strip_aria2_rpc_token(params)
+            gid = str(args[0]) if args and isinstance(args[0], str) else ''
+            if method in MANUAL_PAUSE_METHODS and gid:
+                gids.pop(gid, None)
+                gids[gid] = now
+                changed = True
+            elif method in MANUAL_PAUSE_ALL_METHODS:
+                manual_pause_state['all'] = now
+                changed = True
+            elif method == 'aria2.unpause' and gid in gids:
+                del gids[gid]
+                changed = True
+            elif method == 'aria2.unpauseAll' and (gids or manual_pause_state['all']):
+                gids.clear()
+                manual_pause_state['all'] = 0.0
+                changed = True
+        changed = prune_manual_pause_state(now) or changed
+    if changed:
+        save_manual_pause_state()
+
+
+def manual_pause_cooling(gid, now):
+    """gid 在手动暂停冷却期内（需持有 manual_pause_lock）。"""
+    last = max(manual_pause_state['gids'].get(gid, 0.0), manual_pause_state['all'])
+    return bool(last) and now - last < DOWNLOAD_MANUAL_PAUSE_COOLDOWN
+
+
+def aria2_entry_downloading(entry):
+    """active 且还没下完（已下完在做种/收尾的 BT 不算下载中）。"""
+    if not isinstance(entry, dict) or entry.get('status', 'active') != 'active':
+        return False
+    try:
+        total = int(entry.get('totalLength') or 0)
+        completed = int(entry.get('completedLength') or 0)
+    except (TypeError, ValueError):
+        return True
+    return not (total > 0 and completed >= total)
+
+
+def resume_paused_when_idle(now=None):
+    """没有下载中和排队任务时，按队列顺序开始已暂停的任务，返回开始的 GID。"""
+    now = time.time() if now is None else now
+    if not get_final_config(None).get('download_idle_resume', True):
+        return []
+    if aria2_control_in_progress():
+        return []
+    load_disk_guard_state()
+    if disk_guard_status()['engaged']:
+        return []
+    active = call_aria2_rpc('aria2.tellActive', [DISK_GUARD_FIELDS]) or []
+    if any(aria2_entry_downloading(e) for e in active):
+        return []
+    waiting = list_aria2_waiting(['gid', 'status'])
+    if any(e.get('status') == 'waiting' for e in waiting):
+        return []
+    paused = [str(e['gid']) for e in waiting if e.get('status') == 'paused']
+    if not paused:
+        return []
+
+    load_manual_pause_state()
+    with manual_pause_lock:
+        pruned = prune_manual_pause_state(now)
+        candidates = [gid for gid in paused if not manual_pause_cooling(gid, now)]
+    if pruned:
+        save_manual_pause_state()
+
+    resumed = []
+    for gid in candidates:
+        # 其他控制随时可能接管，逐个检查
+        if aria2_control_in_progress() or disk_guard_status()['engaged']:
+            break
+        try:
+            call_aria2_rpc('aria2.unpause', [gid])
+        except RuntimeError as e:
+            print(f"⚠️ 空闲自动开始失败 {gid}: {e}")
+            continue
+        resumed.append(gid)
+    if resumed:
+        print(f"▶️ 当前没有下载任务，已自动开始 {len(resumed)} 个暂停任务"
+              f"（跳过 {len(paused) - len(candidates)} 个手动暂停未满 {DOWNLOAD_MANUAL_PAUSE_COOLDOWN // 60} 分钟的任务）")
+    return resumed
+
+
+def download_idle_resume_worker():
+    while True:
+        try:
+            with app.app_context():
+                resume_paused_when_idle()
+        except RuntimeError:
+            pass
+        except Exception as e:
+            print(f"⚠️ 空闲自动开始检查失败: {e}")
+        time.sleep(DOWNLOAD_IDLE_RESUME_POLL_SECONDS)
 
 
 def get_next_persistent_id():
@@ -2456,6 +2662,7 @@ def aria2_jsonrpc_proxy():
     commands = payload if is_batch else [payload]
 
     plans = [plan_aria2_rpc_command(command) for command in commands]
+    record_manual_aria2_controls([command for command, plan in zip(commands, plans) if not plan.get('response')])
     filtered = any(plan['forward'] is not commands[index] for index, plan in enumerate(plans))
     forward_commands = [plan['forward'] for plan in plans if plan['forward'] is not None]
 
@@ -2675,7 +2882,13 @@ def rename_aria2_download(gid, name):
     Changing `out` on a running task makes Aria2 restart from zero into a new file,
     so the task is paused first, the partial file and its .aria2 control file are
     renamed, `out` is updated and the task is resumed. Returns (http_code, message).
+    空闲自动开始在改名期间暂停动作，避免把临时暂停的任务提前开始。
     """
+    with aria2_control_hold():
+        return _rename_aria2_download(gid, name)
+
+
+def _rename_aria2_download(gid, name):
     status = call_aria2_rpc('aria2.tellStatus', [gid, ['gid', 'status', 'dir', 'files', 'bittorrent']])
     if status.get('status') not in RENAMABLE_ARIA2_STATUSES:
         return 400, '只能修改下载中或等待中任务的文件名'
@@ -3269,7 +3482,7 @@ def settings():
             if k in ["check_audio", "check_subtitles", "sanitize_metadata", "enable_cloud_asr", "cloud_asr_proxy_enabled", "enable_local_model", "detailed_mode", "asr_use_flac", "audio_double_sample",
                       "notify_upload_success", "notify_errors", "cleanup_scanner_history", "cleanup_scanner_uploaded", "cleanup_scanner_dirty", "cleanup_scanner_error", "cleanup_scanner_cancelled",
                       "cleanup_detect_dirty", "cleanup_detect_error", "cleanup_detect_cancelled", "cleanup_upload_uploaded", "cleanup_upload_error", "cleanup_upload_cancelled", "cleanup_aria2_completed",
-                   "discard_images", "discard_nfo", "upload_remote_auto_switch", "upload_slow_restart", "download_stall_pause"]:
+                   "discard_images", "discard_nfo", "upload_remote_auto_switch", "upload_slow_restart", "download_stall_pause", "download_idle_resume"]:
                 val = "true" if (v is True or str(v).lower() == 'true') else "false"
             elif k == 'download_stall_seconds':
                 try:
@@ -3734,4 +3947,5 @@ if __name__ == '__main__':
     threading.Thread(target=discard_download_worker, daemon=True).start()
     threading.Thread(target=download_stall_worker, daemon=True).start()
     threading.Thread(target=disk_guard_worker, daemon=True).start()
+    threading.Thread(target=download_idle_resume_worker, daemon=True).start()
     app.run(host=os.environ.get('SCANNER_HOST', '127.0.0.1'), port=int(os.environ.get('SCANNER_PORT', '5000')))
