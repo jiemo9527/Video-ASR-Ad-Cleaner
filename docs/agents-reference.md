@@ -194,7 +194,7 @@ Common settings:
 - `audio_segment_len`: unified ASR segment length in seconds. Default is `360`.
 - `audio_max_segments`: maximum number of dynamic ASR samples. Default is `8`.
 - `audio_threshold_multi`, `audio_threshold_long`, `audio_len_head`, `audio_len_mid`, `audio_len_tail`, `audio_len_tail_long`: legacy keys kept for old DB/config compatibility. Do not expose them again unless explicitly requested.
-- `api_url`, `api_key`, `api_model`: cloud ASR config.
+- `api_url`, `api_key`, `api_model`: cloud ASR config. The settings page offers `api_model` presets (`FunAudioLLM/SenseVoiceSmall`, `XingChenAGI/XingChenASR-V3.2-Ultra`, both free on SiliconFlow) via a dropdown next to a free-text input; any custom model name can still be typed.
 - `cloud_asr_api_keys`: newline-separated cloud ASR API key pool. The settings page edits it as one key per row and keeps `api_key` as the first key for compatibility.
 - `cloud_asr_concurrency`: maximum simultaneous cloud ASR requests in the current Flask process. Default is `3`.
 - `cloud_asr_per_key_concurrency`: maximum simultaneous cloud ASR requests per individual API key. Default is `3`. Key pool capacity is `key count x this value`; when that capacity is below `cloud_asr_concurrency`, the effective global limit is degraded to the capacity and the task log records it.

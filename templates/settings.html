@@ -170,7 +170,13 @@
                                 </div>
                                 <div class="set-row stack">
                                     <div class="set-label">模型名称</div>
-                                    <input type="text" class="form-control form-control-sm font-monospace" v-model="settings.api_model" placeholder="FunAudioLLM/SenseVoiceSmall">
+                                    <div class="input-group input-group-sm">
+                                        <input type="text" class="form-control font-monospace" v-model="settings.api_model" placeholder="FunAudioLLM/SenseVoiceSmall 或自定义模型名">
+                                        <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="选择预设模型">预设</button>
+                                        <ul class="dropdown-menu dropdown-menu-end">
+                                            <li v-for="m in apiModelPresets" :key="m.id"><a class="dropdown-item small" :class="{active: settings.api_model === m.id}" href="#" @click.prevent="settings.api_model = m.id"><span class="font-monospace">[[ m.id ]]</span><div :class="settings.api_model === m.id ? 'opacity-75' : 'text-muted'" style="font-size:.75rem">[[ m.desc ]]</div></a></li>
+                                        </ul>
+                                    </div>
                                 </div>
                                 <div class="set-row stack">
                                     <div class="d-flex align-items-center"><div class="set-label me-auto">API Keys</div><span class="small text-muted">[[ apiKeyCount ]] 个</span></div>
@@ -522,6 +528,10 @@ Vue.createApp({
             savedSnapshot: null,
             account: { username: '', old_pass: '', new_pass: '', confirm_pass: '' },
             apiKeyRows: [''], showKeys: false, keywords: [], tab: 'audio', kwFilter: '', newKw: '', saving: false,
+            apiModelPresets: [
+                { id: 'FunAudioLLM/SenseVoiceSmall', desc: '速度快（360s 段约 7-10s），同音字错误较多' },
+                { id: 'XingChenAGI/XingChenASR-V3.2-Ultra', desc: '转写更准、中英混合更干净，较慢（约 50-60s）' },
+            ],
             toastMsg: '', toastClass: 'bg-primary', toastIcon: 'bi-info-circle',
             confirmMsg: '', confirmCallback: null,
             downloadLogs: '等待启动...', downloading: false, timer: null, modelReady: false
