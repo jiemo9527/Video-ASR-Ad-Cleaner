@@ -46,7 +46,7 @@ Flask + SQLAlchemy 媒体检测、清理与上传面板，连接 Aria2、ffmpeg/
 
 ## 安装、UI 和日志
 - 更新保留路径、DB、scanner.env、模型、Aria2 配置/secret、Nginx；只卸载 .scanner-managed 配置，不重置已有账号。初始随机凭据仅展示一次后删临时文件。
-- SCANNER_HOST/PORT 从 scanner.env 读，不改代码写死；无 systemd 部署保留 supervisor 锁/fd 关闭、持久化和 shell 恢复钩子；Python 环境优先保留外部 venv 软链接目标，其次已有 /workspace/venv，否则项目内 pyenv；sshd 缺失直接 apt 安装（不使用离线 deb 缓存）。Nginx 改动先校验，失败回滚，不影响其他站点。
+- SCANNER_HOST/PORT 从 scanner.env 读，不改代码写死；无 systemd 部署保留 supervisor 锁/fd 关闭、持久化和 shell 恢复钩子；Python 环境优先保留已有可用环境；环境缺失或损坏时统一在 /workspace/venv 补齐依赖并通过项目 venv 软链接使用，不再新建项目内 pyenv；sshd 缺失直接 apt 安装（不使用离线 deb 缓存）。Nginx 改动先校验，失败回滚，不影响其他站点。
 - 设置分区/统一保存栏保留，关键词即时保存，账户单独保存。移动端保持紧凑单行头部、过滤范围选择、两行文件名、统一 taskActions、整行半透明进度，不恢复细进度条。
 - UI 音频进度用实际计划段数，不用上限；日志先 HTML 转义，高亮按 Task ID 隔离；双空格清历史忽略输入/弹窗/修饰键。Vue/axios 三模板固定版本一起更新并跑浏览器测试。
 - ScannerCore.log 走 journald arup，无 systemd 则 system.log（20MB轮转）；app.py print 走 scanner.log/scanner_error.log，不能只查 journalctl。ASR 文本可能命中关键词，诊断用完整日志标记。

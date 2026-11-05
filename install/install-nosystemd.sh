@@ -93,7 +93,7 @@ cp -a "$(dirname "$APP_PY")"/. "$DIR/" || die "无法部署项目文件。"
 chmod +x "$DIR/trigger.sh" "$DIR/install/supervise.sh"
 
 step "[3/7] 安装 Python 依赖"
-# Prefer existing external envs; otherwise use $DIR/pyenv with $DIR/venv -> pyenv.
+# Reuse healthy existing envs; provision missing/broken envs at /workspace/venv.
 bash "$DIR/install/supervise.sh" ensure-env --force || die "Python 环境/依赖安装失败。"
 
 step "[4/7] 安装 aria2 / rclone / cloudflared 到 $DIR/bin"

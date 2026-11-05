@@ -40,7 +40,7 @@ class SupervisorTests(unittest.TestCase):
 
     def run_env(self):
         functions = self.source[self.source.index('python_ok()'):self.source.index('# A project-local ffmpeg')]
-        script = '''set -eu
+        script = '''set -u
 DIR="$1"
 STATE="$DIR/.supervisor"
 PYENV="$DIR/pyenv"
@@ -48,10 +48,21 @@ VENV="$DIR/venv"
 DURABLE_VENV="$2"
 ENV_LOCK="$STATE/env.lock"
 log() { :; }
+# Simulate venv creation without installing packages or using host Python paths.
+python3() {
+    test "$1" = -m && test "$2" = venv || return 1
+    echo "create $3" >> "$CALLS"
+    mkdir -p "$3/bin"
+    cp "$FAKE_PYTHON" "$3/bin/python"
+    chmod +x "$3/bin/python"
+}
 # Serialize is tested on Linux by flock itself; Git Bash has no flock.
 if ! command -v flock >/dev/null; then flock() { return 0; }; fi
 '''
-        env = dict(os.environ, CALLS=shell_path(self.calls))
+        template = self.base / 'template'
+        self.fake_env(template)
+        env = dict(os.environ, CALLS=shell_path(self.calls),
+                   FAKE_PYTHON=shell_path(template / 'bin/python'))
         if os.name == 'nt':
             env['MSYS'] = 'winsymlinks:nativestrict'
         assert BASH is not None
@@ -97,6 +108,50 @@ if ! command -v flock >/dev/null; then flock() { return 0; }; fi
                                  'supervisor-test', shell_path(self.project)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.project / 'pyenv/keep-marker').exists())
+
+    def test_missing_env_is_created_in_durable_path_with_dependencies(self):
+        (self.project / 'requirements.txt').write_text('flask\n', encoding='utf-8')
+        result = self.run_env()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        durable = self.base / 'durable'
+        self.assertEqual((self.project / 'venv').resolve(), durable.resolve())
+        self.assertFalse((self.project / 'pyenv').exists())
+        self.assertTrue((durable / '.scanner-requirements').exists())
+        calls = self.calls.read_text(encoding='utf-8')
+        self.assertIn('create ' + shell_path(durable), calls)
+        self.assertIn('-m pip install -q -r ', calls)
+
+    def test_broken_external_target_is_not_recreated_at_old_location(self):
+        external = self.base / 'external'
+        external.mkdir()
+        (external / 'keep-marker').write_text('keep', encoding='utf-8')
+        (self.project / 'venv').symlink_to(external, target_is_directory=True)
+        result = self.run_env()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.project / 'venv').resolve(), (self.base / 'durable').resolve())
+        self.assertTrue((external / 'keep-marker').exists())
+        self.assertFalse((external / 'bin/python').exists())
+
+    def test_broken_project_env_is_replaced_by_durable_env(self):
+        (self.project / 'pyenv').mkdir()
+        (self.project / 'venv').symlink_to(self.project / 'pyenv', target_is_directory=True)
+        result = self.run_env()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.project / 'venv').resolve(), (self.base / 'durable').resolve())
+        self.assertFalse((self.project / 'pyenv/bin/python').exists())
+
+    def test_broken_durable_env_is_rebuilt_and_reused_on_next_run(self):
+        durable = self.base / 'durable'
+        durable.mkdir()
+        (self.project / 'requirements.txt').write_text('flask\n', encoding='utf-8')
+        result = self.run_env()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        first_calls = self.calls.read_text(encoding='utf-8')
+        self.assertTrue((durable / '.scanner-requirements').exists())
+        result = self.run_env()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls.read_text(encoding='utf-8'), first_calls)
+        self.assertEqual((self.project / 'venv').resolve(), durable.resolve())
 
     def test_sshd_repair_uses_apt_even_when_cached_debs_exist(self):
         function = self.source[self.source.index('prepare_sshd() {'):self.source.index('# No init system')]

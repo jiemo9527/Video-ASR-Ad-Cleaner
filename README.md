@@ -135,7 +135,7 @@ Scanner 默认只监听 `127.0.0.1:5000`，不对公网开放；对外访问请�
 ```Shell
 sudo bash -c 'bash <(curl -fsSL https://raw.githubusercontent.com/jiemo9527/Video-ASR-Ad-Cleaner/main/install/install-nosystemd.sh)'
 ```
-可选环境变量：`TUNNEL_TOKEN`（Cloudflare 隧道令牌，自动保持隧道在线）、`SSH_AUTHORIZED_KEY`（为 root 开启仅本机、仅密钥的 sshd，配合隧道 SSH 路由）、`SCANNER_DIR`、`SCANNER_DOWNLOAD_DIR`、`SCANNER_PORT`，放在 `sudo` 之后传入，例如 `sudo TUNNEL_TOKEN=<令牌> bash -c '...'`。再次运行即为更新，保留数据与配置。没有 init 系统，机器重启或休眠唤醒后由任意一次 shell 调用（`/etc/bash.bashrc` 钩子，有 cron 时另加 `@reboot` 与每 5 分钟检查）重新拉起守护进程。Python 环境优先保留 `venv` 已指向的项目外环境，其次复用已有 `/workspace/venv`；没有外部环境时仍使用项目内 `pyenv/`，`venv` 为软链接。不会强制迁移已有项目内环境到 `/workspace/venv`。守护进程发现环境丢失会自动重建，并恢复 `bin/ffmpeg` 的 `/usr/local/bin` 软链接、sshd 配置与隧道 hosts 固定。
+可选环境变量：`TUNNEL_TOKEN`（Cloudflare 隧道令牌，自动保持隧道在线）、`SSH_AUTHORIZED_KEY`（为 root 开启仅本机、仅密钥的 sshd，配合隧道 SSH 路由）、`SCANNER_DIR`、`SCANNER_DOWNLOAD_DIR`、`SCANNER_PORT`，放在 `sudo` 之后传入，例如 `sudo TUNNEL_TOKEN=<令牌> bash -c '...'`。再次运行即为更新，保留数据与配置。没有 init 系统，机器重启或休眠唤醒后由任意一次 shell 调用（`/etc/bash.bashrc` 钩子，有 cron 时另加 `@reboot` 与每 5 分钟检查）重新拉起守护进程。Python 环境优先保留已有可用环境（`venv` 指向的项目外环境、已有 `/workspace/venv` 或项目内旧环境）；环境缺失或损坏时，一律在 `/workspace/venv` 创建/修复并安装依赖，再让项目的 `venv` 指向它，不再新建项目内 `pyenv/`。已有可用环境不强制迁移。守护进程发现环境丢失会自动重建，并恢复 `bin/ffmpeg` 的 `/usr/local/bin` 软链接、sshd 配置与隧道 hosts 固定。
 
 ```Shell
 S=/workspace/scanner_web/install/supervise.sh

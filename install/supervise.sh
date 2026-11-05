@@ -17,7 +17,7 @@
 #
 # Rebuild safety: some hosts wipe directories named "venv" inside the project.
 # Prefer an existing external environment (including /workspace/venv) and keep the
-# project's venv symlink pointing there. Otherwise use <project>/pyenv.
+# project's venv symlink pointing there. Create missing/broken environments at /workspace/venv.
 set -u
 
 DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -101,7 +101,7 @@ ensure_system_deps() {
 
 python_ok() { [ -x "$1/bin/python" ] && "$1/bin/python" -c 'import sys' >/dev/null 2>&1; }
 
-# Reuse an external venv when present; otherwise keep the legacy project-local layout.
+# Reuse healthy existing environments; provision missing/broken ones at /workspace/venv.
 # Requirements updates and repairs remain serialized by the per-project env lock.
 ensure_env() {
     local force="${1:-}" stamp want real_venv use_durable=0
@@ -129,8 +129,15 @@ ensure_env() {
                 rm -rf "$PYENV" && mv "$VENV" "$PYENV" && log "replaced broken pyenv/ with venv/"
             fi
         fi
+        # Never recreate missing/broken environments inside the project or at a stale
+        # external symlink target. All newly provisioned environments use /workspace/venv.
+        if ! python_ok "$PYENV"; then
+            PYENV="$DURABLE_VENV"
+            use_durable=1
+        fi
         if ! python_ok "$PYENV"; then
             log "creating Python env at $PYENV"
+            mkdir -p "$(dirname "$PYENV")" || exit 1
             rm -rf "$PYENV"
             python3 -m venv "$PYENV" || { log "python3 -m venv failed"; exit 1; }
             force=--force
