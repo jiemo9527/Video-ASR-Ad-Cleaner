@@ -37,7 +37,7 @@ Flask + SQLAlchemy 媒体检测、清理与上传面板，连接 Aria2、ffmpeg/
 - `/api/aria2/jsonrpc` 是登录保护的同源代理，RPC secret 留服务端。外部 `/jsonrpc`（兼容 `/aria2/jsonrpc`）由 Nginx 直连 Aria2、用原 secret，不依赖 Scanner 登录/Trigger token。
 - 列表不拉完整 files，详情再读。新建目录默认 scan_path。下载 UI 删除不删文件；清已完成/全部结果需确认。
 - 重命名运行中单文件不能只改 out：暂停→验证并改媒体/.aria2 名→changeOption→恢复；失败回滚，原暂停状态和队列槽顺序保留。
-- 无进度自动暂停释放槽、本身不恢复；完成/做种排除。空闲自动开始（download_idle_resume，默认开）仅在无下载中/等待中时按队列开始全部暂停任务，优先级最低：磁盘保护生效、改名进行中不动作，经代理手动暂停 10 分钟内不动（sys_download_manual_pause 持久化）。磁盘保护始终启用，不加禁用开关：不足停 active/waiting、阻止恢复，空间恢复仅恢复它停的任务；sys_disk_guard 持久化，拒绝设置写入且不进备份恢复。
+- 无进度自动暂停释放槽、本身不恢复；完成/做种排除。空闲自动开始（download_idle_resume，默认开）仅在无下载中/等待中时先按队列开始全部暂停任务，再用原链接和选项重试失败的非 BT 任务（跳过无链接及丢弃后缀，保留实际文件名，持久化重试目标 GID 防重复，重建成功才删原失败记录），优先级最低：磁盘保护生效、改名进行中不动作，经代理手动暂停 10 分钟内不动（sys_download_manual_pause 持久化）。磁盘保护始终启用，不加禁用开关：不足停 active/waiting、阻止恢复，空间恢复仅恢复它停的任务；sys_disk_guard 持久化，拒绝设置写入且不进备份恢复。
 - 丢弃后缀只针对单文件非 BT，torrent/metalink/多文件不拦；不允许 .mp4/.mkv 全局丢弃。清文件仅限 scan_path 内。
 - Config 经 get_final_config 合并，worker 并发改动需重启。“清空历史”按独立队列/状态设置只删记录，默认仅已完成，不删媒体/.aria2，失败不伪报成功；不要混用运行任务删除语义。
 - `/api/status` 为 X-API-Token 只读探针，waiting 包含 paused；未知/读取失败均 busy，不判 idle。

@@ -71,7 +71,7 @@ app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('SCANNER_DATABASE_URI', '
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
 
-APP_VERSION = os.environ.get('APP_VERSION', 'v20261102')
+APP_VERSION = os.environ.get('APP_VERSION', 'v20261105')
 
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
@@ -1386,7 +1386,7 @@ def disk_guard_worker():
         time.sleep(DISK_GUARD_POLL_SECONDS)
 
 
-# 空闲自动开始（download_idle_resume，默认开）：没有下载中、也没有排队任务时，按队列顺序开始全部已暂停任务。
+# 空闲自动开始（download_idle_resume，默认开）：没有下载中、也没有排队任务时，先开始暂停任务，再重试失败的非 BT 任务。
 # 优先级低于其他控制：磁盘保护生效期间、修改文件名进行中不动作；经 /api/aria2/jsonrpc 手动暂停
 # （pause/forcePause/pauseAll/forcePauseAll）后 10 分钟内的任务不动，记录写入 Config(sys_download_manual_pause)，
 # 重启后仍然有效。无进度暂停的任务同样会被开始，再次卡住时由无进度检查重新暂停。
@@ -1535,9 +1535,10 @@ def aria2_entry_downloading(entry):
 
 
 def resume_paused_when_idle(now=None):
-    """没有下载中和排队任务时，按队列顺序开始已暂停的任务，返回开始的 GID。"""
+    """没有下载中和排队任务时，开始暂停任务并重试失败任务，返回新开始的 GID。"""
     now = time.time() if now is None else now
-    if not get_final_config(None).get('download_idle_resume', True):
+    config = get_final_config(None)
+    if not config.get('download_idle_resume', True):
         return []
     if aria2_control_in_progress():
         return []
@@ -1551,8 +1552,18 @@ def resume_paused_when_idle(now=None):
     if any(e.get('status') == 'waiting' for e in waiting):
         return []
     paused = [str(e['gid']) for e in waiting if e.get('status') == 'paused']
-    if not paused:
-        return []
+    # 先收集完整快照再删失败记录，避免分页偏移漏掉后面的任务；列表不读取 files。
+    failed = []
+    offset = 0
+    while True:
+        batch = call_aria2_rpc('aria2.tellStopped', [offset, 1000, ['gid', 'status', 'bittorrent']])
+        if not isinstance(batch, list):
+            raise RuntimeError('Aria2 停止记录格式异常')
+        failed.extend(str(e['gid']) for e in batch if isinstance(e, dict) and e.get('gid')
+                      and e.get('status') == 'error' and 'bittorrent' not in e)
+        if len(batch) < 1000:
+            break
+        offset += 1000
 
     load_manual_pause_state()
     with manual_pause_lock:
@@ -1572,10 +1583,85 @@ def resume_paused_when_idle(now=None):
             print(f"⚠️ 空闲自动开始失败 {gid}: {e}")
             continue
         resumed.append(gid)
-    if resumed:
-        print(f"▶️ 当前没有下载任务，已自动开始 {len(resumed)} 个暂停任务"
+    retried = []
+    for gid in failed:
+        retry_key = 'sys_download_retry_' + gid
+        record = db.session.get(Config, retry_key)
+        if record:
+            # 创建前已持久化目标 GID；响应丢失时只核对，不盲目再次创建。
+            state = json.loads(record.value)
+            if not state.get('created'):
+                try:
+                    call_aria2_rpc('aria2.tellStatus', [state['gid'], ['gid', 'status']])
+                except RuntimeError:
+                    continue
+                state['created'] = True
+                record.value = json.dumps(state)
+                if not safe_db_commit('idle_retry_reconcile'):
+                    continue
+            try:
+                call_aria2_rpc('aria2.removeDownloadResult', [gid])
+            except RuntimeError:
+                continue
+            db.session.delete(record)
+            safe_db_commit('idle_retry_cleanup')
+            continue
+        if aria2_control_in_progress() or disk_guard_status()['engaged']:
+            break
+        with manual_pause_lock:
+            if manual_pause_cooling(gid, now):
+                continue
+        try:
+            entry = call_aria2_rpc('aria2.tellStatus', [gid, ['status', 'files', 'bittorrent']])
+            if entry.get('status') != 'error' or 'bittorrent' in entry:
+                continue
+            if get_aria2_task_discard_name(entry, config):
+                continue
+            uris = []
+            for file in entry.get('files') or []:
+                for item in file.get('uris') or []:
+                    uri = item.get('uri')
+                    if uri and uri not in uris:
+                        uris.append(uri)
+            if not uris:
+                continue
+            # 读取选项失败则保留原记录，不用空选项重建到错误目录。
+            options = dict(call_aria2_rpc('aria2.getOption', [gid]))
+            files = entry.get('files') or []
+            if len(files) == 1 and files[0].get('path') and options.get('dir'):
+                path = str(files[0]['path']).replace('\\', '/')
+                directory = str(options['dir']).replace('\\', '/').rstrip('/') + '/'
+                relative = path[len(directory):] if path.startswith(directory) else ''
+                if not relative or any(part in ('', '.', '..') for part in relative.split('/')):
+                    continue
+                options['out'] = relative
+            options['gid'] = secrets.token_hex(8)
+            options['pause'] = 'false'
+            if aria2_control_in_progress() or disk_guard_status()['engaged']:
+                break
+            record = Config(key=retry_key, value=json.dumps({'gid': options['gid'], 'created': False}))
+            db.session.add(record)
+            if not safe_db_commit('idle_retry_prepare'):
+                continue
+            new_gid = call_aria2_rpc('aria2.addUri', [uris, options])
+            record.value = json.dumps({'gid': new_gid, 'created': True})
+            if not safe_db_commit('idle_retry_created'):
+                continue
+        except RuntimeError:
+            print(f"⚠️ 空闲自动重试失败 {gid}")
+            continue
+        retried.append(new_gid)
+        try:
+            call_aria2_rpc('aria2.removeDownloadResult', [gid])
+        except RuntimeError:
+            print(f"⚠️ 空闲重试已创建，清理原失败记录失败 {gid}")
+        else:
+            db.session.delete(record)
+            safe_db_commit('idle_retry_cleanup')
+    if resumed or retried:
+        print(f"▶️ 当前没有下载任务，已自动开始 {len(resumed)} 个暂停任务、重试 {len(retried)} 个失败任务"
               f"（跳过 {len(paused) - len(candidates)} 个手动暂停未满 {DOWNLOAD_MANUAL_PAUSE_COOLDOWN // 60} 分钟的任务）")
-    return resumed
+    return resumed + retried
 
 
 def download_idle_resume_worker():

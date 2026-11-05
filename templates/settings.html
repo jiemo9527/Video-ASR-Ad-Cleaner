@@ -310,7 +310,7 @@
                                 <div class="set-control input-group input-group-sm unit-input"><input type="number" class="form-control" v-model.number="settings.download_stall_seconds" min="10" max="3600"><span class="input-group-text">秒</span></div>
                             </div>
                             <label class="set-row" for="sw_download_idle_resume">
-                                <div class="set-text"><div class="set-label">空闲自动开始</div><div class="set-desc">没有下载中和等待中的任务时，按队列顺序自动开始全部已暂停任务（包括无进度暂停的任务，再次卡住会被重新暂停）。手动暂停的任务 10 分钟内不会被自动开始；磁盘空间保护生效或修改文件名期间不动作。</div></div>
+                                <div class="set-text"><div class="set-label">空闲自动开始</div><div class="set-desc">没有下载中和等待中的任务时，按队列顺序自动开始全部已暂停任务，并用原链接和下载选项重试失败的非 BT 任务；无链接、已完成、已删除及命中丢弃后缀的任务不重试。手动暂停的任务 10 分钟内不会被自动开始；磁盘空间保护生效或修改文件名期间不动作。</div></div>
                                 <div class="set-control form-check form-switch"><input class="form-check-input" type="checkbox" v-model="settings.download_idle_resume" id="sw_download_idle_resume"></div>
                             </label>
                         </div>

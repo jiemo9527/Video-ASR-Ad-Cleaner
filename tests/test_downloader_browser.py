@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -267,6 +268,38 @@ class DownloaderBrowserTests(unittest.TestCase):
         page.wait_for_function("![...document.querySelectorAll('.sdl-item')].some(e => e.textContent.includes('Broken.File'))")
         add = next(p for m, p in self.fake.calls if m == 'aria2.addUri')
         self.assertEqual(add, [['https://example.test/Broken.File.mkv'], {'dir': '/root/downloads'}])
+
+    def test_idle_auto_retry_moves_failure_back_to_waiting_list(self):
+        from database import db, Config
+
+        page = self.open()
+        self.fake.tasks = [t for t in self.fake.tasks if t['gid'] not in ('a1', 'a2')]
+        self.fake.find('e1')['options'] = {'out': 'Broken.File.mkv', 'pause': 'true'}
+        page.locator('.sdl-list-btn').nth(2).click()
+        page.locator('.sdl-item', has_text='Broken.File').wait_for()
+        with self.scanner.app.app_context():
+            db.session.merge(Config(key='download_idle_resume', value='true'))
+            db.session.commit()
+            with mock.patch.object(self.scanner, 'call_aria2_rpc', side_effect=self.fake.call), \
+                    mock.patch.object(self.scanner, 'load_disk_guard_state'), \
+                    mock.patch.object(self.scanner, 'disk_guard_status', return_value={'engaged': False}), \
+                    mock.patch.object(self.scanner, 'load_manual_pause_state'), \
+                    mock.patch.object(self.scanner, 'prune_manual_pause_state', return_value=False), \
+                    mock.patch.object(self.scanner, 'manual_pause_cooling', return_value=False):
+                self.assertEqual(self.scanner.resume_paused_when_idle(), ['w1', 'n101'])
+        # 失败记录消失，完成记录保留；不点击手动重试。
+        page.wait_for_function("![...document.querySelectorAll('.sdl-item')].some(e => e.textContent.includes('Broken.File'))")
+        self.assertEqual(page.locator('.sdl-item', has_text='Done.Episode').count(), 1)
+        page.locator('.sdl-list-btn').nth(1).click()
+        page.locator('.sdl-item', has_text='Broken.File').wait_for()
+        self.assertEqual(self.fake.find('n101')['status'], 'waiting')
+        add = next(p for m, p in self.fake.calls if m == 'aria2.addUri')
+        self.assertRegex(add[1].pop('gid'), r'^[0-9a-f]{16}$')
+        self.assertEqual(add[1], {'dir': '/root/downloads', 'out': 'Broken.File.mkv', 'pause': 'false'})
+        page.goto(self.base + '/settings_page')
+        page.locator('#sw_download_idle_resume').wait_for(state='attached')
+        self.assertIn('重试失败的非 BT 任务',
+                      page.locator('label[for="sw_download_idle_resume"]').text_content())
 
     def test_list_payload_is_slim_but_retry_keeps_all_mirrors(self):
         mirrors = [{'uri': 'https://mirror%d.test/Big.mkv?sig=%s' % (i, 'x' * 250), 'status': 'used'} for i in range(64)]

@@ -22,6 +22,7 @@ class FakeAria2:
     def __init__(self):
         self.tasks = {}  # 插入顺序 = 队列顺序
         self.calls = []
+        self.next_gid = 0
         self.fail_unpause = set()
         self.on_unpause = None
 
@@ -35,6 +36,21 @@ class FakeAria2:
         if method == 'aria2.tellWaiting':
             rows = [dict(t) for t in self.tasks.values() if t['status'] in ('waiting', 'paused')]
             return rows[params[0]:params[0] + params[1]]
+        if method == 'aria2.tellStopped':
+            rows = [dict(t) for t in self.tasks.values() if t['status'] in ('error', 'complete', 'removed')]
+            return rows[params[0]:params[0] + params[1]]
+        if method == 'aria2.tellStatus':
+            return dict(self.tasks[params[0]])
+        if method == 'aria2.getOption':
+            return dict(self.tasks[params[0]].get('options', {}))
+        if method == 'aria2.addUri':
+            self.next_gid += 1
+            gid = 'retry-' + str(self.next_gid)
+            self.add(gid, status='waiting')
+            return gid
+        if method == 'aria2.removeDownloadResult':
+            del self.tasks[params[0]]
+            return 'OK'
         if method == 'aria2.forcePause':
             self.tasks[params[0]]['status'] = 'paused'
             return params[0]
@@ -82,6 +98,7 @@ class DownloadIdleResumeTests(unittest.TestCase):
         cls.ctx.pop()
 
     def setUp(self):
+        Config.query.filter(Config.key.like('sys_download_retry_%')).delete()
         Config.query.filter(Config.key.in_([
             'download_idle_resume', scanner.MANUAL_PAUSE_CONFIG_KEY, scanner.DISK_GUARD_CONFIG_KEY,
         ])).delete()
@@ -126,6 +143,173 @@ class DownloadIdleResumeTests(unittest.TestCase):
             self.fake.add(gid)
         self.assertEqual(self.tick(), ['c', 'a', 'b'])
         self.assertEqual(self.fake.unpaused(), ['c', 'a', 'b'])
+
+    def test_idle_retries_failed_task_with_all_mirrors_and_options(self):
+        self.fake.add('failed', status='error')
+        uris = ['https://one.test/movie.mkv', 'https://two.test/movie.mkv']
+        options = {'dir': '/downloads/g01', 'out': 'movie.mkv', 'header': ['X-Test: value'],
+                   'gid': 'old-gid', 'pause': 'true'}
+        self.fake.tasks['failed'].update({
+            'files': [{'path': '/downloads/g01/movie.mkv',
+                       'uris': [{'uri': uri} for uri in uris + uris[:1]]}],
+            'options': options,
+        })
+        self.assertEqual(self.tick(), ['retry-1'])
+        adds = [p for m, p in self.fake.calls if m == 'aria2.addUri']
+        self.assertEqual(len(adds), 1)
+        self.assertEqual(adds[0][0], uris)
+        expected_options = dict(options, pause='false')
+        expected_options['gid'] = adds[0][1]['gid']
+        self.assertRegex(expected_options['gid'], r'^[0-9a-f]{16}$')
+        self.assertNotEqual(expected_options['gid'], 'old-gid')
+        self.assertEqual(adds[0][1], expected_options)
+        self.assertNotIn('failed', self.fake.tasks)
+        self.assertEqual(self.fake.tasks['retry-1']['status'], 'waiting')
+
+    def add_failed(self, gid='failed', **extra):
+        self.fake.add(gid, status='error')
+        self.fake.tasks[gid].update({
+            'files': [{'path': '/downloads/movie.mkv', 'uris': [{'uri': 'https://one.test/movie.mkv'}]}],
+            'options': {'dir': '/downloads', 'out': 'movie.mkv'},
+        })
+        self.fake.tasks[gid].update(extra)
+
+    def test_failed_retry_preserves_resolved_filename(self):
+        self.add_failed()
+        self.fake.tasks['failed']['files'][0]['path'] = '/downloads/season/movie.1.mkv'
+        self.assertEqual(len(self.tick()), 1)
+        options = next(p[1] for m, p in self.fake.calls if m == 'aria2.addUri')
+        self.assertEqual(options['out'], 'season/movie.1.mkv')
+
+    def test_failed_retry_does_not_duplicate_when_old_result_removal_fails(self):
+        self.add_failed()
+        original = self.fake
+        def rpc(method, params):
+            if method == 'aria2.removeDownloadResult':
+                raise RuntimeError('cleanup failed')
+            return original(method, params)
+        with mock.patch.object(scanner, 'call_aria2_rpc', side_effect=rpc):
+            first = self.tick()
+            self.fake.tasks[first[0]]['status'] = 'complete'
+            self.assertEqual(self.tick(), [])
+        self.assertEqual(len([1 for m, _ in self.fake.calls if m == 'aria2.addUri']), 1)
+
+    def test_failed_retry_reconciles_lost_creation_response_after_restart(self):
+        self.add_failed()
+        original = self.fake
+        def rpc(method, params):
+            if method == 'aria2.addUri':
+                original.calls.append((method, params))
+                original.add(params[1]['gid'], status='waiting')
+                raise RuntimeError('response lost')
+            return original(method, params)
+        with mock.patch.object(scanner, 'call_aria2_rpc', side_effect=rpc):
+            self.assertEqual(self.tick(), [])
+        record = db.session.get(Config, 'sys_download_retry_failed')
+        new_gid = json.loads(record.value)['gid']
+        db.session.remove()
+        from flask import g
+        g.pop('_login_user', None)
+        self.fake.tasks[new_gid]['status'] = 'complete'
+        self.assertEqual(self.tick(), [])
+        self.assertNotIn('failed', self.fake.tasks)
+        self.assertIsNone(db.session.get(Config, 'sys_download_retry_failed'))
+        self.assertEqual(len([1 for m, _ in self.fake.calls if m == 'aria2.addUri']), 1)
+
+    def test_failed_retry_does_not_create_without_durable_intent(self):
+        self.add_failed()
+        with mock.patch.object(scanner, 'safe_db_commit', return_value=False):
+            self.assertEqual(self.tick(), [])
+        db.session.rollback()
+        self.assertNotIn('aria2.addUri', [m for m, _ in self.fake.calls])
+
+    def test_failed_retry_respects_all_existing_download_controls(self):
+        for control in ('disabled', 'active', 'waiting', 'disk', 'rename', 'manual', 'manual_all'):
+            with self.subTest(control=control):
+                self.setUp()
+                self.add_failed()
+                if control == 'disabled':
+                    self.set_config(download_idle_resume='false')
+                elif control in ('active', 'waiting'):
+                    self.fake.add('busy', status=control)
+                elif control == 'disk':
+                    scanner.disk_guard_state.update(loaded=True, engaged=True)
+                elif control == 'rename':
+                    scanner.aria2_control_busy['count'] = 1
+                else:
+                    scanner.record_manual_aria2_controls([{
+                        'method': 'aria2.pause' if control == 'manual' else 'aria2.pauseAll',
+                        'params': ['failed'] if control == 'manual' else [],
+                    }], now=9900)
+                self.assertEqual(self.tick(), [])
+                self.assertNotIn('aria2.addUri', [m for m, _ in self.fake.calls])
+                self.assertIn('failed', self.fake.tasks)
+
+    def test_idle_retries_only_eligible_failures(self):
+        self.add_failed('good')
+        self.add_failed('bt', bittorrent={})
+        self.add_failed('no-links', files=[{'uris': []}])
+        self.add_failed('discard', files=[{'path': '/downloads/ad.jpg',
+                                          'uris': [{'uri': 'https://one.test/ad.jpg'}]}])
+        self.fake.add('complete', status='complete')
+        self.fake.add('removed', status='removed')
+        self.assertEqual(len(self.tick()), 1)
+        self.assertNotIn('good', self.fake.tasks)
+        for gid in ('bt', 'no-links', 'discard', 'complete', 'removed'):
+            self.assertIn(gid, self.fake.tasks)
+        for method, params in self.fake.calls:
+            if method == 'aria2.tellStopped':
+                self.assertNotIn('files', params[2])
+
+    def test_failed_retry_runs_after_paused_tasks_and_after_manual_cooldown(self):
+        self.fake.add('paused')
+        self.add_failed()
+        scanner.record_manual_aria2_controls([{'method': 'aria2.pause', 'params': ['failed']}], now=1000)
+        self.assertEqual(self.tick(now=1100), ['paused'])
+        self.fake.tasks['paused']['status'] = 'complete'
+        self.assertEqual(len(self.tick(now=1000 + COOLDOWN)), 1)
+        actions = [m for m, _ in self.fake.calls if m in ('aria2.unpause', 'aria2.addUri')]
+        self.assertEqual(actions, ['aria2.unpause', 'aria2.addUri'])
+
+    def test_failed_retry_paginates_before_removing_results(self):
+        for i in range(1001):
+            self.add_failed(str(i))
+        self.assertEqual(len(self.tick()), 1001)
+        pages = [p for m, p in self.fake.calls if m == 'aria2.tellStopped']
+        self.assertEqual([p[0] for p in pages], [0, 1000])
+        self.assertEqual(len([t for t in self.fake.tasks.values() if t['status'] == 'error']), 0)
+
+    def test_failed_retry_keeps_record_on_rpc_failure_and_continues(self):
+        for method in ('aria2.tellStatus', 'aria2.getOption', 'aria2.addUri'):
+            with self.subTest(method=method):
+                Config.query.filter(Config.key.like('sys_download_retry_%')).delete()
+                db.session.commit()
+                self.fake = FakeAria2()
+                self.add_failed('bad')
+                self.add_failed('good')
+                original = self.fake
+                def rpc(name, params):
+                    if name == method and (params[0] == 'bad' or name == 'aria2.addUri' and params[1]['out'] == 'bad.mkv'):
+                        raise RuntimeError('request failed')
+                    return original(name, params)
+                self.fake.tasks['bad']['options']['out'] = 'bad.mkv'
+                self.fake.tasks['bad']['files'][0]['path'] = '/downloads/bad.mkv'
+                with mock.patch.object(scanner, 'call_aria2_rpc', side_effect=rpc):
+                    self.assertEqual(len(self.tick()), 1)
+                self.assertIn('bad', self.fake.tasks)
+                self.assertNotIn('good', self.fake.tasks)
+
+    def test_failed_retry_rechecks_disk_guard_after_reading_options(self):
+        self.add_failed()
+        original = self.fake
+        def rpc(method, params):
+            result = original(method, params)
+            if method == 'aria2.getOption':
+                scanner.disk_guard_state['engaged'] = True
+            return result
+        with mock.patch.object(scanner, 'call_aria2_rpc', side_effect=rpc):
+            self.assertEqual(self.tick(), [])
+        self.assertIn('failed', self.fake.tasks)
 
     def test_active_download_blocks(self):
         self.fake.add('run', status='active', completed=10)
