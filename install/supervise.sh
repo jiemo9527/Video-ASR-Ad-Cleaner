@@ -15,8 +15,9 @@
 #   tunnel.token       Cloudflare tunnel token -> runs bin/cloudflared tunnel run
 #   authorized_keys    public keys for root    -> runs sshd (127.0.0.1 only, key login only)
 #
-# Rebuild safety: some hosts wipe any directory literally named "venv" on rebuild, so the
-# real environment lives in <project>/pyenv and <project>/venv is a symlink to it.
+# Rebuild safety: some hosts wipe directories named "venv" inside the project.
+# Prefer an existing external environment (including /workspace/venv) and keep the
+# project's venv symlink pointing there. Otherwise use <project>/pyenv.
 set -u
 
 DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -28,6 +29,7 @@ PIDFILE="$STATE/supervise.pid"
 ENV_LOCK="$STATE/env.lock"
 PYENV="$DIR/pyenv"
 VENV="$DIR/venv"
+DURABLE_VENV="/workspace/venv"
 INTERVAL=20
 RETRY_SECONDS=300            # minimum gap between automatic env/sshd repair attempts
 HOOK_MARK="# scanner-supervise:$DIR"
@@ -99,15 +101,25 @@ ensure_system_deps() {
 
 python_ok() { [ -x "$1/bin/python" ] && "$1/bin/python" -c 'import sys' >/dev/null 2>&1; }
 
-# Create/repair <project>/pyenv and point <project>/venv at it. With --force (or when the
-# requirements changed) also re-runs pip install. Serialized so repair and the loop never
-# build the env at the same time.
+# Reuse an external venv when present; otherwise keep the legacy project-local layout.
+# Requirements updates and repairs remain serialized by the per-project env lock.
 ensure_env() {
-    local force="${1:-}" stamp want
+    local force="${1:-}" stamp want real_venv use_durable=0
     mkdir -p "$STATE" && chmod 700 "$STATE"
     (
         flock -w 900 8 || { log "env lock busy, skipping"; exit 1; }
-        if [ -d "$VENV" ] && [ ! -L "$VENV" ]; then
+        if [ -L "$VENV" ]; then
+            real_venv=$(readlink -f "$VENV" 2>/dev/null || true)
+            if [ -n "$real_venv" ] && [[ "$real_venv" != "$DIR"/* ]]; then
+                PYENV="$real_venv"
+                use_durable=1
+            fi
+        fi
+        if [ "$use_durable" = 0 ] && { [ -d "$DURABLE_VENV" ] || [ -x "$DURABLE_VENV/bin/python" ]; }; then
+            PYENV="$DURABLE_VENV"
+            use_durable=1
+        fi
+        if [ "$use_durable" = 0 ] && [ -d "$VENV" ] && [ ! -L "$VENV" ]; then
             if [ ! -e "$PYENV" ]; then
                 # Scripts inside keep working: their shebang path still resolves via the symlink.
                 mv "$VENV" "$PYENV" && log "moved venv/ to pyenv/ (rebuild-safe)"
@@ -123,7 +135,11 @@ ensure_env() {
             python3 -m venv "$PYENV" || { log "python3 -m venv failed"; exit 1; }
             force=--force
         fi
-        if [ "$(readlink "$VENV" 2>/dev/null)" != pyenv ]; then
+        if [ "$use_durable" = 1 ]; then
+            if [ "$(readlink -f "$VENV" 2>/dev/null)" != "$(readlink -f "$PYENV" 2>/dev/null)" ]; then
+                rm -rf "$VENV" && ln -sfn "$PYENV" "$VENV" && log "linked venv -> $PYENV (durable)"
+            fi
+        elif [ "$(readlink "$VENV" 2>/dev/null)" != pyenv ]; then
             rm -rf "$VENV" && ln -s pyenv "$VENV" && log "linked venv -> pyenv"
         fi
         [ -f "$DIR/requirements.txt" ] || exit 0
@@ -179,12 +195,7 @@ prepare_sshd() {
     local key
     if [ ! -x /usr/sbin/sshd ]; then
         log "installing openssh-server"
-        # Prefer the .deb cache under the project dir (apt mirrors can be unreachable here).
-        if ls "$DIR"/debs/openssh/*.deb >/dev/null 2>&1; then
-            DEBIAN_FRONTEND=noninteractive dpkg -i "$DIR"/debs/openssh/*.deb >/dev/null 2>&1 \
-                || log "cached openssh .deb install failed"
-        fi
-        [ -x /usr/sbin/sshd ] || apt_install openssh-server || { log "openssh-server install failed"; return 1; }
+        apt_install openssh-server || { log "openssh-server install failed"; return 1; }
     fi
     install -d -m 700 "$STATE/ssh"
     # Keep host keys in the project dir so a rebuilt box presents the same fingerprint.
