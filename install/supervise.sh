@@ -41,6 +41,9 @@ fi
 SCANNER_PATTERN="$DIR/venv/bin/python app.py"
 ARIA2_PATTERN="$DIR/bin/aria2c --conf-path="
 TUNNEL_PATTERN="$DIR/bin/cloudflared .*--token-file $STATE/tunnel.token"
+# Replicas of the same tunnel: 4 edge connections each; replica i serves metrics/ready on 127.0.0.1:2024i.
+TUNNEL_REPLICAS=${TUNNEL_REPLICAS:-3}
+tunnel_pattern() { echo "$DIR/bin/cloudflared .*--metrics 127.0.0.1:$((20240 + $1)) .*--token-file $STATE/tunnel.token"; }
 SSHD_PATTERN='^sshd: /usr/sbin/sshd'
 SUPERVISOR_PATTERN="^bash $SELF\$"
 
@@ -64,7 +67,13 @@ status() {
     fi
     st scanner "$SCANNER_PATTERN"
     st aria2 "$ARIA2_PATTERN"
-    if tunnel_enabled; then st cloudflared "$TUNNEL_PATTERN"; else echo "cloudflared: DISABLED"; fi
+    if tunnel_enabled; then
+        local i up=0
+        for i in $(seq 1 "$TUNNEL_REPLICAS"); do pgrep -f "$(tunnel_pattern "$i")" >/dev/null && up=$((up + 1)); done
+        if [ "$up" = "$TUNNEL_REPLICAS" ]; then echo "cloudflared: RUNNING ($up/$TUNNEL_REPLICAS)"; else echo "cloudflared: DOWN ($up/$TUNNEL_REPLICAS)"; fi
+    else
+        echo "cloudflared: DISABLED"
+    fi
     if ssh_enabled; then st sshd "$SSHD_PATTERN"; else echo "sshd: DISABLED"; fi
 }
 
@@ -181,16 +190,23 @@ ensure_ffmpeg_links() {
 # Some sandboxes resolve every name to a fake-ip proxy range (198.18.0.0/15), so cloudflared
 # cannot reach the real tunnel edge. Pin the edge names in /etc/hosts (idempotent; /etc may
 # be reset, so this also runs before every cloudflared start).
+# Several IPs per region: each replica's 4 connections need distinct edge IPs, and spreading
+# replicas over more IPs avoids piling every connection onto the same two edges.
 TUNNEL_EDGE_HOSTS='198.41.192.27 region1.v2.argotunnel.com
-198.41.200.53 region2.v2.argotunnel.com'
+198.41.192.67 region1.v2.argotunnel.com
+198.41.192.107 region1.v2.argotunnel.com
+198.41.200.53 region2.v2.argotunnel.com
+198.41.200.13 region2.v2.argotunnel.com
+198.41.200.73 region2.v2.argotunnel.com'
 fix_tunnel_edge_dns() {
-    local ip host
+    local ip host missing=0
     while read -r ip host; do
-        grep -qxF "$ip $host" /etc/hosts 2>/dev/null && continue
-        sed -i "/[[:space:]]$host\$/d" /etc/hosts
-        echo "$ip $host" >> /etc/hosts
-        log "pinned $host -> $ip in /etc/hosts"
+        grep -qxF "$ip $host" /etc/hosts 2>/dev/null || missing=1
     done <<< "$TUNNEL_EDGE_HOSTS"
+    [ "$missing" = 0 ] && return 0
+    sed -i '/[[:space:]]region[12]\.v2\.argotunnel\.com$/d' /etc/hosts
+    echo "$TUNNEL_EDGE_HOSTS" >> /etc/hosts
+    log "pinned tunnel edge hosts in /etc/hosts"
 }
 
 sshd_prepared() {
@@ -202,7 +218,11 @@ prepare_sshd() {
     local key
     if [ ! -x /usr/sbin/sshd ]; then
         log "installing openssh-server"
-        apt_install openssh-server || { log "openssh-server install failed"; return 1; }
+        # apt often can't reach Debian through the proxy; try the local deb cache first.
+        if ls "$DIR"/debs/openssh/*.deb >/dev/null 2>&1; then
+            DEBIAN_FRONTEND=noninteractive dpkg -i "$DIR"/debs/openssh/*.deb >/dev/null 2>&1 || true
+        fi
+        [ -x /usr/sbin/sshd ] || apt_install openssh-server || { log "openssh-server install failed"; return 1; }
     fi
     install -d -m 700 "$STATE/ssh"
     # Keep host keys in the project dir so a rebuilt box presents the same fingerprint.
@@ -350,11 +370,14 @@ while true; do
         log "starting sshd"
         /usr/sbin/sshd 9>&- || log "sshd failed to start"
     fi
-    if tunnel_enabled && [ -x "$DIR/bin/cloudflared" ] && ! pgrep -f "$TUNNEL_PATTERN" >/dev/null; then
-        log "starting cloudflared"
-        fix_tunnel_edge_dns
-        setsid "$DIR/bin/cloudflared" --no-autoupdate tunnel --protocol http2 run --token-file "$STATE/tunnel.token" \
-            9>&- </dev/null >>"$DIR/cloudflared.log" 2>&1 &
+    if tunnel_enabled && [ -x "$DIR/bin/cloudflared" ]; then
+        for i in $(seq 1 "$TUNNEL_REPLICAS"); do
+            pgrep -f "$(tunnel_pattern "$i")" >/dev/null && continue
+            log "starting cloudflared replica $i"
+            fix_tunnel_edge_dns
+            setsid "$DIR/bin/cloudflared" --no-autoupdate tunnel --metrics "127.0.0.1:$((20240 + i))" --protocol http2 \
+                run --token-file "$STATE/tunnel.token" 9>&- </dev/null >>"$DIR/cloudflared.log" 2>&1 &
+        done
     fi
     if [ -f "$DIR/app.py" ] && [ -x "$DIR/venv/bin/python" ]; then
         if [ -x "$DIR/bin/aria2c" ] && [ -f "$DIR/aria2/aria2.conf" ] && ! pgrep -f "$ARIA2_PATTERN" >/dev/null; then
