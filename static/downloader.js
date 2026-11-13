@@ -581,23 +581,41 @@
                     return self.rpc('aria2.removeDownloadResult', [t.gid]).catch(function () {});
                 });
             },
-            removeTask: function (t) {
-                var self = this;
-                if (['active', 'waiting', 'paused'].indexOf(t.status) >= 0) {
-                    return this.rpc('aria2.forceRemove', [t.gid]).then(function () {
-                        return self.rpc('aria2.removeDownloadResult', [t.gid]).catch(function () {});
-                    });
-                }
-                return this.rpc('aria2.removeDownloadResult', [t.gid]);
+            // 服务端停止任务并删除未完成的残留文件（已完成的文件保留），再删记录
+            removeTasks: function (tasks) {
+                var gids = tasks.map(function (t) { return t.gid; });
+                return axios.post('/api/aria2/remove', {gids: gids}).then(function (r) {
+                    var data = r.data || {};
+                    if (data.code !== 200) throw new Error(data.msg || '删除失败');
+                    return data;
+                }).catch(function (e) {
+                    var msg = (e.response && e.response.data && e.response.data.msg) || e.message;
+                    throw new Error(msg);
+                });
+            },
+            removeNotice: function (data) {
+                var failed = (data.failed || []).length;
+                var text = '已删除 ' + data.removed + ' 项' + (data.files ? '，清理残留文件 ' + data.files + ' 个' : '');
+                if (failed) this.notify(text + '；' + failed + ' 项失败：' + data.failed[0].msg, 'error');
+                else this.notify(text);
             },
             runOne: function (t, action) {
                 if (action === 'pause') return this.rpc('aria2.forcePause', [t.gid]);
                 if (action === 'resume') return this.rpc('aria2.unpause', [t.gid]);
                 if (action === 'retry') return this.retryTask(t);
-                return this.removeTask(t);
+                return this.removeTasks([t]);
             },
             act: function (t, action) {
                 var self = this;
+                if (action === 'remove') {
+                    this.removeTasks([t]).then(function (data) {
+                        self.removeNotice(data);
+                        if (self.detail && self.detail.gid === t.gid) self.modals.detailModal.hide();
+                        delete self.selected[t.gid];
+                        self.refresh();
+                    }).catch(function (e) { self.notify('操作失败：' + e.message, 'error'); });
+                    return;
+                }
                 var go = function () {
                     self.runOne(t, action).then(function () {
                         self.notify({pause: '已暂停', resume: '已开始', retry: '已重新创建任务', remove: '已删除任务'}[action]);
@@ -617,6 +635,17 @@
                     return true;
                 });
                 if (!targets.length) return;
+                if (action === 'remove') {
+                    this.removeTasks(targets).then(function (data) {
+                        self.removeNotice(data);
+                    }).catch(function (e) {
+                        self.notify('删除失败：' + e.message, 'error');
+                    }).then(function () {
+                        self.selected = {};
+                        self.refresh();
+                    });
+                    return;
+                }
                 var go = function () {
                     Promise.allSettled(targets.map(function (t) { return self.runOne(t, action); })).then(function (results) {
                         var failed = results.filter(function (r) { return r.status === 'rejected'; }).length;

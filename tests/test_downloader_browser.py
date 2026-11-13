@@ -12,6 +12,7 @@ import copy
 import importlib
 import json
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -178,6 +179,8 @@ class DownloaderBrowserTests(unittest.TestCase):
         scanner.app.view_functions['aria2_jsonrpc_proxy'] = lambda: scanner.jsonify(cls.fake.handle(scanner.request.get_json()))
         # /api/aria2/task_list runs for real; only its HTTP call to Aria2 is answered by the fake.
         scanner.aria2_multicall = lambda calls: [cls.fake.handle({'method': m, 'params': list(p)})['result'] for m, p in calls]
+        # /api/aria2/remove runs for real; its Aria2 calls are answered by the fake.
+        scanner.call_aria2_rpc = lambda method, params: cls.fake.handle({'method': method, 'params': list(params)})['result']
         cls.server = make_server('127.0.0.1', 0, scanner.app, threaded=True)
         cls.base = 'http://127.0.0.1:%d' % cls.server.server_port
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
@@ -258,8 +261,29 @@ class DownloaderBrowserTests(unittest.TestCase):
         page.locator('.sdl-item').first.locator('[title="删除"]').click()
         page.wait_for_function("document.querySelectorAll('.sdl-item').length === 0")
         self.assertFalse(page.locator('#confirmModal').is_visible())
-        self.assertIn('aria2.forceRemove', self.fake.methods())
-        self.assertIn('aria2.removeDownloadResult', self.fake.methods())
+        self.assertIn(('aria2.forceRemove', ['w1']), self.fake.calls)
+        self.assertIn(('aria2.removeDownloadResult', ['w1']), self.fake.calls)
+
+    def test_delete_paused_task_removes_partial_files(self):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        partial = os.path.join(root, '中文电影.mkv')
+        for path in (partial, partial + '.aria2'):
+            with open(path, 'wb') as handle:
+                handle.write(b'x')
+        task = self.fake.find('w1')
+        task['dir'] = root
+        task['files'][0]['path'] = partial
+        page = self.open()
+        page.locator('.sdl-list-btn').nth(1).click()
+        page.locator('.sdl-item', has_text='中文电影').wait_for()
+        with mock.patch.object(self.scanner, 'get_final_config', return_value={'scan_path': root}):
+            page.locator('.sdl-item', has_text='中文电影').locator('[title="删除"]').click()
+            page.wait_for_function("document.querySelectorAll('.sdl-item').length === 0")
+        self.assertFalse(os.path.exists(partial))
+        self.assertFalse(os.path.exists(partial + '.aria2'))
+        self.assertIn(('aria2.forceRemove', ['w1']), self.fake.calls)
+        page.wait_for_function("[...document.querySelectorAll('.toast')].some(e => e.textContent.includes('清理残留文件 2 个'))")
 
     def test_retry_failed_task_reuses_uri_and_options(self):
         page = self.open()

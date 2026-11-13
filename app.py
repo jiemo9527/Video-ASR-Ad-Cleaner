@@ -71,7 +71,7 @@ app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('SCANNER_DATABASE_URI', '
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
 
-APP_VERSION = os.environ.get('APP_VERSION', 'v20261105')
+APP_VERSION = os.environ.get('APP_VERSION', 'v20261113')
 
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
@@ -3074,6 +3074,201 @@ def aria2_rename_download():
     except OSError as e:
         return jsonify({'code': 500, 'msg': f'重命名文件失败: {e}'}), 500
     return jsonify({'code': code, 'msg': msg}), code
+
+
+# 下载器删除：下载中/等待中/暂停、出错和已移除的任务连同未完成的残留文件一起删除；
+# 已完成（含已下完在做种的 BT）只删记录，文件留给检测上传流程。Aria2 对暂停任务的
+# forceRemove 不触发 on-download-stop，所以残留文件由这里删除，而不是依赖 delete.sh。
+ARIA2_REMOVE_RUNNING_STATUSES = ('active', 'waiting', 'paused')
+ARIA2_REMOVE_FILE_STATUSES = ARIA2_REMOVE_RUNNING_STATUSES + ('error', 'removed')
+# 11/12：同一文件或种子正由其他任务下载；13：目标文件已存在。这些路径不属于本任务，不能删。
+ARIA2_FOREIGN_FILE_ERROR_CODES = ('11', '12', '13')
+ARIA2_REMOVE_STATUS_KEYS = ['gid', 'status', 'dir', 'files', 'bittorrent',
+                            'totalLength', 'completedLength', 'errorCode']
+ARIA2_REMOVE_MAX_GIDS = 1000
+
+
+def path_strictly_inside(path, root):
+    try:
+        return path != root and os.path.commonpath([path, root]) == root
+    except ValueError:
+        return False
+
+
+def aria2_entry_finished(entry):
+    try:
+        total = int(entry.get('totalLength') or 0)
+        done = int(entry.get('completedLength') or 0)
+    except (TypeError, ValueError):
+        return False
+    return total > 0 and done >= total
+
+
+def aria2_residual_targets(entry, scan_path):
+    """未完成下载在 scan_path 内的残留：返回 (文件列表, [(删空后要清理的目录, 不越过的上级)])。
+
+    只认有 .aria2 控制文件的下载（与 delete.sh 相同的判据），已下完、
+    路径属于其他任务或在 scan_path 外的一律不动。
+    """
+    if not isinstance(entry, dict) or entry.get('status') not in ARIA2_REMOVE_FILE_STATUSES:
+        return [], []
+    if str(entry.get('errorCode') or '0') in ARIA2_FOREIGN_FILE_ERROR_CODES or aria2_entry_finished(entry):
+        return [], []
+    scan_root = os.path.realpath(str(scan_path or '').strip() or os.sep)
+    if not scan_path or scan_root == os.path.realpath(os.sep):
+        return [], []
+    task_dir = os.path.realpath(str(entry.get('dir') or '')) if entry.get('dir') else ''
+    paths = []
+    for item in entry.get('files') or []:
+        path = str((item or {}).get('path') or '') if isinstance(item, dict) else ''
+        if path and os.path.isabs(path) and not os.path.basename(path).startswith('[METADATA]'):
+            paths.append(os.path.realpath(path))
+    paths = [p for p in dict.fromkeys(paths) if path_strictly_inside(p, scan_root)]
+
+    targets, dirs = [], []
+    bittorrent = entry.get('bittorrent')
+    if isinstance(bittorrent, dict):
+        name = str((bittorrent.get('info') or {}).get('name') or '')
+        if not name or not task_dir or os.sep in name or (os.altsep and os.altsep in name) or name in ('.', '..'):
+            return [], []
+        root = os.path.join(task_dir, name)
+        control = root + '.aria2'
+        if not path_strictly_inside(root, scan_root) or not os.path.isfile(control):
+            return [], []
+        targets = [p for p in paths if p == root or path_strictly_inside(p, root)] + [control]
+        if os.path.isdir(root):
+            dirs.append((root, task_dir))
+    else:
+        for path in paths:
+            control = path + '.aria2'
+            if os.path.isfile(control):
+                targets.extend([path, control])
+                parent = os.path.dirname(path)
+                if task_dir and path_strictly_inside(parent, task_dir) and path_strictly_inside(parent, scan_root):
+                    dirs.append((parent, task_dir))
+    return targets, dirs
+
+
+def remove_empty_dirs(root, stop):
+    """自底向上删掉 root 内（含 root）的空目录，不越过 stop。"""
+    if not os.path.isdir(root) or not path_strictly_inside(root, stop):
+        return
+    for current, _, _ in sorted(os.walk(root), key=lambda item: -len(item[0])):
+        try:
+            os.rmdir(current)
+        except OSError:
+            pass
+    parent = os.path.dirname(root)
+    while path_strictly_inside(parent, stop):
+        try:
+            os.rmdir(parent)
+        except OSError:
+            break
+        parent = os.path.dirname(parent)
+
+
+def delete_aria2_residual_files(entry, scan_path, busy_paths=()):
+    targets, dirs = aria2_residual_targets(entry, scan_path)
+    if any(target in busy_paths for target in targets):
+        return 0
+    deleted = 0
+    for target in targets:
+        try:
+            if os.path.isfile(target) or os.path.islink(target):
+                os.remove(target)
+                deleted += 1
+        except FileNotFoundError:
+            pass  # on-download-stop 的 delete.sh 可能已经删掉
+    for directory, stop in dirs:
+        remove_empty_dirs(directory, stop)
+    return deleted
+
+
+def remove_aria2_downloads(gids):
+    """删除下载任务；返回 {'removed', 'files', 'failed': [{'gid', 'msg'}]}。"""
+    scan_path = str(get_final_config(None).get('scan_path') or '').strip()
+    removed, files = 0, 0
+    failed: list = []
+    entries = {}
+    for gid in gids:
+        try:
+            entries[gid] = call_aria2_rpc('aria2.tellStatus', [gid, ARIA2_REMOVE_STATUS_KEYS]) or {}
+        except RuntimeError as e:
+            failed.append({'gid': gid, 'msg': str(e)})
+
+    running = [gid for gid, entry in entries.items() if entry.get('status') in ARIA2_REMOVE_RUNNING_STATUSES]
+    for gid in running:
+        try:
+            call_aria2_rpc('aria2.forceRemove', [gid])
+        except RuntimeError as e:
+            failed.append({'gid': gid, 'msg': str(e)})
+            entries.pop(gid, None)
+    # 等 Aria2 真正停下、释放文件后再删，避免文件被重新写回
+    pending = {gid for gid in running if gid in entries}
+    deadline = time.time() + ARIA2_PAUSE_WAIT_SECONDS
+    while pending and time.time() < deadline:
+        for gid in list(pending):
+            try:
+                status = (call_aria2_rpc('aria2.tellStatus', [gid, ['status']]) or {}).get('status')
+            except RuntimeError:
+                status = 'removed'
+            if status not in ARIA2_REMOVE_RUNNING_STATUSES:
+                pending.discard(gid)
+        if pending:
+            time.sleep(0.1)
+    for gid in pending:
+        failed.append({'gid': gid, 'msg': 'Aria2 停止任务超时，未删除文件'})
+        entries.pop(gid, None)
+
+    # 已结束记录的路径可能已被重试出的新任务接着用，那些路径不能删
+    busy = set()
+    live, live_error = [], ''
+    if any(entry.get('status') not in ARIA2_REMOVE_RUNNING_STATUSES for entry in entries.values()):
+        try:
+            live = list(call_aria2_rpc('aria2.tellActive', [['gid', 'files']]) or [])
+            live += call_aria2_rpc('aria2.tellWaiting', [0, 1000, ['gid', 'files']]) or []
+        except RuntimeError as e:
+            live = None
+            live_error = str(e)
+        for item in live or []:
+            if item.get('gid') in entries:
+                continue
+            for f in item.get('files') or []:
+                if isinstance(f, dict) and f.get('path'):
+                    busy.add(os.path.realpath(str(f['path'])))
+
+    for gid, entry in entries.items():
+        stopped = entry.get('status') not in ARIA2_REMOVE_RUNNING_STATUSES
+        if stopped and live is None:
+            failed.append({'gid': gid, 'msg': f'无法确认文件是否被其他任务占用: {live_error}'})
+            continue
+        try:
+            files += delete_aria2_residual_files(entry, scan_path, busy if stopped else ())
+        except OSError as e:
+            failed.append({'gid': gid, 'msg': f'删除残留文件失败: {e}'})
+            continue
+        try:
+            call_aria2_rpc('aria2.removeDownloadResult', [gid])
+        except RuntimeError as e:
+            failed.append({'gid': gid, 'msg': str(e)})
+            continue
+        removed += 1
+        with downloader_file_cache_lock:
+            downloader_file_cache.pop(gid, None)
+    if files:
+        print(f"🗑️ 下载器删除 {removed} 个任务，清理残留文件 {files} 个")
+    return {'removed': removed, 'files': files, 'failed': failed}
+
+
+@app.route('/api/aria2/remove', methods=['POST'])
+@login_required
+def aria2_remove_downloads():
+    gids = (request.get_json(silent=True) or {}).get('gids')
+    if (not isinstance(gids, list) or not gids or len(gids) > ARIA2_REMOVE_MAX_GIDS
+            or not all(isinstance(g, str) and re.fullmatch(r'[0-9A-Za-z]{1,16}', g) for g in gids)):
+        return jsonify({'code': 400, 'msg': '无效的任务 GID'}), 400
+    result = remove_aria2_downloads(list(dict.fromkeys(gids)))
+    return jsonify(dict(result, code=200))
 
 
 @app.route('/api/aria2/task_list', methods=['POST'])
