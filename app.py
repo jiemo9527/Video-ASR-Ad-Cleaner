@@ -21,7 +21,9 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from database import db, Task, Config, Keyword, User
 from core_logic import (ScannerCore, sensevoice_gguf_ready, VIDEO_EXTENSIONS, deduplicate_keyword_values,
                         normalize_keyword_identity, DISCARD_DOWNLOAD_EXTENSIONS, is_discarded_download_name,
+                        is_subtitle_download_name,
                         system_log_backend, read_system_log_tail, clear_system_log_file)
+from urllib.parse import unquote, urlsplit
 from sqlalchemy import text
 from monitor import monitor_login_return, register_monitor
 
@@ -1063,7 +1065,333 @@ def discard_download_worker():
             pass
         except Exception as e:
             print(f"⚠️ 丢弃下载兜底扫描失败: {e}")
+        try:
+            with app.app_context():
+                capture_subtitle_aria2_downloads()
+        except RuntimeError:
+            pass
+        except Exception as e:
+            print(f"⚠️ 字幕下载接管扫描失败: {e}")
         time.sleep(5)
+
+
+# 隐式字幕队列：单文件非 BT 的字幕下载（ass/srt 等）不进 Aria2 常规队列，由 Scanner 直接下载，
+# 同时最多 SUBTITLE_DOWNLOAD_CONCURRENCY 个。网盘给字幕的直链有效期很短，排在大文件后面会过期。
+# 经 /api/aria2/jsonrpc 的 addUri 直接接管（返回合成 GID）；经 Nginx 直连 RPC 加入的由兜底扫描
+# 从 Aria2 移出后接管。队列只在内存中，不在下载器中显示；完成后按 Aria2 完成回调同样入检测队列。
+SUBTITLE_DOWNLOAD_CONCURRENCY = 20
+SUBTITLE_DOWNLOAD_QUEUE_MAX = 5000
+SUBTITLE_DOWNLOAD_MAX_BYTES = 200 * 1024 * 1024
+SUBTITLE_DOWNLOAD_ATTEMPTS = 3
+SUBTITLE_DOWNLOAD_RETRY_WAIT = 2
+SUBTITLE_ARIA2_STATUSES = ('active', 'waiting', 'paused')
+subtitle_download_queue = queue.Queue()
+subtitle_download_lock = threading.Lock()
+subtitle_download_state: dict = {'pending': 0, 'running': 0, 'targets': set(), 'started': False}
+# 直接下载时沿用的 Aria2 全局选项（任务选项优先），与原本交给 Aria2 下载时一致
+SUBTITLE_GLOBAL_OPTION_KEYS = ('dir', 'user-agent', 'referer', 'header', 'all-proxy', 'http-proxy',
+                               'https-proxy', 'check-certificate')
+
+
+def subtitle_download_counts():
+    with subtitle_download_lock:
+        return subtitle_download_state['pending'], subtitle_download_state['running']
+
+
+def get_subtitle_download_name(method, params):
+    """addUri 请求是否为字幕单文件下载；丢弃规则优先。返回显示名或空串。"""
+    if method != 'aria2.addUri':
+        return ''
+    args = strip_aria2_rpc_token(params)
+    uris = next((item for item in args if isinstance(item, list)), [])
+    options = next((item for item in args if isinstance(item, dict)), {})
+    uri_names = [str(uri) for uri in uris if isinstance(uri, str) and uri.strip()]
+    if not uri_names:
+        return ''
+    out_name = str(options.get('out') or '').strip()
+    if out_name:
+        return out_name if is_subtitle_download_name(out_name) else ''
+    return uri_names[0] if all(is_subtitle_download_name(uri) for uri in uri_names) else ''
+
+
+def subtitle_header_lines(value):
+    lines = value if isinstance(value, list) else str(value or '').splitlines()
+    headers = {}
+    for line in lines:
+        name, sep, val = str(line).partition(':')
+        if sep and name.strip():
+            headers[name.strip()] = val.strip()
+    return headers
+
+
+def subtitle_uri_filename(uri):
+    name = unquote(urlsplit(str(uri)).path.rstrip('/').rsplit('/', 1)[-1])
+    return name.replace('\\', '_')
+
+
+def resolve_subtitle_target(job):
+    """按 Aria2 规则得到保存路径：dir + out（可含子目录），没有 out 时取 URI 文件名。"""
+    options = job.get('options') or {}
+    directory = str(options.get('dir') or job.get('default_dir') or '').strip()
+    if not directory or not os.path.isabs(directory):
+        raise ValueError('无法确定保存目录')
+    out = str(options.get('out') or '').strip().replace('\\', '/')
+    if not out:
+        out = subtitle_uri_filename(job['uris'][0])
+    parts = out.split('/')
+    if os.path.isabs(out) or any(part in ('', '.', '..') for part in parts) or any('\x00' in p for p in parts):
+        raise ValueError(f'文件名无效: {out}')
+    return os.path.abspath(os.path.join(directory, *parts))
+
+
+def unique_subtitle_path(path):
+    """目标已存在时与 Aria2 auto-file-renaming 一样改成 name.1.ext。"""
+    if not os.path.exists(path) and not os.path.exists(path + '.aria2'):
+        return path
+    stem, ext = os.path.splitext(path)
+    for index in range(1, 10000):
+        candidate = f'{stem}.{index}{ext}'
+        if not os.path.exists(candidate) and not os.path.exists(candidate + '.aria2'):
+            return candidate
+    raise ValueError('同名文件过多')
+
+
+def subtitle_request_kwargs(options):
+    headers = subtitle_header_lines(options.get('header'))
+    user_agent = str(options.get('user-agent') or '').strip()
+    if user_agent:
+        headers['User-Agent'] = user_agent
+    if options.get('referer') and options.get('referer') != '*':
+        headers['Referer'] = str(options['referer'])
+    kwargs = {'headers': headers, 'timeout': (10, 60), 'stream': True, 'allow_redirects': True}
+    proxy = options.get('all-proxy') or ''
+    proxies = {}
+    for scheme in ('http', 'https'):
+        value = options.get(f'{scheme}-proxy') or proxy
+        if value:
+            proxies[scheme] = str(value)
+    if proxies:
+        kwargs['proxies'] = proxies
+    if str(options.get('check-certificate', 'true')).lower() == 'false':
+        kwargs['verify'] = False
+    return kwargs
+
+
+def fetch_subtitle_file(uris, kwargs, target):
+    """依次尝试各镜像；网络错误和 5xx 重试，4xx（如直链过期 403）换下一个镜像。"""
+    errors = []
+    pending = list(dict.fromkeys(uris))
+    for attempt in range(SUBTITLE_DOWNLOAD_ATTEMPTS):
+        retry = []
+        for uri in pending:
+            part = target + '.scanner-part'
+            try:
+                with requests.get(uri, **kwargs) as response:
+                    if response.status_code >= 400:
+                        errors.append(f'HTTP {response.status_code}')
+                        if response.status_code >= 500 or response.status_code == 429:
+                            retry.append(uri)
+                        continue
+                    size = 0
+                    with open(part, 'wb') as handle:
+                        for chunk in response.iter_content(65536):
+                            size += len(chunk)
+                            if size > SUBTITLE_DOWNLOAD_MAX_BYTES:
+                                raise ValueError('字幕文件过大')
+                            handle.write(chunk)
+                os.replace(part, target)
+                return size, ''
+            except requests.RequestException as e:
+                errors.append(type(e).__name__)
+                retry.append(uri)
+            except ValueError as e:
+                errors.append(str(e))
+            finally:
+                if os.path.exists(part):
+                    try:
+                        os.remove(part)
+                    except OSError:
+                        pass
+        pending = retry
+        if not pending:
+            break
+        if attempt + 1 < SUBTITLE_DOWNLOAD_ATTEMPTS:
+            time.sleep(SUBTITLE_DOWNLOAD_RETRY_WAIT)
+    return None, '、'.join(dict.fromkeys(errors)) or '没有可用链接'
+
+
+def run_subtitle_download(job):
+    """下载一个字幕任务，成功后入检测队列；返回保存路径，失败返回空串。"""
+    name = job.get('name') or job['uris'][0]
+    try:
+        target = resolve_subtitle_target(job)
+    except ValueError as e:
+        print(f"⚠️ 字幕下载跳过 {name}: {e}")
+        return ''
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        target = unique_subtitle_path(target)
+    except (OSError, ValueError) as e:
+        print(f"⚠️ 字幕下载失败 {name}: {e}")
+        return ''
+    kwargs = subtitle_request_kwargs(job.get('options') or {})
+    try:
+        size, error = fetch_subtitle_file(job['uris'], kwargs, target)
+    except OSError as e:
+        size, error = None, str(e)
+    if size is None:
+        print(f"⚠️ 字幕下载失败 {os.path.basename(target)}: {error}")
+        return ''
+    print(f"📝 字幕队列已下载 {os.path.basename(target)} ({size} B)")
+    try:
+        create_trigger_task(target, source='字幕队列下载完成')
+    except Exception as e:
+        safe_db_rollback('subtitle_trigger')
+        print(f"⚠️ 字幕入检测队列失败 {os.path.basename(target)}: {e}")
+    return target
+
+
+def subtitle_job_key(job):
+    options = job.get('options') or {}
+    return (str(options.get('dir') or job.get('default_dir') or ''),
+            str(options.get('out') or '') or subtitle_uri_filename(job['uris'][0]))
+
+
+def enqueue_subtitle_download(uris, options, name='', default_dir=''):
+    uris = [str(u) for u in uris if isinstance(u, str) and u.strip()]
+    if not uris:
+        return False
+    job = {'uris': uris, 'options': dict(options or {}), 'name': name, 'default_dir': default_dir}
+    if not default_dir and not job['options'].get('dir'):
+        job['default_dir'] = str(get_final_config(None).get('scan_path') or '')
+    key = subtitle_job_key(job)
+    with subtitle_download_lock:
+        if key in subtitle_download_state['targets']:
+            return False
+        if subtitle_download_state['pending'] >= SUBTITLE_DOWNLOAD_QUEUE_MAX:
+            print(f"⚠️ 字幕队列已满，丢弃: {name or uris[0]}")
+            return False
+        subtitle_download_state['targets'].add(key)
+        subtitle_download_state['pending'] += 1
+    job['key'] = key
+    subtitle_download_queue.put(job)
+    return True
+
+
+def subtitle_download_worker():
+    while True:
+        job = subtitle_download_queue.get()
+        with subtitle_download_lock:
+            subtitle_download_state['pending'] -= 1
+            subtitle_download_state['running'] += 1
+        try:
+            with app.app_context():
+                try:
+                    global_options = call_aria2_rpc('aria2.getGlobalOption', []) or {}
+                except RuntimeError:
+                    global_options = {}
+                options = job.setdefault('options', {})
+                for key in SUBTITLE_GLOBAL_OPTION_KEYS:
+                    if not options.get(key) and global_options.get(key):
+                        options[key] = global_options[key]
+                run_subtitle_download(job)
+        except Exception as e:
+            print(f"⚠️ 字幕下载异常 {job.get('name')}: {e}")
+        finally:
+            with subtitle_download_lock:
+                subtitle_download_state['running'] -= 1
+                subtitle_download_state['targets'].discard(job.get('key'))
+            subtitle_download_queue.task_done()
+
+
+def start_subtitle_download_workers():
+    with subtitle_download_lock:
+        if subtitle_download_state['started']:
+            return
+        subtitle_download_state['started'] = True
+    for _ in range(SUBTITLE_DOWNLOAD_CONCURRENCY):
+        threading.Thread(target=subtitle_download_worker, daemon=True).start()
+
+
+def get_aria2_subtitle_task(entry):
+    """Aria2 中未下完的单文件非 BT 字幕任务；返回 (路径, URI 列表)，否则 None。"""
+    if not isinstance(entry, dict) or entry.get('bittorrent') or entry.get('status') not in SUBTITLE_ARIA2_STATUSES:
+        return None
+    files = entry.get('files')
+    if not isinstance(files, list) or len(files) != 1 or not isinstance(files[0], dict):
+        return None
+    if aria2_entry_finished(entry):
+        return None
+    path = str(files[0].get('path') or '')
+    uris = list(dict.fromkeys(u.get('uri') for u in files[0].get('uris') or [] if isinstance(u, dict) and u.get('uri')))
+    if not uris:
+        return None
+    if path:
+        if not is_subtitle_download_name(path):
+            return None
+    elif not all(is_subtitle_download_name(u) for u in uris):
+        return None
+    return path, uris
+
+
+def capture_subtitle_aria2_downloads():
+    """兜底：把经直连 RPC 等途径进入 Aria2 的字幕任务移出常规队列，转入字幕队列。"""
+    config = get_final_config(None)
+    keys = ['gid', 'status', 'files', 'bittorrent', 'totalLength', 'completedLength', 'dir']
+    entries = list(call_aria2_rpc('aria2.tellActive', [keys]) or [])
+    entries += list_aria2_waiting(keys)
+    captured = 0
+    for entry in entries:
+        found = get_aria2_subtitle_task(entry)
+        gid = str(entry.get('gid') or '')
+        if not found or not gid or get_aria2_task_discard_name(entry, config):
+            continue
+        path, uris = found
+        try:
+            options = dict(call_aria2_rpc('aria2.getOption', [gid]) or {})
+        except RuntimeError:
+            continue
+        directory = str(options.get('dir') or entry.get('dir') or '')
+        if path and directory:
+            norm_dir = directory.replace('\\', '/').rstrip('/') + '/'
+            norm_path = path.replace('\\', '/')
+            if norm_path.startswith(norm_dir):
+                options['out'] = norm_path[len(norm_dir):]
+        try:
+            call_aria2_rpc('aria2.forceRemove', [gid])
+        except RuntimeError as e:
+            print(f"⚠️ 字幕任务移出 Aria2 失败 {gid}: {e}")
+            continue
+        # 等 Aria2 停下再清理残留，避免 delete.sh/Aria2 之后改动刚下载的文件
+        deadline = time.time() + ARIA2_PAUSE_WAIT_SECONDS
+        while time.time() < deadline:
+            try:
+                if (call_aria2_rpc('aria2.tellStatus', [gid, ['status']]) or {}).get('status') not in SUBTITLE_ARIA2_STATUSES:
+                    break
+            except RuntimeError:
+                break
+            time.sleep(0.1)
+        else:
+            print(f"⚠️ 字幕任务移出 Aria2 超时 {gid}")
+            continue
+        try:
+            delete_aria2_residual_files(dict(entry, status='removed'), config.get('scan_path'))
+        except OSError:
+            pass
+        try:
+            call_aria2_rpc('aria2.removeDownloadResult', [gid])
+        except RuntimeError:
+            pass
+        with downloader_file_cache_lock:
+            downloader_file_cache.pop(gid, None)
+        options.pop('gid', None)
+        options.pop('pause', None)
+        name = os.path.basename(path.replace('\\', '/')) if path else subtitle_uri_filename(uris[0])
+        if enqueue_subtitle_download(uris, options, name):
+            captured += 1
+    if captured:
+        print(f"📝 已将 {captured} 个字幕下载移出 Aria2 队列，转入字幕队列")
+    return captured
 
 
 # 下载无进度自动暂停：下载中任务的已下载字节数连续 N 秒没有增加就 forcePause，
@@ -2680,6 +3008,8 @@ def plan_aria2_rpc_command(command):
             if name:
                 placeholders[index] = make_fake_gid()
                 print(f"🚫 已丢弃下载请求（后缀规则）: {name}")
+            elif take_subtitle_download(call.get('methodName'), call.get('params')):
+                placeholders[index] = make_fake_gid()
             else:
                 kept.append((index, call))
         if not placeholders:
@@ -2702,7 +3032,25 @@ def plan_aria2_rpc_command(command):
         print(f"🚫 已丢弃下载请求（后缀规则）: {name}")
         plan['forward'] = None
         plan['gid'] = make_fake_gid()
+    elif take_subtitle_download(method, command.get('params')):
+        plan['forward'] = None
+        plan['gid'] = make_fake_gid()
     return plan
+
+
+def take_subtitle_download(method, params):
+    """字幕 addUri 不转发给 Aria2，直接放进隐式字幕队列；返回是否已接管。"""
+    name = get_subtitle_download_name(method, params)
+    if not name:
+        return False
+    args = strip_aria2_rpc_token(params)
+    uris = next((item for item in args if isinstance(item, list)), [])
+    options = next((item for item in args if isinstance(item, dict)), {})
+    options = {k: v for k, v in options.items() if k not in ('gid', 'pause')}
+    display = subtitle_uri_filename(name) if '://' in name else os.path.basename(name.replace('\\', '/'))
+    if enqueue_subtitle_download(uris, options, display or name):
+        print(f"📝 字幕下载已转入字幕队列: {display or name}")
+    return True
 
 
 def build_local_rpc_response(command, plan):
@@ -3369,10 +3717,11 @@ def scanner_status():
         aria2_ok = False
 
     scanner_busy = (detect_pending + upload_pending + in_memory_active) > 0
+    subtitle_pending, subtitle_running = subtitle_download_counts()
     # Fail-safe: if aria2 or the DB cannot be read we cannot PROVE idleness, so
     # report busy. A caller must never act on an unknown state.
     aria2_busy = (not aria2_ok) or (aria2_active or 0) > 0 or (aria2_waiting_runnable or 0) > 0
-    busy = bool(scanner_busy or aria2_busy or (not db_ok))
+    busy = bool(scanner_busy or aria2_busy or (not db_ok) or subtitle_pending or subtitle_running)
 
     return jsonify({
         "code": 200,
@@ -3388,6 +3737,8 @@ def scanner_status():
         "aria2_waiting": aria2_waiting,
         "aria2_paused": aria2_paused,
         "aria2_waiting_runnable": aria2_waiting_runnable,
+        "subtitle_pending": subtitle_pending,
+        "subtitle_running": subtitle_running,
     })
 
 
@@ -4226,6 +4577,7 @@ if __name__ == '__main__':
     for _ in range(n_u): threading.Thread(target=upload_worker, daemon=True).start()
     threading.Thread(target=orphan_reconcile_worker, daemon=True).start()
     threading.Thread(target=discard_download_worker, daemon=True).start()
+    start_subtitle_download_workers()
     threading.Thread(target=download_stall_worker, daemon=True).start()
     threading.Thread(target=disk_guard_worker, daemon=True).start()
     threading.Thread(target=download_idle_resume_worker, daemon=True).start()

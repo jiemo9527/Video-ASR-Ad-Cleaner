@@ -194,6 +194,23 @@ def is_discarded_download_name(name):
     return os.path.splitext(cleaned)[1].lower() in DISCARD_DOWNLOAD_EXTENSIONS
 
 
+# 字幕单文件下载不进 Aria2 常规队列，由 Scanner 隐式字幕队列直接下载。
+SUBTITLE_DOWNLOAD_EXTENSIONS = {
+    '.ass', '.ssa', '.srt', '.vtt', '.sub', '.idx', '.sup', '.smi', '.sami',
+    '.ttml', '.dfxp', '.usf'
+}
+
+
+def is_subtitle_download_name(name):
+    """文件名（或 URI）是否为字幕类型。"""
+    if not name:
+        return False
+    cleaned = str(name).strip().strip('"\'')
+    cleaned = cleaned.split('?', 1)[0].split('#', 1)[0]
+    cleaned = cleaned.replace('\\', '/').rstrip('/').rsplit('/', 1)[-1]
+    return bool(cleaned) and os.path.splitext(cleaned)[1].lower() in SUBTITLE_DOWNLOAD_EXTENSIONS
+
+
 # ===================================================
 
 def get_sensevoice_gguf_paths(base_dir=None):

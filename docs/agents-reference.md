@@ -90,6 +90,15 @@ Image/NFO download rejection:
 - `discard_download_worker()` polls `aria2.tellActive` / `aria2.tellWaiting` every 5s as the fallback for downloads added through the Nginx direct RPC route. It force-removes matching single-file non-torrent tasks, deletes the partial file and `.aria2` control file only inside `scan_path`, and removes the download result.
 - Tests live in `tests/test_discard_downloads.py`.
 
+Implicit subtitle download queue:
+
+- Why: cloud drives (e.g. 115) sign subtitle direct links with a much shorter lifetime than video links (observed: subtitle links already expired while video links had ~10h left). Queued behind large videos in Aria2 (`max-concurrent-downloads`), the link expired before the task started; Aria2 got `403 request expired`, and with `max-tries=0` + `retry-on-403=true` the task sat at 0 speed / `totalLength=0` forever.
+- Single-file non-BT subtitle downloads (`SUBTITLE_DOWNLOAD_EXTENSIONS` in `core_logic.py`: `.ass .ssa .srt .vtt .sub .idx .sup .smi .sami .ttml .dfxp .usf`; the `out` option decides when set, otherwise every URI must match) never use the regular Aria2 queue. `/api/aria2/jsonrpc` takes such `aria2.addUri` calls (also inside `system.multicall`) without forwarding them and answers with a synthetic GID, like the discard filter. Discard rules run first, so a discarded extension (e.g. custom `.srt`) is still dropped. Torrents/metalinks and multi-file tasks are untouched.
+- Downloads added through the Nginx direct RPC route are picked up by `capture_subtitle_aria2_downloads()` in the 5s `discard_download_worker()` loop: unfinished single-file non-BT subtitle tasks in active/waiting/paused are read with `getOption`, `forceRemove`d (waiting until Aria2 reports them stopped), their `.aria2` residue inside `scan_path` is deleted, the result removed, and they are re-queued with the resolved path relative to `dir` as `out`.
+- `subtitle_download_worker()` x `SUBTITLE_DOWNLOAD_CONCURRENCY` (20, fixed, no setting) download with `requests` using the task `dir`/`out`/`header`/`referer`/`user-agent`/proxy/`check-certificate` options, falling back to the Aria2 global options (`dir` falls back to `scan_path`). Paths must stay inside `dir` (no absolute/`..` parts); an existing target becomes `name.1.ext` like Aria2 `auto-file-renaming`. Data goes to `<target>.scanner-part` and is renamed on success; files over 200MB are refused. Network errors, 429 and 5xx retry up to 3 rounds; other 4xx (expired links) try the next mirror and then fail immediately, so an expired link fails within seconds instead of hanging. Success calls `create_trigger_task()` (source `字幕队列下载完成`), same as the Aria2 completion callback.
+- The queue is in-memory only (lost on restart; re-add the links), deduplicated by target `(dir, out)`, capped at 5000 pending, not shown in the downloader, and outside stall pause, disk guard and idle resume. Notices print to `scanner.log`. `/api/status` reports `subtitle_pending`/`subtitle_running` and counts them as busy.
+- Tests: `tests/test_subtitle_download_queue.py`.
+
 ## Installer And Nginx
 
 - `app.py` reads `SCANNER_HOST` (default `127.0.0.1`) and `SCANNER_PORT` (default `5000`). The installer writes both to the installed project's `scanner.env`; systemd reads it through `EnvironmentFile`, and `trigger.sh` reads the same file for its local callback URL. Updates preserve `scanner.env`, so the listen address survives `2. 更新`; never patch the host into `app.py`. Without `SCANNER_HOST` (installs predating this setting), Scanner listens only on `127.0.0.1`; set `SCANNER_HOST=0.0.0.0` in `scanner.env` and restart to restore direct public access.
@@ -136,6 +145,7 @@ Status probe endpoint:
 - It never mutates state. It reports `detect_pending`, `upload_pending`,
   `in_memory_active`, `queue_depth`, Aria2 `numActive`/`numWaiting`,
   `aria2_paused` and `aria2_waiting_runnable`, plus a `busy`/`idle` verdict.
+  `subtitle_pending`/`subtitle_running` (implicit subtitle queue) also count as busy.
 - Aria2 includes paused downloads in `numWaiting`; the probe pages through
   `aria2.tellWaiting` and treats only runnable waiting and active downloads as busy.
 - The verdict is fail-safe: when the database or Aria2 RPC cannot be read, or
