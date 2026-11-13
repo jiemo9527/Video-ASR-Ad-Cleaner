@@ -153,7 +153,7 @@ if ! command -v flock >/dev/null; then flock() { return 0; }; fi
         self.assertEqual(self.calls.read_text(encoding='utf-8'), first_calls)
         self.assertEqual((self.project / 'venv').resolve(), durable.resolve())
 
-    def test_sshd_repair_uses_apt_even_when_cached_debs_exist(self):
+    def test_sshd_repair_tries_cached_debs_before_apt(self):
         function = self.source[self.source.index('prepare_sshd() {'):self.source.index('# No init system')]
         script = '''set -eu
 DIR="$1"
@@ -171,7 +171,10 @@ ls() { return 0; }
                                 env=dict(os.environ, CALLS=shell_path(self.calls)),
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertEqual(self.calls.read_text(encoding='utf-8').splitlines(), ['apt openssh-server'])
+        calls = self.calls.read_text(encoding='utf-8').splitlines()
+        self.assertEqual(len(calls), 2, calls)
+        self.assertTrue(calls[0].startswith('dpkg -i ') and calls[0].endswith('/debs/openssh/*.deb'), calls)
+        self.assertEqual(calls[1], 'apt openssh-server')
 
 
 if __name__ == '__main__':
